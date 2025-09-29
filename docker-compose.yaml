@@ -1,0 +1,21 @@
+services:
+  db:
+    image: postgres:latest
+    container_name: taxee
+    environment:
+      POSTGRES_USER: pg
+      POSTGRES_PASSWORD: pwd
+      POSTGRES_DB: taxee
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./.data:/var/lib/postgresql/data
+
+  adminer:
+    image: adminer
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+
+
