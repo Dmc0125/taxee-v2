@@ -56,6 +56,7 @@ func main() {
 		}
 	case "fetch":
 		// fetch txs
+		assert.True(appEnv != "prod", "this command must not be run in production env")
 		assert.True(len(cliArgs) > 2, "Need to provide wallet address")
 		assert.True(len(cliArgs) > 3, "Need to provide network")
 
@@ -87,6 +88,7 @@ func main() {
 		)
 	case "parse":
 		// parse
+		assert.True(appEnv != "prod", "this command must not be run in production env")
 		parser.Parse(context.Background(), pool, 1)
 	case "parse-server":
 		// long running server
