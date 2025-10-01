@@ -2,11 +2,14 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"fmt"
 	"slices"
 	rpcsolana "taxee/cmd/fetcher/solana"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -37,7 +40,7 @@ type WalletRow struct {
 func GetWallets(ctx context.Context, pool *pgxpool.Pool) ([]*WalletRow, error) {
 	query := `
 		select
-			id, address, network, latest_transaction_id
+			id, address, network, latest_tx_id 
 		from
 			wallet
 	`
@@ -115,6 +118,7 @@ type SolanaTransactionData struct {
 	NativeBalances map[string]*SolanaNativeBalance `json:"nativeBalances"`
 	TokenBalances  map[string]*SolanaTokenBalances `json:"tokenBalances"`
 	TokenDecimals  map[string]uint8                `json:"tokenDecimals"`
+	BlockIndex     int32                           `json:"blockIndex"`
 }
 
 type TransactionRow struct {
@@ -181,4 +185,75 @@ func GetTransactions(
 	}
 
 	return res, nil
+}
+
+func InsertIteration(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+) (int32, error) {
+	const query = "insert into iteration default values returning id"
+	var id int32
+	row := pool.QueryRow(ctx, query)
+	err := row.Scan(&id)
+	if err != nil {
+		err = fmt.Errorf("unable to insert iteration: %w", err)
+	}
+	return id, err
+}
+
+type ErrOrigin string
+
+const (
+	ErrOriginPreprocess ErrOrigin = "preparse"
+	ErrOriginParse      ErrOrigin = "parse"
+)
+
+type ErrType string
+
+const (
+	ErrTypeAccountMissing         ErrType = "account_missing"
+	ErrTypeAccountBalanceMismatch ErrType = "account_balance_mismatch"
+)
+
+type ErrAccountBalanceMissing struct {
+	Expected uint64 `json:"expected"`
+	Had      uint64 `json:"had"`
+}
+
+type NullJson struct {
+	Valid bool
+	Data  []byte
+}
+
+func (n NullJson) Value() (driver.Value, error) {
+	if !n.Valid {
+		return nil, nil
+	}
+	return n.Data, nil
+}
+
+func EnqueueInsertErr(
+	batch *pgx.Batch,
+	iterationId int32,
+	txId string,
+	ixIdx sql.NullInt32,
+	idx int32,
+	origin ErrOrigin,
+	kind ErrType,
+	address string,
+	data NullJson,
+) *pgx.QueuedQuery {
+	const query = `
+		insert into err (
+			iteration_id, tx_id, ix_idx, idx, origin,
+			type, address, data
+		) values (
+			$1, $2, $3, $4, $5, $6, $7, $8
+		)
+	`
+	return batch.Queue(
+		query,
+		iterationId, txId, ixIdx, idx, origin,
+		kind, address, data,
+	)
 }

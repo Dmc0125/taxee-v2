@@ -2,6 +2,8 @@ package parser
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	_ "net/http/pprof"
@@ -11,6 +13,8 @@ import (
 	"taxee/pkg/assert"
 	"taxee/pkg/db"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -27,6 +31,9 @@ func Parse(ctx context.Context, pool *pgxpool.Pool) {
 			assert.NoErr(err, "")
 		}()
 	}
+
+	iterationId, err := db.InsertIteration(ctx, pool)
+	assert.NoErr(err, "")
 
 	wallets, err := db.GetWallets(ctx, pool)
 	assert.NoErr(err, "")
@@ -65,9 +72,54 @@ func Parse(ctx context.Context, pool *pgxpool.Pool) {
 		switch txData := tx.Data.(type) {
 		case *db.SolanaTransactionData:
 			solana.PreparseTx(&solanaCtx, txData)
-
 		}
 	}
+
+	var batch pgx.Batch
+	for _, errs := range solanaCtx.Errors {
+		for idx, err := range errs {
+			txId, address := "", ""
+			var (
+				kind  db.ErrType
+				data  db.NullJson
+				ixIdx sql.NullInt32
+			)
+
+			switch e := err.(type) {
+			case *solana.ErrAccountMissing:
+				txId, address, ixIdx.Int32 = e.TxId, e.Address, int32(e.IxIdx)
+				kind = db.ErrTypeAccountMissing
+			case *solana.ErrAccountBalanceMissing:
+				txId, address, ixIdx.Int32 = e.TxId, e.Address, int32(e.IxIdx)
+				kind = db.ErrTypeAccountBalanceMismatch
+
+				var mErr error
+				data.Data, mErr = json.Marshal(db.ErrAccountBalanceMissing{
+					Expected: e.Expected,
+					Had:      e.Had,
+				})
+				assert.NoErr(mErr, "unable to serialize ErrAccountBalanceMismatch")
+				data.Valid = true
+			}
+
+			q := db.EnqueueInsertErr(
+				&batch,
+				iterationId,
+				txId,
+				ixIdx,
+				int32(idx),
+				db.ErrOriginPreprocess,
+				kind,
+				address,
+				data,
+			)
+			q.Exec(func(_ pgconn.CommandTag) error { return nil })
+		}
+	}
+
+	br := pool.SendBatch(ctx, &batch)
+	err = br.Close()
+	assert.NoErr(err, "unable to insert errors")
 
 	///////////////////
 	// process txs

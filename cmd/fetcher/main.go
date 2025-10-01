@@ -15,6 +15,7 @@ import (
 	"unsafe"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -257,6 +258,7 @@ func fetchSolana(
 						NativeBalances: *(*nativeBalances)(unsafe.Pointer(&tx.NativeBalances)),
 						TokenBalances:  *(*tokenBalances)(unsafe.Pointer(&tx.TokenBalances)),
 						TokenDecimals:  tx.TokenDecimals,
+						BlockIndex:     -1,
 					}
 
 					if !account.related && !tx.Err {
@@ -386,6 +388,67 @@ func deleteSolanaRelatedAccounts(
 	return nil
 }
 
+type getSolanaTxsWithDuplicateSlotsRow struct {
+	Slot int64
+	Id   string
+}
+
+func getSolanaTxsWithDuplicateSlots(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	limit int,
+) ([]*getSolanaTxsWithDuplicateSlotsRow, error) {
+	const query = `
+		select t.slot, t.id from (
+			select
+				(data->>'slot')::bigint as slot,
+				id,
+				count(*) over (
+					partition by data->>'slot'
+				) as dup_count
+			from
+				tx
+			where
+				network = 'solana' and (data->>'blockIndex')::integer = -1
+		) t
+		where 
+			t.dup_count > 1
+		limit
+			$1
+	`
+	rows, err := pool.Query(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get query solana txs with duplicate slots: %w", err)
+	}
+
+	res := make([]*getSolanaTxsWithDuplicateSlotsRow, 0)
+
+	for rows.Next() {
+		var tx getSolanaTxsWithDuplicateSlotsRow
+		err := rows.Scan(&tx.Slot, &tx.Id)
+		if err != nil {
+			return nil, fmt.Errorf("unable to scan solana tx: %w", err)
+		}
+		res = append(res, &tx)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("unable to scan solana txs: %w", err)
+	}
+
+	return res, nil
+}
+
+func enqueueUpdateTxBlockIndex(batch *pgx.Batch, id string, blockIndex int32) *pgx.QueuedQuery {
+	const query = `
+		update tx set
+		data = data || jsonb_build_object('blockIndex', $1::integer)
+		where
+			id = $2
+	`
+	return batch.Queue(query, blockIndex, id)
+}
+
 func Fetch(
 	ctx context.Context,
 	pool *pgxpool.Pool,
@@ -456,6 +519,59 @@ func Fetch(
 			accounts = accounts[1:]
 		}
 
-		logger.Info("Fetching done - total accounts %d", accountsCount)
+		logger.Info(
+			"Txs fetched (accounts %d), starting slots deduplication",
+			accountsCount,
+		)
+
+		const LIMIT = 100
+
+		for {
+			dups, err := getSolanaTxsWithDuplicateSlots(ctx, pool, LIMIT)
+			assert.NoErr(err, "")
+
+			slots := make(map[int64][]string)
+
+			for _, tx := range dups {
+				signatures, ok := slots[tx.Slot]
+				if !ok {
+					signatures = make([]string, 0)
+				}
+
+				signatures = append(signatures, tx.Id)
+				slots[tx.Slot] = signatures
+			}
+
+			batch := pgx.Batch{}
+
+			for slot, signatures := range slots {
+				res, err := rpc.GetBlockSignatures(uint64(slot), solana.CommitmentConfirmed)
+				assert.NoErr(err, "unable to get solana block signatures")
+				if res.Error != nil {
+					assert.True(
+						false,
+						"unable to get solana block signatures: %#v",
+						*res.Error,
+					)
+				}
+
+				for idx, s := range res.Result.Signatures {
+					exists := slices.Contains(signatures, s)
+					if exists {
+						q := enqueueUpdateTxBlockIndex(&batch, s, int32(idx))
+						q.Exec(func(_ pgconn.CommandTag) error { return nil })
+					}
+				}
+			}
+
+			br := pool.SendBatch(ctx, &batch)
+			assert.NoErr(br.Close(), "unable to update tx block indexes")
+
+			if len(dups) < LIMIT {
+				break
+			}
+		}
+
+		logger.Info("Fetching done")
 	}
 }

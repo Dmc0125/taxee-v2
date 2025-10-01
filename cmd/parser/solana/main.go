@@ -1,7 +1,10 @@
 package solana
 
 import (
+	"fmt"
+	"math"
 	"slices"
+	"strings"
 	"taxee/pkg/assert"
 	"taxee/pkg/db"
 	"taxee/pkg/location"
@@ -20,6 +23,14 @@ type AccountLifetime struct {
 	Data         any
 }
 
+func (acc *AccountLifetime) initUninitialized(ctx *Context) {
+	acc.MinSlot = ctx.Slot
+	acc.MinIxIdx = ctx.IxIdx
+	acc.MaxSlot = math.MaxUint64
+	acc.MaxIxIdx = math.MaxUint32
+	acc.PreparseOpen = true
+}
+
 func (acc *AccountLifetime) open(slot uint64, ixIdx uint32) bool {
 	if acc.MinSlot == slot && acc.MinIxIdx < ixIdx {
 		return true
@@ -32,20 +43,24 @@ func (acc *AccountLifetime) open(slot uint64, ixIdx uint32) bool {
 
 type ErrAccountMissing struct {
 	Location string
-	Slot     uint64
+	TxId     string
 	IxIdx    uint32
 	Address  string
 }
 
 func (err *ErrAccountMissing) Error() string {
-	return ""
+	m := fmt.Sprintf(
+		"(%s)\nAccount \"%s\" missing at %s (ix idx: %d)",
+		err.Location, err.Address, err.TxId, err.IxIdx,
+	)
+	return m
 }
 
 func (err *ErrAccountMissing) init(ctx *Context, address string) {
-	loc, e := location.Location(1)
+	loc, e := location.Location(2)
 	assert.NoErr(e, "")
 	err.Location = loc
-	err.Slot = ctx.Slot
+	err.TxId = ctx.TxId
 	err.IxIdx = ctx.IxIdx
 	err.Address = address
 }
@@ -57,7 +72,11 @@ type ErrAccountBalanceMissing struct {
 }
 
 func (err *ErrAccountBalanceMissing) Error() string {
-	return ""
+	m := fmt.Sprintf(
+		"(%s)\nAccount \"%s\" balance missing at %s (ix idx: %d) - expected: %d != had: %d",
+		err.Location, err.Address, err.TxId, err.IxIdx, err.Expected, err.Had,
+	)
+	return m
 }
 
 func (err *ErrAccountBalanceMissing) init(
@@ -65,10 +84,10 @@ func (err *ErrAccountBalanceMissing) init(
 	address string,
 	expected, had uint64,
 ) {
-	loc, e := location.Location(1)
+	loc, e := location.Location(2)
 	assert.NoErr(e, "")
 	err.Location = loc
-	err.Slot = ctx.Slot
+	err.TxId = ctx.TxId
 	err.IxIdx = ctx.IxIdx
 	err.Address = address
 	err.Expected = expected
@@ -130,7 +149,7 @@ func (ctx *Context) appendErr(address string, err error) {
 	ctx.Errors[address] = errors
 }
 
-func (ctx *Context) WalletOwned(other string) bool {
+func (ctx *Context) walletOwned(other string) bool {
 	return slices.Contains(ctx.Wallets, other)
 }
 
@@ -138,15 +157,13 @@ func (ctx *Context) accountReceiveSol(address string, amount uint64) {
 	lifetimes, ok := ctx.Accounts[address]
 
 	if !ok {
-		lifetimes = make([]AccountLifetime, 1)
+		lifetimes = make([]AccountLifetime, 0)
 	}
 	if len(lifetimes) == 0 {
-		lifetimes[0] = AccountLifetime{
-			MinSlot:      ctx.Slot,
-			MinIxIdx:     ctx.IxIdx,
-			Balance:      amount,
-			PreparseOpen: true,
-		}
+		var acc AccountLifetime
+		acc.initUninitialized(ctx)
+		acc.Balance = amount
+		lifetimes = append(lifetimes, acc)
 		ctx.Accounts[address] = lifetimes
 		return
 	}
@@ -156,14 +173,13 @@ func (ctx *Context) accountReceiveSol(address string, amount uint64) {
 	if account.PreparseOpen {
 		account.Balance += amount
 	} else {
-		newAccount := AccountLifetime{
-			MinSlot:      ctx.Slot,
-			MinIxIdx:     ctx.IxIdx,
-			Balance:      amount,
-			PreparseOpen: true,
-		}
-		lifetimes = append(lifetimes, newAccount)
+		var acc AccountLifetime
+		acc.initUninitialized(ctx)
+		acc.Balance = amount
+		lifetimes = append(lifetimes, acc)
 	}
+
+	ctx.Accounts[address] = lifetimes
 }
 
 func (ctx *Context) accountInitOwned(address string, data any) {
@@ -184,6 +200,7 @@ func (ctx *Context) accountInitOwned(address string, data any) {
 
 	acc.Data = data
 	acc.Owned = true
+	ctx.Accounts[address] = lifetimes
 }
 
 func (ctx *Context) accountClose(closedAddress, receiverAddress string) {
@@ -203,46 +220,70 @@ func (ctx *Context) accountClose(closedAddress, receiverAddress string) {
 		return
 	}
 
+	closedBalance := acc.Balance
+
 	acc.PreparseOpen = false
 	acc.MaxSlot = ctx.Slot
 	acc.MaxIxIdx = ctx.IxIdx
+	acc.Balance = 0
+	ctx.Accounts[closedAddress] = lifetimes
 
-	ctx.accountReceiveSol(receiverAddress, acc.Balance)
+	ctx.accountReceiveSol(receiverAddress, closedBalance)
 }
 
-func (ctx *Context) accountValidateNativeBalance(accountAddress string, expectedBalance uint64) {
-	lifetimes, ok := ctx.Accounts[accountAddress]
-	if !ok {
-		var err ErrAccountMissing
-		err.init(ctx, accountAddress)
-		ctx.appendErr(accountAddress, &err)
-		return
+func (ctx *Context) AccountsString() string {
+	sb := strings.Builder{}
+
+	pad := func(x string, args ...any) string {
+		m := fmt.Sprintf(x, args...)
+		return fmt.Sprintf("    %s", m)
 	}
 
-	// NOTE: need to find the last account at current slot
-	// - there could be multiple created and closed in one tx
-	var lt *AccountLifetime
-	for i := len(lifetimes) - 1; i >= 0; i -= 1 {
-		temp := &lifetimes[i]
+	for address, accounts := range ctx.Accounts {
+		sb.WriteRune('\n')
+		sb.WriteString("Account: ")
+		sb.WriteString(address)
+		sb.WriteRune('\n')
 
-		if temp.MinSlot <= ctx.Slot && ctx.Slot <= temp.MaxSlot && temp.Owned {
-			lt = temp
-			break
+		for i, acc := range accounts {
+			// sb.WriteRune('\n')
+			sb.WriteRune(rune(48 + i))
+			sb.WriteRune(':')
+			sb.WriteRune('\n')
+
+			sb.WriteString(pad(fmt.Sprintf(
+				"Min: slot %d (ix idx: %d) <> Max: slot %d (ix idx: %d)\n",
+				acc.MinSlot,
+				acc.MinIxIdx,
+				acc.MaxSlot,
+				acc.MaxIxIdx,
+			)))
+			sb.WriteString(pad("Balance: %d\n", acc.Balance))
+			sb.WriteString(pad("Data: %#v\n", acc.Data))
+			sb.WriteString(pad("Owned: %t\n", acc.Owned))
 		}
 	}
 
-	if lt == nil {
-		var err ErrAccountMissing
-		err.init(ctx, accountAddress)
-		ctx.appendErr(accountAddress, &err)
-		return
+	return sb.String()
+}
+
+func (ctx *Context) ErrorsString() string {
+	sb := strings.Builder{}
+
+	for address, errs := range ctx.Errors {
+		sb.WriteString("\nAccount errors: ")
+		sb.WriteString(address)
+		sb.WriteRune('\n')
+
+		for i, err := range errs {
+			sb.WriteRune(rune(48 + i))
+			sb.WriteRune(':')
+			sb.WriteString(err.Error())
+			sb.WriteRune('\n')
+		}
 	}
 
-	if lt.Balance != expectedBalance {
-		var err ErrAccountBalanceMissing
-		err.init(ctx, accountAddress, expectedBalance, lt.Balance)
-		ctx.appendErr(accountAddress, &err)
-	}
+	return sb.String()
 }
 
 type relatedAccounts interface {
@@ -278,43 +319,65 @@ func PreparseTx(ctx *Context, tx *db.SolanaTransactionData) {
 		case ASSOCIATED_TOKEN_PROGRAM_ADDRESS:
 			preprocessAssociatedTokenIx(ctx, ix)
 		}
-
 	}
 
-	// TODO: token balances stored are wrong
-	// // NOTE: enforce token accounts are created and they have correct
-	// // lamports balances
-	// alreadyChecked := make([]string, 0)
-	//
-	// for accountAddress, tokenBalance := range tx.TokenBalances {
-	// 	if !ctx.WalletOwned(tokenBalance.Owner) {
-	// 		continue
-	// 	}
-	// 	if tokenBalance.Token != SOL_MINT_ADDRESS {
-	// 		continue
-	// 	}
-	//
-	// 	alreadyChecked = append(alreadyChecked, accountAddress)
-	//
-	// 	nativeBalance, ok := tx.NativeBalances[accountAddress]
-	// 	assert.True(ok, "missing native balance for \"%s\" (txid=%s)", accountAddress, ctx.TxId)
-	//
-	// 	ctx.accountValidateNativeBalance(accountAddress, nativeBalance.Post)
-	// }
-	//
-	// // NOTE: don't have a way of checking of accounts other than token accounts
-	// // should exist so just compare lamports of created accounts with their
-	// // expected lamports
-	// for accountAddress, nativeBalance := range tx.NativeBalances {
-	// 	if ctx.WalletOwned(accountAddress) {
-	// 		continue
-	// 	}
-	//
-	// 	tokenBalance, ok := tx.TokenBalances[accountAddress]
-	// 	if !ok || ctx.WalletOwned(tokenBalance.Owner) {
-	// 		continue
-	// 	}
-	//
-	// 	ctx.accountValidateNativeBalance(accountAddress, nativeBalance.Post)
-	// }
+	findLifetime := func(ctx *Context, lifetimes []AccountLifetime) *AccountLifetime {
+		var lt *AccountLifetime
+		for i := len(lifetimes) - 1; i >= 0; i -= 1 {
+			temp := &lifetimes[i]
+			if temp.MinSlot <= ctx.Slot && ctx.Slot <= temp.MaxSlot {
+				lt = temp
+				break
+			}
+		}
+		return lt
+	}
+
+nativeBalances:
+	for accountAddress, nativeBalance := range tx.NativeBalances {
+		if ctx.walletOwned(accountAddress) {
+			continue
+		}
+
+		lifetimes, accountExists := ctx.Accounts[accountAddress]
+		tokenBalance, tokenBalanceExists := tx.TokenBalances[accountAddress]
+		var lt *AccountLifetime
+
+		switch {
+		case tokenBalanceExists:
+			if !ctx.walletOwned(tokenBalance.Owner) {
+				continue nativeBalances
+			}
+
+			if !accountExists {
+				var err ErrAccountMissing
+				err.init(ctx, accountAddress)
+				ctx.appendErr(accountAddress, &err)
+				continue nativeBalances
+			}
+
+			lt = findLifetime(ctx, lifetimes)
+			if lt == nil {
+				var err ErrAccountMissing
+				err.init(ctx, accountAddress)
+				ctx.appendErr(accountAddress, &err)
+				continue nativeBalances
+			}
+		case accountExists:
+			lt = findLifetime(ctx, lifetimes)
+			if lt == nil {
+				continue nativeBalances
+			}
+		default:
+			continue nativeBalances
+		}
+
+		// TODO: maybe validate account data ?
+		if lt.Balance != nativeBalance.Post {
+			var err ErrAccountBalanceMissing
+			err.init(ctx, accountAddress, nativeBalance.Post, lt.Balance)
+			ctx.appendErr(accountAddress, &err)
+			continue nativeBalances
+		}
+	}
 }

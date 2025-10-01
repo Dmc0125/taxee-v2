@@ -1,0 +1,9 @@
+{
+  "name": "website",
+  "module": "index.ts",
+  "devDependencies": {
+    "@types/bun": "latest",
+    "tailwindcss": "^4.1.13"
+  },
+  "type": "module"
+}
