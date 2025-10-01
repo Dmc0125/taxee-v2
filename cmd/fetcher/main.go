@@ -22,11 +22,12 @@ import (
 func setWallet(
 	ctx context.Context,
 	pool *pgxpool.Pool,
+	userAccountId int32,
 	walletAddress string,
 	network db.Network,
 ) (walletId int32, latestTxId sql.NullString, err error) {
-	const query = "select wallet_id, wallet_latest_tx_id from set_wallet($1, $2)"
-	row := pool.QueryRow(ctx, query, walletAddress, network)
+	const query = "select wallet_id, wallet_latest_tx_id from set_wallet($1, $2, $3)"
+	row := pool.QueryRow(ctx, query, userAccountId, walletAddress, network)
 
 	scanErr := row.Scan(&walletId, &latestTxId)
 	if scanErr != nil {
@@ -68,12 +69,13 @@ func enqueueInsertTx(
 func setUserTransactions(
 	ctx context.Context,
 	pool *pgxpool.Pool,
+	userAccountId int32,
 	txIds []string,
 	walletId int32,
 	relatedAccountAddress sql.NullString,
 ) error {
-	query := "call set_user_transactions($1, $2, $3)"
-	_, err := pool.Exec(ctx, query, txIds, walletId, relatedAccountAddress)
+	query := "call set_user_transactions($1, $2, $3, $4)"
+	_, err := pool.Exec(ctx, query, userAccountId, txIds, walletId, relatedAccountAddress)
 	if err != nil {
 		return fmt.Errorf("unable to query set_user_transactions: %w", err)
 	}
@@ -140,6 +142,7 @@ func fetchSolana(
 	pool *pgxpool.Pool,
 	rpc *solana.Rpc,
 	accounts *[]solanaAccount,
+	userAccountId,
 	walletId int32,
 	account solanaAccount,
 ) {
@@ -298,6 +301,7 @@ func fetchSolana(
 			err := setUserTransactions(
 				ctx,
 				pool,
+				userAccountId,
 				txIds,
 				walletId,
 				relatedAccountAddress,
@@ -452,6 +456,7 @@ func enqueueUpdateTxBlockIndex(batch *pgx.Batch, id string, blockIndex int32) *p
 func Fetch(
 	ctx context.Context,
 	pool *pgxpool.Pool,
+	userAccountId int32,
 	walletAddress string,
 	network string,
 	rpc *solana.Rpc,
@@ -460,10 +465,12 @@ func Fetch(
 	n, ok := db.NewNetwork(network)
 	assert.True(ok, "invalid network: %s", network)
 
-	walletId, latestTxId, err := setWallet(ctx, pool, walletAddress, n)
+	logger.Info("Starting fetch for user: %d", userAccountId)
+
+	walletId, latestTxId, err := setWallet(ctx, pool, userAccountId, walletAddress, n)
 	assert.NoErr(err, "")
 	logger.Info(
-		"Starting fetch for: %s %s (fresh: %t walletId: %d latestTxId: \"%s\")",
+		"Wallet: %s %s (fresh: %t walletId: %d latestTxId: \"%s\")",
 		walletAddress, n, fresh, walletId, latestTxId.String,
 	)
 
@@ -513,6 +520,7 @@ func Fetch(
 				pool,
 				rpc,
 				&accounts,
+				userAccountId,
 				walletId,
 				acc,
 			)

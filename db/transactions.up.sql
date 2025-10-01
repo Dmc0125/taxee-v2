@@ -3,17 +3,24 @@ begin;
 create type network as enum ('solana');
 
 create table stats (
-    id integer primary key default 1,
+    user_account_id integer not null,
+    primary key (user_account_id),
+    foreign key (user_account_id) references user_account (id) on delete cascade,
+
     tx_count integer default 0,
-    wallets_count integer default 0,
-    constraint unique_stats check (id = 1)
+    wallets_count integer default 0
 );
 
 create table wallet (
     id serial primary key,
+    user_account_id integer not null,
+    foreign key (user_account_id) references user_account (id) on delete cascade,
+
     address varchar(64) not null,
     network network not null,
     name varchar,
+
+    unique (user_account_id, address, network),
 
     tx_count integer default 0,
     total_tx_count integer default 0,
@@ -21,6 +28,7 @@ create table wallet (
 );
 
 create function set_wallet(
+    p_user_account_id integer,
     p_address varchar(64),
     p_network network
 ) returns table(
@@ -41,23 +49,26 @@ begin
         wallet w
     where
         w.address = p_address and
-        w.network = p_network;
+        w.network = p_network and
+        w.user_account_id = p_user_account_id;
 
     if found then
         return query select wallet_record.id, wallet_record.latest_tx_id;
     else
         insert into wallet (
-            address, network
+            address, network, user_account_id
         ) values (
-            p_address, p_network
+            p_address, p_network, p_user_account_id
         ) returning wallet.id into new_wallet_id;
 
-        insert into stats (id, wallets_count) values (1, 1) on conflict (
-            id
+        insert into stats (
+            user_account_id, wallets_count
+        ) values (p_user_account_id, 1) on conflict (
+            user_account_id
         ) do update set
             wallets_count = stats.wallets_count + 1;
 
-            return query select new_wallet_id, null::varchar;
+        return query select new_wallet_id, null::varchar;
     end if;
 end;
 $$;
@@ -82,21 +93,25 @@ create table tx (
     data jsonb not null
 );
 
-create table tx_wallet_ref (
+create table tx_ref (
+    user_account_id integer not null,
     wallet_id integer not null,
     tx_id varchar not null,
     related_account_address varchar(64),
-    primary key (wallet_id, tx_id),
-    foreign key (wallet_id) references wallet (id) on delete cascade,
-    foreign key (tx_id) references tx (id),
+
+    primary key (user_account_id, wallet_id, tx_id),
+
+    foreign key (user_account_id) references user_account (id),
     foreign key (
         wallet_id, related_account_address
     ) references solana_related_account (
         wallet_id, address
-    ) on delete cascade
+    ) on delete cascade, 
+    foreign key (wallet_id) references wallet (id) on delete cascade
 );
 
 create procedure set_user_transactions(
+    p_user_account_id integer,
     p_tx_ids varchar[],
     p_wallet_id integer,
     p_related_account_address varchar(64) default null
@@ -116,17 +131,19 @@ begin
         ) do nothing;
     end if;
 
-    insert into tx_wallet_ref (
+    insert into tx_ref (
+        user_account_id,
         wallet_id,
         related_account_address,
         tx_id
     ) select
+        p_user_account_id,
         p_wallet_id,
         p_related_account_address,
         t.tx_id
     from unnest(p_tx_ids) as t(tx_id)
     on conflict (
-        wallet_id, tx_id
+        user_account_id, wallet_id, tx_id
     ) do nothing;
 
     get diagnostics refs_count = row_count;
@@ -134,7 +151,7 @@ begin
     if refs_count > 0 then
         update stats set
             tx_count = tx_count + refs_count
-        where id = 1;
+        where user_account_id = p_user_account_id;
 
         if p_related_account_address is not null then
             update wallet set

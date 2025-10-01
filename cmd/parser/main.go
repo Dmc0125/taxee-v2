@@ -18,7 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func Parse(ctx context.Context, pool *pgxpool.Pool) {
+func Parse(ctx context.Context, pool *pgxpool.Pool, userAccountId int32) {
 	if os.Getenv("MEM_PROF") == "1" {
 		var wg sync.WaitGroup
 		wg.Add(1)
@@ -32,14 +32,11 @@ func Parse(ctx context.Context, pool *pgxpool.Pool) {
 		}()
 	}
 
-	wallets, err := db.GetWallets(ctx, pool)
+	wallets, err := db.GetWallets(ctx, pool, userAccountId)
 	assert.NoErr(err, "")
 
-	walletsIds := make([]int32, len(wallets))
 	solanaWallets := make([]string, 0)
-	for i, w := range wallets {
-		walletsIds[i] = w.Id
-
+	for _, w := range wallets {
 		switch w.Network {
 		case db.NetworkSolana:
 			solanaWallets = append(solanaWallets, w.Address)
@@ -53,7 +50,7 @@ func Parse(ctx context.Context, pool *pgxpool.Pool) {
 	// pagination ??
 	// 700 txs ~= 6.4mb of allocations
 
-	txs, err := db.GetTransactions(ctx, pool, walletsIds)
+	txs, err := db.GetTransactions(ctx, pool, userAccountId)
 	assert.NoErr(err, "")
 
 	///////////////////

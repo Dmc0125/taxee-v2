@@ -214,6 +214,7 @@ type getTxsWithParserErrsPaginatedRow struct {
 
 func getTxsWithParserErrsPaginated(
 	pool *pgxpool.Pool,
+	userAccountId int32,
 	slot int64,
 	blockIndex int32,
 	limit int32,
@@ -238,23 +239,27 @@ func getTxsWithParserErrsPaginated(
 			) filter (where err.id is not null) as errs
 		from
 			tx
+		inner join
+			tx_ref on tx_ref.tx_id = tx.id and tx_ref.user_account_id = $1
 		left join
 			err on err.tx_id = tx.id
 		where
 			(
-				(tx.data->>'slot')::bigint = $1 and
-				(tx.data->>'blockIndex')::integer > $2 
+				(tx.data->>'slot')::bigint = $2 and
+				(tx.data->>'blockIndex')::integer > $3 
 			) or 
-			(tx.data->>'slot')::bigint > $1
+			(tx.data->>'slot')::bigint > $2
 		group by
 			tx.id
 		order by
 			(tx.data->>'blockIndex')::integer asc,
 			(tx.data->>'slot')::bigint asc
 		limit
-			$3
+			$4
 	`
-	rows, err := pool.Query(context.Background(), query, slot, blockIndex, limit)
+	rows, err := pool.Query(
+		context.Background(), query, userAccountId, slot, blockIndex, limit,
+	)
 	if err != nil {
 		return nil, 0, 0, err
 	}
@@ -355,8 +360,22 @@ func main() {
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
-		fromSlotParam, fromBlockIndexParam := query.Get("from_slot"), query.Get("from_block_index")
 
+		userAccountId := int32(1)
+		if prod {
+			userAccountIdParam := query.Get("user_account_id")
+			id, err := strconv.Atoi(userAccountIdParam)
+			if err != nil {
+				w.WriteHeader(400)
+				w.Write(fmt.Appendf(nil, "Invalid user account id: %s", userAccountIdParam))
+				return
+			}
+			userAccountId = int32(id)
+
+			// TODO: Auth
+		}
+
+		fromSlotParam, fromBlockIndexParam := query.Get("from_slot"), query.Get("from_block_index")
 		fromSlot, err := strconv.Atoi(fromSlotParam)
 		if err != nil {
 			fromSlot = -1
@@ -373,7 +392,7 @@ func main() {
 			nextBlockIndex int32
 		)
 		txs, nextSlot, nextBlockIndex, err = getTxsWithParserErrsPaginated(
-			pool, int64(fromSlot), int32(fromBlockIndex), LIMIT,
+			pool, userAccountId, int64(fromSlot), int32(fromBlockIndex), LIMIT,
 		)
 		if err != nil {
 			w.WriteHeader(500)

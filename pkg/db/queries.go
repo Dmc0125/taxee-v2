@@ -12,6 +12,33 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+func InsertUserAccount(ctx context.Context, pool *pgxpool.Pool, name string) (int32, error) {
+	const q = "insert into user_account (name) values ($1) returning id"
+	row := pool.QueryRow(ctx, q, name)
+	var id int32
+	err := row.Scan(&id)
+	if err != nil {
+		return 0, fmt.Errorf("unable to scan user: %w", err)
+	}
+	return id, nil
+}
+
+type GetUserAccountRow struct {
+	Id   int32
+	Name pgtype.Text
+}
+
+func GetUserAccount(ctx context.Context, pool *pgxpool.Pool, id int32) (*GetUserAccountRow, error) {
+	const q = "select id, name from user_account where id = $1"
+	row := pool.QueryRow(ctx, q, id)
+	res := new(GetUserAccountRow)
+	err := row.Scan(&res.Id, &res.Name)
+	if err != nil {
+		return nil, fmt.Errorf("unable to scan user account: %w", err)
+	}
+	return res, nil
+}
+
 type Network string
 
 const (
@@ -36,14 +63,16 @@ type WalletRow struct {
 	LatestTransactionId string
 }
 
-func GetWallets(ctx context.Context, pool *pgxpool.Pool) ([]*WalletRow, error) {
+func GetWallets(ctx context.Context, pool *pgxpool.Pool, userAccountId int32) ([]*WalletRow, error) {
 	query := `
 		select
 			id, address, network, latest_tx_id 
 		from
 			wallet
+		where
+			user_account_id = $1
 	`
-	rows, err := pool.Query(ctx, query)
+	rows, err := pool.Query(ctx, query, userAccountId)
 	if err != nil {
 		return nil, fmt.Errorf("unable to query wallets: %w", err)
 	}
@@ -130,7 +159,7 @@ type TransactionRow struct {
 func GetTransactions(
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	walletsIds []int32,
+	userAccountId int32,
 ) ([]*TransactionRow, error) {
 	query := `
 		select
@@ -138,21 +167,13 @@ func GetTransactions(
 		from
 			tx
 		join
-			tx_wallet_ref ref on
-				ref.wallet_id = any($1) and
-				ref.tx_id = tx.id
-		-- where
-		--	(tx.data->>'slot')::bigint > $2 or (
-		--		(tx.data->>'slot')::bigint = $2 and
-		--		(tx.data->>'blockIndex')::integer > $3
-		--	)
+			tx_ref ref on
+				ref.tx_id = tx.id and ref.user_account_id = $1
 		order by
 			(tx.data->>'slot')::bigint asc,
 			(tx.data->>'blockIndex')::integer asc
-		-- limit
-		--	$4
 	`
-	rows, err := pool.Query(ctx, query, walletsIds)
+	rows, err := pool.Query(ctx, query, userAccountId)
 	if err != nil {
 		return nil, fmt.Errorf("unable to query transactions: %w", err)
 	}

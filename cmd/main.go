@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,8 @@ import (
 	"taxee/pkg/assert"
 	"taxee/pkg/db"
 	"taxee/pkg/dotenv"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func main() {
@@ -56,6 +59,13 @@ func main() {
 		assert.True(len(cliArgs) > 2, "Need to provide wallet address")
 		assert.True(len(cliArgs) > 3, "Need to provide network")
 
+		userAccountId := int32(1)
+		_, err := db.GetUserAccount(context.Background(), pool, userAccountId)
+		if errors.Is(err, pgx.ErrNoRows) {
+			_, err = db.InsertUserAccount(context.Background(), pool, "testing123")
+			assert.NoErr(err, "")
+		}
+
 		walletAddress, network := cliArgs[2], cliArgs[3]
 
 		solanaRpcUrl := os.Getenv("SOLANA_RPC_URL")
@@ -69,6 +79,7 @@ func main() {
 		fetcher.Fetch(
 			context.Background(),
 			pool,
+			userAccountId,
 			walletAddress,
 			network,
 			rpc,
@@ -76,7 +87,7 @@ func main() {
 		)
 	case "parse":
 		// parse
-		parser.Parse(context.Background(), pool)
+		parser.Parse(context.Background(), pool, 1)
 	case "parse-server":
 		// long running server
 	}

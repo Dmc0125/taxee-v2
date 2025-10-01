@@ -2,7 +2,7 @@ begin;
 
 drop procedure set_user_transactions;
 
-drop table tx_wallet_ref;
+drop table tx_ref;
 
 drop table tx;
 
