@@ -65,13 +65,13 @@ func (err *ErrAccountMissing) init(ctx *Context, address string) {
 	err.Address = address
 }
 
-type ErrAccountBalanceMissing struct {
+type ErrAccountBalanceMismatch struct {
 	ErrAccountMissing
 	Expected uint64
 	Had      uint64
 }
 
-func (err *ErrAccountBalanceMissing) Error() string {
+func (err *ErrAccountBalanceMismatch) Error() string {
 	m := fmt.Sprintf(
 		"(%s)\nAccount \"%s\" balance missing at %s (ix idx: %d) - expected: %d != had: %d",
 		err.Location, err.Address, err.TxId, err.IxIdx, err.Expected, err.Had,
@@ -79,7 +79,7 @@ func (err *ErrAccountBalanceMissing) Error() string {
 	return m
 }
 
-func (err *ErrAccountBalanceMissing) init(
+func (err *ErrAccountBalanceMismatch) init(
 	ctx *Context,
 	address string,
 	expected, had uint64,
@@ -102,8 +102,8 @@ func errEq(err1, err2 error) bool {
 			return false
 		}
 		return e1.Address == e2.Address
-	case *ErrAccountBalanceMissing:
-		e2, ok := err2.(*ErrAccountBalanceMissing)
+	case *ErrAccountBalanceMismatch:
+		e2, ok := err2.(*ErrAccountBalanceMismatch)
 		if !ok {
 			return false
 		}
@@ -193,7 +193,7 @@ func (ctx *Context) accountInitOwned(address string, data any) {
 
 	acc := &lifetimes[len(lifetimes)-1]
 	if !acc.PreparseOpen {
-		var err ErrAccountBalanceMissing
+		var err ErrAccountBalanceMismatch
 		err.init(ctx, address, 0, 0)
 		return
 	}
@@ -214,7 +214,7 @@ func (ctx *Context) accountClose(closedAddress, receiverAddress string) {
 
 	acc := &lifetimes[len(lifetimes)-1]
 	if !acc.PreparseOpen {
-		var err ErrAccountBalanceMissing
+		var err ErrAccountBalanceMismatch
 		err.init(ctx, closedAddress, 0, 0)
 		ctx.appendErr(closedAddress, &err)
 		return
@@ -365,7 +365,7 @@ nativeBalances:
 			}
 		case accountExists:
 			lt = findLifetime(ctx, lifetimes)
-			if lt == nil {
+			if lt == nil || !lt.Owned {
 				continue nativeBalances
 			}
 		default:
@@ -374,7 +374,7 @@ nativeBalances:
 
 		// TODO: maybe validate account data ?
 		if lt.Balance != nativeBalance.Post {
-			var err ErrAccountBalanceMissing
+			var err ErrAccountBalanceMismatch
 			err.init(ctx, accountAddress, nativeBalance.Post, lt.Balance)
 			ctx.appendErr(accountAddress, &err)
 			continue nativeBalances

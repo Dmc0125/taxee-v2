@@ -6,6 +6,4 @@ drop type err_type;
 
 drop type err_origin;
 
-drop table iteration;
-
 commit;

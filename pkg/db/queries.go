@@ -2,14 +2,13 @@ package db
 
 import (
 	"context"
-	"database/sql"
-	"database/sql/driver"
 	"encoding/json"
 	"fmt"
 	"slices"
 	rpcsolana "taxee/cmd/fetcher/solana"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -187,20 +186,6 @@ func GetTransactions(
 	return res, nil
 }
 
-func InsertIteration(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-) (int32, error) {
-	const query = "insert into iteration default values returning id"
-	var id int32
-	row := pool.QueryRow(ctx, query)
-	err := row.Scan(&id)
-	if err != nil {
-		err = fmt.Errorf("unable to insert iteration: %w", err)
-	}
-	return id, err
-}
-
 type ErrOrigin string
 
 const (
@@ -215,45 +200,32 @@ const (
 	ErrTypeAccountBalanceMismatch ErrType = "account_balance_mismatch"
 )
 
-type ErrAccountBalanceMissing struct {
+type ErrAccountBalanceMismatch struct {
 	Expected uint64 `json:"expected"`
 	Had      uint64 `json:"had"`
 }
 
-type NullJson struct {
-	Valid bool
-	Data  []byte
-}
-
-func (n NullJson) Value() (driver.Value, error) {
-	if !n.Valid {
-		return nil, nil
-	}
-	return n.Data, nil
-}
-
 func EnqueueInsertErr(
 	batch *pgx.Batch,
-	iterationId int32,
 	txId string,
-	ixIdx sql.NullInt32,
+	ixIdx pgtype.Int4,
 	idx int32,
 	origin ErrOrigin,
 	kind ErrType,
 	address string,
-	data NullJson,
+	data []byte,
 ) *pgx.QueuedQuery {
 	const query = `
 		insert into err (
-			iteration_id, tx_id, ix_idx, idx, origin,
+			tx_id, ix_idx, idx, origin,
 			type, address, data
 		) values (
-			$1, $2, $3, $4, $5, $6, $7, $8
+			$1, $2, $3, $4, $5, $6, $7
 		)
 	`
 	return batch.Queue(
 		query,
-		iterationId, txId, ixIdx, idx, origin,
+		txId, ixIdx, idx, origin,
 		kind, address, data,
 	)
 }

@@ -2,7 +2,6 @@ package parser
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -31,9 +31,6 @@ func Parse(ctx context.Context, pool *pgxpool.Pool) {
 			assert.NoErr(err, "")
 		}()
 	}
-
-	iterationId, err := db.InsertIteration(ctx, pool)
-	assert.NoErr(err, "")
 
 	wallets, err := db.GetWallets(ctx, pool)
 	assert.NoErr(err, "")
@@ -76,44 +73,48 @@ func Parse(ctx context.Context, pool *pgxpool.Pool) {
 	}
 
 	var batch pgx.Batch
+	// NOTE: Errors are created sequentially based on txs, so they are
+	// always created in the correct order, so just keeping global
+	// position is fine
+	errPos := int32(0)
 	for _, errs := range solanaCtx.Errors {
-		for idx, err := range errs {
-			txId, address := "", ""
+		for _, err := range errs {
+			txId, address, ixIdx := "", "", int32(0)
 			var (
-				kind  db.ErrType
-				data  db.NullJson
-				ixIdx sql.NullInt32
+				kind db.ErrType
+				data []byte
 			)
 
 			switch e := err.(type) {
 			case *solana.ErrAccountMissing:
-				txId, address, ixIdx.Int32 = e.TxId, e.Address, int32(e.IxIdx)
+				txId, address = e.TxId, e.Address
+				ixIdx = int32(e.IxIdx)
 				kind = db.ErrTypeAccountMissing
-			case *solana.ErrAccountBalanceMissing:
-				txId, address, ixIdx.Int32 = e.TxId, e.Address, int32(e.IxIdx)
+			case *solana.ErrAccountBalanceMismatch:
+				txId, address = e.TxId, e.Address
+				ixIdx = int32(e.IxIdx)
 				kind = db.ErrTypeAccountBalanceMismatch
 
 				var mErr error
-				data.Data, mErr = json.Marshal(db.ErrAccountBalanceMissing{
+				data, mErr = json.Marshal(db.ErrAccountBalanceMismatch{
 					Expected: e.Expected,
 					Had:      e.Had,
 				})
 				assert.NoErr(mErr, "unable to serialize ErrAccountBalanceMismatch")
-				data.Valid = true
 			}
 
 			q := db.EnqueueInsertErr(
 				&batch,
-				iterationId,
 				txId,
-				ixIdx,
-				int32(idx),
+				pgtype.Int4{Int32: ixIdx, Valid: true},
+				errPos,
 				db.ErrOriginPreprocess,
 				kind,
 				address,
 				data,
 			)
 			q.Exec(func(_ pgconn.CommandTag) error { return nil })
+			errPos += 1
 		}
 	}
 

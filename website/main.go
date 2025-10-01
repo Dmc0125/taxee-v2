@@ -4,139 +4,176 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"net/http"
 	"os"
 	"path"
 	"runtime"
-	"slices"
+	"strconv"
 	"strings"
 	"taxee/pkg/assert"
 	"taxee/pkg/db"
 	"taxee/pkg/dotenv"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type componentHandle struct {
-	data     []byte
-	params   map[string]string
-	children []byte
-	rendered bool
+type parserErr struct {
+	IxIdx   int32
+	Kind    db.ErrType
+	Address string
+	Data    any
 }
 
-func (handle *componentHandle) setParam(key, value string) {
-	_ = "bg-red-500"
-	handle.params[key] = value
+type TransactionCmpData struct {
+	Id             string
+	Timestamp      time.Time
+	Err            bool
+	PreprocessErrs []*parserErr
+	ParserErrs     []*parserErr
 }
 
-func (handle *componentHandle) addChild(comp *componentHandle) {
-	if !comp.rendered {
-		comp.render()
+var transactionCmp = `
+{{define "transaction"}}
+	<li class="
+			bg-gray-50 rounded-lg border border-gray-300 shadow-xs
+			py-2 px-4
+		"
+	>
+		{{ $preprocessErrsLen := len .PreprocessErrs }}
+		{{ $parserErrsLen := len .ParserErrs }}
+
+		<div class="flex justify-between">
+			<div class="flex gap-x-4 items-center">
+				<a
+					class="font-mono text-gray-900"
+					href="https://solscan.io/tx/{{.Id}}"
+					target="_blank"
+					rel="noopener noreferrer"
+				>{{shorten .Id 8 8}}</a>
+				<p class="font-mono text-gray-600 text-sm">{{formatDate .Timestamp}}</p>
+			</div>
+			<div>
+				{{if .Err}}
+					<div class="
+						bg-orange-200 border border-yellow-300 py-1 px-3 rounded-full
+						text-yellow-600 text-xs font-semibold
+					">
+						Onchain error
+					</div>
+				{{end}}
+				{{if ne 0 $preprocessErrsLen}}
+					<div class="
+						bg-pink-600 rounded-md py-1 px-2 
+						text-gray-100 text-xs font-semibold
+					">
+						{{ $preprocessErrsLen }}
+					</div>
+				{{end}}
+			</div>
+		</div>
+
+		{{if ne 0 $preprocessErrsLen}}
+			<div class="mt-4">
+				<h3 class="font-semibold text-gray-800">Preprocess Errors</h3>
+
+				<div class="mt-2 flex flex-wrap gap-4">
+					{{range .PreprocessErrs}}
+						<div class="bg-red-100 border-red-300 border rounded-md py-2 px-4">
+							<div class="flex gap-2">
+								<p class="font-semibold text-sm text-gray-800">
+									{{toTitle (printf "%s" .Kind)}}
+								</p>
+								{{if ne .IxIdx -1}}
+									<p class="text-sm text-gray-700">Ix: {{ .IxIdx }}</p>
+								{{end}}
+							</div>
+							<p class="font-mono text-gray-800">
+								{{shorten .Address 4 4}}
+							</p>
+							{{if eq .Kind "account_balance_mismatch"}}
+								<div>
+									<h1 class="text-3xl font-bold">FIXME</h1>
+									<p>Expected: {{index .Data "expected"}}</p>
+									<p>Had: {{index .Data "had"}}</p>
+								</div>
+							{{end}}
+						</div>
+					{{end}}
+				</div>
+			</div>
+		{{end}}
+	</li>
+{{end}}
+`
+
+type TransactionsCmpData struct {
+	NextSlot       int64
+	NextBlockIndex int32
+	Transactions   []TransactionCmpData
+}
+
+var transactionsCmp = `
+{{define "transactions"}}
+	<div class="mx-auto w-[70%] py-10">
+		<header class="py-10 flex items-center justify-between">
+			<h1 class="text-3xl font-semibold text-gray-900">Transactions</h1>
+
+			<div>
+				<a
+					href="?from_slot={{.NextSlot}}&from_block_index={{.NextBlockIndex}}"
+				>
+					Next
+				</a>
+			</div>
+		</header>
+		<ul class="flex flex-col gap-y-4">
+			{{range .Transactions}}
+				{{template "transaction" .}}
+			{{end}}
+		</ul>
+	</div>
+{{end}}
+`
+
+var transactionsPage = `
+{{define "transactions_page"}}
+	<!DOCTYPE html>
+	<html>
+		<head>
+			<title>Taxee</title>
+			<link href="static/output.css" rel="stylesheet">
+		</head>
+		<body class="min-h-screen bg-gray-50">
+			{{template "transactions" .}}
+		</body>
+	</html>
+{{end}}
+`
+
+func loadTemplate(templates *template.Template, tmpl string) {
+	var err error
+	templates, err = templates.Parse(tmpl)
+	assert.NoErr(err, "unable to load template")
+}
+
+type bufWriter []byte
+
+func (b *bufWriter) Write(n []byte) (int, error) {
+	*b = append(*b, n...)
+	return len(n), nil
+}
+
+func executeTemplate(tmpl *template.Template, w http.ResponseWriter, name string, data any) error {
+	buf := bufWriter([]byte{})
+	err := tmpl.ExecuteTemplate(&buf, name, data)
+	if err != nil {
+		return err
 	}
-
-	handle.children = append(handle.children, comp.data...)
-}
-
-func (handle *componentHandle) render() {
-	for i := 0; i < len(handle.data); i += 1 {
-		c := handle.data[i]
-
-		switch c {
-		case '{':
-			start := i
-
-			if handle.data[i+1] != '{' {
-				continue
-			}
-			// skip over {{
-			i += 2
-			ident := make([]byte, 0)
-
-			if handle.data[i] == '}' && handle.data[i+1] == '}' {
-				// skip over }}
-				i += 2
-				continue
-			}
-
-			for {
-				c = handle.data[i]
-				ident = append(ident, c)
-
-				next1, next2 := handle.data[i+1], handle.data[i+2]
-				if next1 == '}' && next2 == '}' {
-					break
-				}
-
-				i += 1
-			}
-			// skip over current and }, next } skips because of loop
-			i += 2
-			end := i + 1
-			n := string(ident)
-
-			if n == "children" {
-				handle.data = slices.Replace(handle.data, start, end, handle.children...)
-			} else {
-				p, ok := handle.params[n]
-				assert.True(ok, "param \"%s\" missing", n)
-
-				handle.data = slices.Replace(handle.data, start, end, []byte(p)...)
-			}
-
-			ident = ident[:0]
-		}
-	}
-
-	handle.rendered = true
-}
-
-var components = make(map[string]componentHandle)
-
-func component(key string) componentHandle {
-	comp, ok := components[key]
-	assert.True(ok, "component %s missing", key)
-
-	data := make([]byte, len(comp.data))
-	copy(data, comp.data)
-
-	return componentHandle{
-		data:     data,
-		params:   make(map[string]string),
-		children: make([]byte, 0),
-	}
-}
-
-func loadComponents(prod bool) {
-	switch {
-	case prod:
-		componentsPath := os.Getenv("COMPONENTS_PATH")
-		assert.True(componentsPath != "", "missing path to components")
-		// TODO: validate the path
-	default:
-		_, file, _, ok := runtime.Caller(0)
-		assert.True(ok, "unable to get runtime caller")
-
-		componentsDir := path.Join(file, "../components")
-		entries, err := os.ReadDir(componentsDir)
-		assert.NoErr(err, "unable to read components dir")
-
-		for _, e := range entries {
-			// TODO: handle?
-			assert.True(!e.IsDir(), "components dir contains directory")
-
-			n := e.Name()
-			p := path.Join(componentsDir, n)
-
-			data, err := os.ReadFile(p)
-			assert.NoErr(err, fmt.Sprintf("unable to read component: %s", p))
-
-			ident := strings.Split(n, ".")
-			components[ident[0]] = componentHandle{
-				data: data,
-			}
-		}
-	}
+	w.Write(buf)
+	return nil
 }
 
 func serveStaticFiles(prod bool) {
@@ -156,69 +193,104 @@ func serveStaticFiles(prod bool) {
 	http.Handle("/static/", http.StripPrefix("/static/", handler))
 }
 
-type transactionRow struct {
-	Id        string
-	Err       bool
-	Fee       int64
-	Signer    string
-	Timestamp time.Time
-	Data      *db.SolanaTransactionData
+type getTxsWithParserErrsPaginatedRowParserErr struct {
+	IxIdx   pgtype.Int4
+	Idx     int32
+	Origin  db.ErrOrigin
+	Kind    db.ErrType
+	Address string
+	Data    []byte
 }
 
-func getTransactions(
+type getTxsWithParserErrsPaginatedRow struct {
+	Id         string
+	Err        bool
+	Fee        int64
+	Signer     string
+	Timestamp  time.Time
+	Data       *db.SolanaTransactionData
+	ParserErrs pgtype.FlatArray[*getTxsWithParserErrsPaginatedRowParserErr]
+}
+
+func getTxsWithParserErrsPaginated(
 	pool *pgxpool.Pool,
 	slot int64,
 	blockIndex int32,
+	limit int32,
 ) (
-	res []*transactionRow, lastSlot int64, lastBlockIndex int32, err error,
+	[]*getTxsWithParserErrsPaginatedRow,
+	int64,
+	int32,
+	error,
 ) {
 	const query = `
 		select
-			id, err, fee, signer, timestamp, data
+			tx.id, tx.err, tx.fee, tx.signer, tx.timestamp, tx.data,
+			array_agg(
+				row(
+					err.ix_idx,
+					err.idx,
+					err.origin,
+					err.type,
+					err.address,
+					err.data
+				) order by err.idx asc
+			) filter (where err.id is not null) as errs
 		from
 			tx
+		left join
+			err on err.tx_id = tx.id
 		where
 			(
-				(data->>'slot')::bigint = $1 and
-				(data->>'blockIndex')::integer > $2
-			) or (data->>'slot')::bigint > $1
+				(tx.data->>'slot')::bigint = $1 and
+				(tx.data->>'blockIndex')::integer > $2 
+			) or 
+			(tx.data->>'slot')::bigint > $1
+		group by
+			tx.id
 		order by
-			(data->>'blockIndex')::integer asc,
-			(data->>'slot')::bigint asc
+			(tx.data->>'blockIndex')::integer asc,
+			(tx.data->>'slot')::bigint asc
 		limit
-			50
+			$3
 	`
-	rows, qErr := pool.Query(context.Background(), query, slot, blockIndex)
-	if qErr != nil {
-		err = qErr
-		return
+	rows, err := pool.Query(context.Background(), query, slot, blockIndex, limit)
+	if err != nil {
+		return nil, 0, 0, err
 	}
 
-	res = make([]*transactionRow, 0)
+	res := make([]*getTxsWithParserErrsPaginatedRow, 0)
 	for rows.Next() {
-		var tx transactionRow
+		var tx getTxsWithParserErrsPaginatedRow
 		var dataMarshalled []byte
 		err = rows.Scan(
-			&tx.Id, &tx.Err, &tx.Fee, &tx.Signer, &tx.Timestamp, &dataMarshalled,
+			&tx.Id, &tx.Err, &tx.Fee, &tx.Signer, &tx.Timestamp, &dataMarshalled, &tx.ParserErrs,
 		)
 		if err != nil {
-			return
+			return nil, 0, 0, err
 		}
 
 		data := new(db.SolanaTransactionData)
 		if err = json.Unmarshal(dataMarshalled, &data); err != nil {
-			return
+			return nil, 0, 0, err
 		}
 
 		tx.Data = data
 		res = append(res, &tx)
 	}
 
-	if len(res) > 0 {
-		lastSlot = int64(res[len(res)-1].Data.Slot)
+	if err = rows.Err(); err != nil {
+		return nil, 0, 0, err
 	}
 
-	return
+	lastSlot, lastBlockIndex := int64(-1), int32(-1)
+
+	if len(res) > 0 {
+		lastSlot = int64(res[len(res)-1].Data.Slot)
+		lastBlockIndex = int32(res[len(res)-1].Data.BlockIndex)
+	}
+
+	return res, lastSlot, lastBlockIndex, nil
 }
 
 func main() {
@@ -229,19 +301,79 @@ func main() {
 		prod = false
 	}
 
+	templateFuncs := template.FuncMap{
+		"formatDate": func(t time.Time) string {
+			return t.Format("02/01/2006 15:04:05")
+		},
+		"shorten": func(s string, start, end int) string {
+			return fmt.Sprintf("%s...%s", s[:start], s[len(s)-end:])
+		},
+		"toTitle": func(s string) string {
+			const toLower = 32
+			t := strings.Builder{}
+
+			isLower := func(c byte) bool {
+				return (c >= 97 && c <= 122)
+			}
+
+			if isLower(s[0]) {
+				t.WriteByte(s[0] - toLower)
+			} else {
+				t.WriteByte(s[0])
+			}
+
+			isAlpha := func(c byte) bool {
+				return isLower(c) || 65 <= c && c <= 90
+			}
+
+			for i := 1; i < len(s); i += 1 {
+				prev := s[i-1]
+				c := s[i]
+
+				switch {
+				case c == 95:
+					t.WriteByte(32)
+				case !isAlpha(prev) && isLower(c):
+					t.WriteByte(c - toLower)
+				default:
+					t.WriteByte(c)
+				}
+			}
+
+			return t.String()
+		},
+	}
+	var templates *template.Template = template.New("root").Funcs(templateFuncs)
+	loadTemplate(templates, transactionsPage)
+	loadTemplate(templates, transactionsCmp)
+	loadTemplate(templates, transactionCmp)
+
 	pool, err := db.InitPool(context.Background(), appEnv)
 	assert.NoErr(err, "")
 
 	serveStaticFiles(prod)
-	loadComponents(prod)
-
-	prevSlot, prevBlockIndex := int64(-1), int32(-1)
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		var txs []*transactionRow
-		var err error
-		txs, prevSlot, prevBlockIndex, err = getTransactions(
-			pool, prevSlot, prevBlockIndex,
+		query := r.URL.Query()
+		fromSlotParam, fromBlockIndexParam := query.Get("from_slot"), query.Get("from_block_index")
+
+		fromSlot, err := strconv.Atoi(fromSlotParam)
+		if err != nil {
+			fromSlot = -1
+		}
+		fromBlockIndex, err := strconv.Atoi(fromBlockIndexParam)
+		if err != nil {
+			fromBlockIndex = -1
+		}
+
+		const LIMIT = 50
+		var (
+			txs            []*getTxsWithParserErrsPaginatedRow
+			nextSlot       int64
+			nextBlockIndex int32
+		)
+		txs, nextSlot, nextBlockIndex, err = getTxsWithParserErrsPaginated(
+			pool, int64(fromSlot), int32(fromBlockIndex), LIMIT,
 		)
 		if err != nil {
 			w.WriteHeader(500)
@@ -250,24 +382,59 @@ func main() {
 			return
 		}
 
-		txsComp := component("transactions")
-
-		for _, tx := range txs {
-			txComp := component("transaction")
-
-			txIdShort := fmt.Sprintf("%s...%s", tx.Id[:4], tx.Id[len(tx.Id)-4:len(tx.Id)])
-			txComp.setParam("txIdShort", txIdShort)
-			txComp.setParam("txId", tx.Id)
-
-			txsComp.addChild(&txComp)
+		txsCompData := TransactionsCmpData{
+			NextSlot:       nextSlot,
+			NextBlockIndex: nextBlockIndex,
+			Transactions:   make([]TransactionCmpData, len(txs)),
 		}
 
-		wrapper := component("wrapper")
-		wrapper.addChild(&txsComp)
-		wrapper.render()
+		for i, tx := range txs {
+			txsCompData.Transactions[i].Id = tx.Id
+			txsCompData.Transactions[i].Timestamp = tx.Timestamp
+			txsCompData.Transactions[i].Err = tx.Err
+
+			preprocessErrs := make([]*parserErr, 0)
+			parserErrs := make([]*parserErr, 0)
+
+			for _, err := range tx.ParserErrs {
+				var data any = struct{}{}
+				switch err.Kind {
+				case db.ErrTypeAccountBalanceMismatch:
+					err := json.Unmarshal(err.Data, &data)
+					assert.NoErr(err, "unable to unmarshal")
+				case db.ErrTypeAccountMissing:
+				}
+
+				e := &parserErr{
+					IxIdx:   -1,
+					Kind:    err.Kind,
+					Address: err.Address,
+					Data:    data,
+				}
+
+				if err.IxIdx.Valid {
+					e.IxIdx = err.IxIdx.Int32
+				}
+
+				switch err.Origin {
+				case db.ErrOriginPreprocess:
+					preprocessErrs = append(preprocessErrs, e)
+				case db.ErrOriginParse:
+					parserErrs = append(parserErrs, e)
+				}
+			}
+
+			txsCompData.Transactions[i].PreprocessErrs = preprocessErrs
+			txsCompData.Transactions[i].ParserErrs = parserErrs
+		}
 
 		w.Header().Set("content-type", "text/html")
-		w.Write(wrapper.data)
+		err = executeTemplate(templates, w, "transactions_page", txsCompData)
+		if err != nil {
+			w.WriteHeader(500)
+			m := fmt.Sprintf("500 server error: %s", err)
+			w.Write([]byte(m))
+		}
 	})
 
 	fmt.Println("Listening at: http://localhost:8888")
