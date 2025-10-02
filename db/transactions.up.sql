@@ -7,6 +7,8 @@ create table stats (
     primary key (user_account_id),
     foreign key (user_account_id) references user_account (id) on delete cascade,
 
+    -- count of all user txs combined
+    -- all wallets, all related accounts
     tx_count integer default 0,
     wallets_count integer default 0
 );
@@ -22,7 +24,9 @@ create table wallet (
 
     unique (user_account_id, address, network),
 
+    -- count of txs related to **only** this wallet
     tx_count integer default 0,
+    -- count of txs related to this wallet and it's related accounts
     total_tx_count integer default 0,
     latest_tx_id varchar
 );
@@ -93,22 +97,118 @@ create table tx (
     data jsonb not null
 );
 
+-- junction table for:
+--
+-- user                   <-> tx
+-- wallet                 <-> tx
+-- solana_related_account <-> tx
 create table tx_ref (
     user_account_id integer not null,
-    wallet_id integer not null,
     tx_id varchar not null,
-    related_account_address varchar(64),
+    primary key (user_account_id, tx_id),
 
-    primary key (user_account_id, wallet_id, tx_id),
+    wallets integer[],
+    related_accounts varchar(64)[],
 
     foreign key (user_account_id) references user_account (id),
-    foreign key (
-        wallet_id, related_account_address
-    ) references solana_related_account (
-        wallet_id, address
-    ) on delete cascade, 
-    foreign key (wallet_id) references wallet (id) on delete cascade
+    foreign key (tx_id) references tx (id) on delete cascade
 );
+
+create function tx_ref_delete_wallet()
+returns trigger
+language plpgsql
+as $$
+declare
+begin
+    update tx_ref set
+        wallets = array_remove(wallets, old.id)
+    where
+        user_account_id = old.user_account_id;
+
+    return old;
+end;
+$$;
+
+create trigger tx_ref_wallet_on_delete_cascade
+before delete on wallet
+for each row
+execute function tx_ref_delete_wallet();
+
+create function tx_ref_delete_related_account()
+returns trigger
+language plpgsql
+as $$
+declare
+begin
+    update tx_ref set
+        related_accounts = array_remove(tx_ref.related_accounts, old.address)
+    where
+        old.wallet_id = any(tx_ref.wallets);
+
+    return old;
+end;
+$$;
+
+create trigger tx_ref_related_accounts_on_delete_cascade
+before delete on solana_related_account
+for each row
+execute function tx_ref_delete_related_account();
+
+create function array_append_unique(
+    arr anyarray,
+    el anycompatible
+) returns anyarray
+language plpgsql
+immutable
+as $$
+declare
+begin
+    if el is null or el = any(arr) then
+        return arr;
+    else
+        return array_append(arr, el);
+    end if;
+end;
+$$;
+
+create procedure set_user_txs_count(
+    p_user_account_id integer,
+    p_wallet_id integer
+)
+language plpgsql
+as $$
+declare
+    counts record;
+begin
+    select
+        count(tx_id) as total_count,
+        count(tx_id) filter (
+            where p_wallet_id = any(wallets)
+        ) as total_wallet_count,
+        count(tx_id) filter (
+            where
+                p_wallet_id = any(wallets) and
+                array_length(related_accounts, 1) is null
+        ) as wallet_count
+    into
+        counts
+    from
+        tx_ref
+    where
+        user_account_id = p_user_account_id;
+
+    insert into stats (user_account_id, tx_count) values (
+        p_user_account_id, counts.total_count
+    ) on conflict (user_account_id) do update set
+        tx_count = counts.total_count;
+
+    update wallet set
+        total_tx_count = counts.total_wallet_count,
+        tx_count = counts.wallet_count
+    where
+        id = p_wallet_id;
+end;
+$$;
 
 create procedure set_user_transactions(
     p_user_account_id integer,
@@ -119,7 +219,7 @@ create procedure set_user_transactions(
 language plpgsql
 as $$
 declare
-    refs_count integer;
+    update_count integer;
 begin
     if p_related_account_address is not null then
         insert into solana_related_account (
@@ -133,37 +233,56 @@ begin
 
     insert into tx_ref (
         user_account_id,
-        wallet_id,
-        related_account_address,
-        tx_id
+        tx_id,
+        wallets,
+        related_accounts
     ) select
         p_user_account_id,
-        p_wallet_id,
-        p_related_account_address,
-        t.tx_id
-    from unnest(p_tx_ids) as t(tx_id)
-    on conflict (
-        user_account_id, wallet_id, tx_id
-    ) do nothing;
-
-    get diagnostics refs_count = row_count;
-
-    if refs_count > 0 then
-        update stats set
-            tx_count = tx_count + refs_count
-        where user_account_id = p_user_account_id;
-
-        if p_related_account_address is not null then
-            update wallet set
-                total_tx_count = total_tx_count + refs_count
-            where id = p_wallet_id;
+        t.tx_id,
+        array[p_wallet_id],
+        case when p_related_account_address is not null then
+            array[p_related_account_address]
         else
-            update wallet set
-                tx_count = tx_count + refs_count,
-                total_tx_count = total_tx_count + refs_count
-            where id = p_wallet_id;
-        end if;
+            array[]::varchar(64)[]
+        end
+    from unnest(
+        p_tx_ids
+    ) as t(tx_id)
+    on conflict (
+        user_account_id, tx_id
+    ) do update set
+        wallets = array_append_unique(tx_ref.wallets, p_wallet_id),
+        related_accounts = array_append_unique(tx_ref.related_accounts, p_related_account_address);
+
+    get diagnostics update_count = row_count;
+
+    if update_count > 0 then
+        call set_user_txs_count(p_user_account_id, p_wallet_id);
     end if;
+end;
+$$;
+
+create procedure dev_delete_user_transactions(
+    p_user_account_id integer,
+    p_wallet_id integer
+)
+language plpgsql
+as $$
+declare
+begin
+    delete from tx_ref t where
+        array_length(t.wallets, 1) = 1 and
+        t.wallets[1] = p_wallet_id;
+
+    update tx_ref set
+        wallets = array_remove(tx_ref.wallets, p_wallet_id)
+    where
+        p_wallet_id = any(tx_ref.wallets);
+
+    delete from solana_related_account s where
+        s.wallet_id = p_wallet_id;
+
+    call set_user_txs_count(p_user_account_id, p_wallet_id);
 end;
 $$;
 

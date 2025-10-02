@@ -228,6 +228,7 @@ type ErrAccountBalanceMismatch struct {
 
 func EnqueueInsertErr(
 	batch *pgx.Batch,
+	userAccountId int32,
 	txId string,
 	ixIdx pgtype.Int4,
 	idx int32,
@@ -238,15 +239,15 @@ func EnqueueInsertErr(
 ) *pgx.QueuedQuery {
 	const query = `
 		insert into err (
-			tx_id, ix_idx, idx, origin,
+			user_account_id, tx_id, ix_idx, idx, origin,
 			type, address, data
 		) values (
-			$1, $2, $3, $4, $5, $6, $7
+			$1, $2, $3, $4, $5, $6, $7, $8
 		)
 	`
 	return batch.Queue(
 		query,
-		txId, ixIdx, idx, origin,
+		userAccountId, txId, ixIdx, idx, origin,
 		kind, address, data,
 	)
 }

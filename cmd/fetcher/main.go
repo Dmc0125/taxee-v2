@@ -379,15 +379,15 @@ func getSolanaRelatedAccounts(
 	return res, nil
 }
 
-func deleteSolanaRelatedAccounts(
+func devDeleteUserTransactions(
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	walletId int32,
+	userAccountId, walletId int32,
 ) error {
-	const query = "delete from solana_related_account where wallet_id = $1"
-	_, err := pool.Exec(ctx, query, walletId)
+	const q = "call dev_delete_user_transactions($1, $2)"
+	_, err := pool.Exec(ctx, q, userAccountId, walletId)
 	if err != nil {
-		return fmt.Errorf("unable to delete solana related accounts: %w", err)
+		return fmt.Errorf("unable to call dev_delete_user_transactions: %w", err)
 	}
 	return nil
 }
@@ -487,7 +487,7 @@ func Fetch(
 				false,
 			}
 
-			err := deleteSolanaRelatedAccounts(ctx, pool, walletId)
+			err := devDeleteUserTransactions(ctx, pool, userAccountId, walletId)
 			assert.NoErr(err, "")
 		} else {
 			accounts[0] = solanaAccount{

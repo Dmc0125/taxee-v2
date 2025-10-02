@@ -242,7 +242,7 @@ func getTxsWithParserErrsPaginated(
 		inner join
 			tx_ref on tx_ref.tx_id = tx.id and tx_ref.user_account_id = $1
 		left join
-			err on err.tx_id = tx.id
+			err on err.tx_id = tx.id and err.user_account_id = $1
 		where
 			(
 				(tx.data->>'slot')::bigint = $2 and

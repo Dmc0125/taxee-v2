@@ -12,8 +12,9 @@ create type err_type as enum (
 
 create table err (
     id serial primary key,
-
+    user_account_id integer not null,
     tx_id varchar not null,
+
     -- NOTE: could be eth -> does not have concept of ixs
     ix_idx integer,
     idx integer not null, 
@@ -23,8 +24,10 @@ create table err (
     address varchar(64) not null,
     data jsonb, 
 
-    foreign key (tx_id) references tx (id),
-    unique (tx_id, ix_idx, idx)
+    foreign key (user_account_id, tx_id) references tx_ref (
+        user_account_id, tx_id
+    ) on delete cascade,
+    unique (user_account_id, tx_id, ix_idx, idx)
 );
 
 commit;

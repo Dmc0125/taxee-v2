@@ -102,6 +102,7 @@ func Parse(ctx context.Context, pool *pgxpool.Pool, userAccountId int32) {
 
 			q := db.EnqueueInsertErr(
 				&batch,
+				userAccountId,
 				txId,
 				pgtype.Int4{Int32: ixIdx, Valid: true},
 				errPos,
