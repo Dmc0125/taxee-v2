@@ -5,6 +5,7 @@ go 1.24.5
 require (
 	github.com/jackc/pgx/v5 v5.7.6
 	github.com/mr-tron/base58 v1.2.0
+	github.com/shopspring/decimal v1.4.0
 	github.com/stretchr/testify v1.8.1
 )
 

@@ -18,7 +18,72 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func Parse(ctx context.Context, pool *pgxpool.Pool, userAccountId int32) {
+type parserError interface {
+	IsEqual(other any) bool
+}
+
+type globalContext struct {
+	wallets []*db.WalletRow
+	errors  map[string][]parserError
+}
+
+func (ctx *globalContext) AppendErr(account string, err any) {
+	e, ok := err.(parserError)
+	assert.True(ok, "invalid err: %T", err)
+	accountErrs := ctx.errors[account]
+
+	switch {
+	case len(accountErrs) == 0:
+		accountErrs = append(accountErrs, e)
+	default:
+		last := accountErrs[len(accountErrs)-1]
+		if !last.IsEqual(err) {
+			accountErrs = append(accountErrs, e)
+		}
+	}
+
+	ctx.errors[account] = accountErrs
+}
+
+func (ctx *globalContext) WalletOwned(network db.Network, address string) bool {
+	for _, w := range ctx.wallets {
+		if w.Network == network && w.Address == address {
+			return true
+		}
+	}
+	return false
+}
+
+func devDeleteParsed(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	userAccountId int32,
+) error {
+	const q = "call dev_delete_parsed($1)"
+	_, err := pool.Exec(ctx, q, userAccountId)
+	if err != nil {
+		return fmt.Errorf("unable to call dev_delete_parsed: %w", err)
+	}
+	return nil
+}
+
+type inventoryAccountId struct {
+	address string
+	network db.Network
+	token   string
+}
+
+type inventory struct {
+}
+
+func (inv *inventory) processEvent(event db.Event) {}
+
+func Parse(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	userAccountId int32,
+	fresh bool,
+) {
 	if os.Getenv("MEM_PROF") == "1" {
 		var wg sync.WaitGroup
 		wg.Add(1)
@@ -32,19 +97,19 @@ func Parse(ctx context.Context, pool *pgxpool.Pool, userAccountId int32) {
 		}()
 	}
 
+	if fresh {
+		err := devDeleteParsed(ctx, pool, userAccountId)
+		assert.NoErr(err, "")
+	}
+
 	wallets, err := db.GetWallets(ctx, pool, userAccountId)
 	assert.NoErr(err, "")
 
-	solanaWallets := make([]string, 0)
-	for _, w := range wallets {
-		switch w.Network {
-		case db.NetworkSolana:
-			solanaWallets = append(solanaWallets, w.Address)
-		}
+	globalCtx := globalContext{
+		wallets: wallets,
+		errors:  make(map[string][]parserError),
 	}
-
-	var solanaCtx solana.Context
-	solanaCtx.Init(solanaWallets)
+	solanaAccounts := make(map[string][]solana.AccountLifetime)
 
 	// TODO:
 	// pagination ??
@@ -61,11 +126,9 @@ func Parse(ctx context.Context, pool *pgxpool.Pool, userAccountId int32) {
 			continue
 		}
 
-		solanaCtx.TxId = tx.Id
-
 		switch txData := tx.Data.(type) {
 		case *db.SolanaTransactionData:
-			solana.PreparseTx(&solanaCtx, txData)
+			solana.PreprocessTx(&globalCtx, solanaAccounts, tx.Id, txData)
 		}
 	}
 
@@ -74,7 +137,7 @@ func Parse(ctx context.Context, pool *pgxpool.Pool, userAccountId int32) {
 	// always created in the correct order, so just keeping global
 	// position is fine
 	errPos := int32(0)
-	for _, errs := range solanaCtx.Errors {
+	for _, errs := range globalCtx.errors {
 		for _, err := range errs {
 			txId, address, ixIdx := "", "", int32(0)
 			var (
@@ -122,9 +185,50 @@ func Parse(ctx context.Context, pool *pgxpool.Pool, userAccountId int32) {
 
 	///////////////////
 	// process txs
+	inv := inventory{}
+	batch = pgx.Batch{}
 
-	// for _, tx := range txs {
-	//
-	// }
+	for _, tx := range txs {
+		switch txData := tx.Data.(type) {
+		case *db.SolanaTransactionData:
+			if tx.Err {
+				// only fee
+				continue
+			}
 
+			for ixIdx, ix := range txData.Instructions {
+				events := make([]db.Event, 0)
+				solana.ProcessIx(
+					&globalCtx,
+					solanaAccounts,
+					&events,
+					tx.Id,
+					txData.Slot,
+					txData.TokenDecimals,
+					uint32(ixIdx),
+					ix,
+				)
+
+				for eventIdx, event := range events {
+					inv.processEvent(event)
+
+					q := db.EnqueueInsertUserEvent(
+						&batch,
+						userAccountId,
+						tx.Id,
+						int32(ixIdx),
+						int32(eventIdx),
+						event,
+					)
+					q.Exec(func(_ pgconn.CommandTag) error { return nil })
+				}
+			}
+
+			// validate balances
+		}
+	}
+
+	br = pool.SendBatch(ctx, &batch)
+	err = br.Close()
+	assert.NoErr(err, "unable to insert events")
 }

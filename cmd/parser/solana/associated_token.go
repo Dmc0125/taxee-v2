@@ -77,7 +77,7 @@ func preprocessAssociatedTokenIx(ctx *Context, ix *db.SolanaInstruction) {
 	case associatedTokenIxCreate:
 		tokenAccount, owner, mint := ix.Accounts[1], ix.Accounts[2], ix.Accounts[3]
 
-		if !ctx.walletOwned(owner) {
+		if !ctx.WalletOwned(db.NetworkSolana, owner) {
 			return
 		}
 

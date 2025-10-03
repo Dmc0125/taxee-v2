@@ -89,7 +89,7 @@ func main() {
 	case "parse":
 		// parse
 		assert.True(appEnv != "prod", "this command must not be run in production env")
-		parser.Parse(context.Background(), pool, 1)
+		parser.Parse(context.Background(), pool, 1, true)
 	case "parse-server":
 		// long running server
 	}

@@ -1,13 +1,8 @@
 package solana
 
 import (
-	"fmt"
 	"math"
-	"slices"
-	"strings"
-	"taxee/pkg/assert"
 	"taxee/pkg/db"
-	"taxee/pkg/location"
 )
 
 type AccountLifetime struct {
@@ -41,60 +36,7 @@ func (acc *AccountLifetime) open(slot uint64, ixIdx uint32) bool {
 	return acc.MinSlot < slot && slot < acc.MaxSlot
 }
 
-type ErrAccountMissing struct {
-	Location string
-	TxId     string
-	IxIdx    uint32
-	Address  string
-}
-
-func (err *ErrAccountMissing) Error() string {
-	m := fmt.Sprintf(
-		"(%s)\nAccount \"%s\" missing at %s (ix idx: %d)",
-		err.Location, err.Address, err.TxId, err.IxIdx,
-	)
-	return m
-}
-
-func (err *ErrAccountMissing) init(ctx *Context, address string) {
-	loc, e := location.Location(2)
-	assert.NoErr(e, "")
-	err.Location = loc
-	err.TxId = ctx.TxId
-	err.IxIdx = ctx.IxIdx
-	err.Address = address
-}
-
-type ErrAccountBalanceMismatch struct {
-	ErrAccountMissing
-	Expected uint64
-	Had      uint64
-}
-
-func (err *ErrAccountBalanceMismatch) Error() string {
-	m := fmt.Sprintf(
-		"(%s)\nAccount \"%s\" balance missing at %s (ix idx: %d) - expected: %d != had: %d",
-		err.Location, err.Address, err.TxId, err.IxIdx, err.Expected, err.Had,
-	)
-	return m
-}
-
-func (err *ErrAccountBalanceMismatch) init(
-	ctx *Context,
-	address string,
-	expected, had uint64,
-) {
-	loc, e := location.Location(2)
-	assert.NoErr(e, "")
-	err.Location = loc
-	err.TxId = ctx.TxId
-	err.IxIdx = ctx.IxIdx
-	err.Address = address
-	err.Expected = expected
-	err.Had = had
-}
-
-func errEq(err1, err2 error) bool {
+func errsEq(err1, err2 any) bool {
 	switch e1 := err1.(type) {
 	case *ErrAccountMissing:
 		e2, ok := err2.(*ErrAccountMissing)
@@ -113,44 +55,59 @@ func errEq(err1, err2 error) bool {
 	return false
 }
 
-type Context struct {
-	TxId  string
-	Slot  uint64
-	IxIdx uint32
+type ErrAccountMissing struct {
+	TxId    string
+	IxIdx   uint32
+	Address string
+}
 
-	Wallets  []string
-	Accounts map[string][]AccountLifetime
-	Errors   map[string][]error
+func (err *ErrAccountMissing) init(ctx *Context, address string) {
+	err.TxId = ctx.TxId
+	err.IxIdx = ctx.IxIdx
+	err.Address = address
+}
+
+func (err *ErrAccountMissing) IsEqual(other any) bool {
+	return errsEq(err, other)
+}
+
+type ErrAccountBalanceMismatch struct {
+	ErrAccountMissing
+	Expected uint64
+	Had      uint64
+}
+
+func (err *ErrAccountBalanceMismatch) init(
+	ctx *Context,
+	address string,
+	expected, had uint64,
+) {
+	err.ErrAccountMissing.init(ctx, address)
+	err.Expected = expected
+	err.Had = had
+}
+
+func (err *ErrAccountBalanceMismatch) IsEqual(other any) bool {
+	return errsEq(err, other)
+}
+
+type GlobalCtx interface {
+	AppendErr(string, any)
+	WalletOwned(db.Network, string) bool
+}
+
+type Context struct {
+	GlobalCtx
+
+	TxId           string
+	Slot           uint64
+	IxIdx          uint32
+	TokensDecimals map[string]uint8
+	Accounts       map[string][]AccountLifetime
 }
 
 func (ctx *Context) Init(wallets []string) {
 	ctx.Accounts = make(map[string][]AccountLifetime)
-	ctx.Errors = make(map[string][]error)
-	ctx.Wallets = wallets
-}
-
-func (ctx *Context) appendErr(address string, err error) {
-	errors, ok := ctx.Errors[address]
-
-	switch {
-	case !ok:
-		errors = make([]error, 0)
-		fallthrough
-	case len(errors) == 0:
-		errors = append(errors, err)
-	default:
-		last := errors[len(errors)-1]
-		if errEq(err, last) {
-			return
-		}
-		errors = append(errors, err)
-	}
-
-	ctx.Errors[address] = errors
-}
-
-func (ctx *Context) walletOwned(other string) bool {
-	return slices.Contains(ctx.Wallets, other)
 }
 
 func (ctx *Context) accountReceiveSol(address string, amount uint64) {
@@ -187,7 +144,7 @@ func (ctx *Context) accountInitOwned(address string, data any) {
 	if !ok || len(lifetimes) == 0 {
 		var err ErrAccountMissing
 		err.init(ctx, address)
-		ctx.appendErr(address, &err)
+		ctx.AppendErr(address, &err)
 		return
 	}
 
@@ -208,7 +165,7 @@ func (ctx *Context) accountClose(closedAddress, receiverAddress string) {
 	if !ok || len(lifetimes) == 0 {
 		var err ErrAccountMissing
 		err.init(ctx, closedAddress)
-		ctx.appendErr(closedAddress, &err)
+		ctx.AppendErr(closedAddress, &err)
 		return
 	}
 
@@ -216,7 +173,7 @@ func (ctx *Context) accountClose(closedAddress, receiverAddress string) {
 	if !acc.PreparseOpen {
 		var err ErrAccountBalanceMismatch
 		err.init(ctx, closedAddress, 0, 0)
-		ctx.appendErr(closedAddress, &err)
+		ctx.AppendErr(closedAddress, &err)
 		return
 	}
 
@@ -231,59 +188,20 @@ func (ctx *Context) accountClose(closedAddress, receiverAddress string) {
 	ctx.accountReceiveSol(receiverAddress, closedBalance)
 }
 
-func (ctx *Context) AccountsString() string {
-	sb := strings.Builder{}
-
-	pad := func(x string, args ...any) string {
-		m := fmt.Sprintf(x, args...)
-		return fmt.Sprintf("    %s", m)
+func (ctx *Context) accountFindOwned(address string, slot uint64, ixIdx uint32) *AccountLifetime {
+	lifetimes, ok := ctx.Accounts[address]
+	if !ok || len(lifetimes) == 0 {
+		return nil
 	}
 
-	for address, accounts := range ctx.Accounts {
-		sb.WriteRune('\n')
-		sb.WriteString("Account: ")
-		sb.WriteString(address)
-		sb.WriteRune('\n')
-
-		for i, acc := range accounts {
-			// sb.WriteRune('\n')
-			sb.WriteRune(rune(48 + i))
-			sb.WriteRune(':')
-			sb.WriteRune('\n')
-
-			sb.WriteString(pad(fmt.Sprintf(
-				"Min: slot %d (ix idx: %d) <> Max: slot %d (ix idx: %d)\n",
-				acc.MinSlot,
-				acc.MinIxIdx,
-				acc.MaxSlot,
-				acc.MaxIxIdx,
-			)))
-			sb.WriteString(pad("Balance: %d\n", acc.Balance))
-			sb.WriteString(pad("Data: %#v\n", acc.Data))
-			sb.WriteString(pad("Owned: %t\n", acc.Owned))
+	for i := 0; i < len(lifetimes); i += 1 {
+		lt := &lifetimes[i]
+		if lt.open(slot, ixIdx) && lt.Owned {
+			return lt
 		}
 	}
 
-	return sb.String()
-}
-
-func (ctx *Context) ErrorsString() string {
-	sb := strings.Builder{}
-
-	for address, errs := range ctx.Errors {
-		sb.WriteString("\nAccount errors: ")
-		sb.WriteString(address)
-		sb.WriteRune('\n')
-
-		for i, err := range errs {
-			sb.WriteRune(rune(48 + i))
-			sb.WriteRune(':')
-			sb.WriteString(err.Error())
-			sb.WriteRune('\n')
-		}
-	}
-
-	return sb.String()
+	return nil
 }
 
 type relatedAccounts interface {
@@ -305,23 +223,36 @@ func RelatedAccountsFromTx(
 	}
 }
 
-func PreparseTx(ctx *Context, tx *db.SolanaTransactionData) {
-	ctx.Slot = tx.Slot
+func PreprocessTx(
+	globalCtx GlobalCtx,
+	accounts map[string][]AccountLifetime,
+	txId string,
+	tx *db.SolanaTransactionData,
+) {
+	ctx := Context{
+		GlobalCtx: globalCtx,
+		TxId:      txId,
+		Slot:      tx.Slot,
+		Accounts:  accounts,
+	}
 
 	for ixIdx, ix := range tx.Instructions {
 		ctx.IxIdx = uint32(ixIdx)
 
 		switch ix.ProgramAddress {
 		case SYSTEM_PROGRAM_ADDRESS:
-			preprocessSystemIx(ctx, ix)
+			preprocessSystemIx(&ctx, ix)
 		case TOKEN_PROGRAM_ADDRESS:
-			preprocessTokenIx(ctx, ix)
+			preprocessTokenIx(&ctx, ix)
 		case ASSOCIATED_TOKEN_PROGRAM_ADDRESS:
-			preprocessAssociatedTokenIx(ctx, ix)
+			preprocessAssociatedTokenIx(&ctx, ix)
 		}
 	}
 
-	findLifetime := func(ctx *Context, lifetimes []AccountLifetime) *AccountLifetime {
+	findLifetime := func(
+		ctx *Context,
+		lifetimes []AccountLifetime,
+	) *AccountLifetime {
 		var lt *AccountLifetime
 		for i := len(lifetimes) - 1; i >= 0; i -= 1 {
 			temp := &lifetimes[i]
@@ -335,7 +266,7 @@ func PreparseTx(ctx *Context, tx *db.SolanaTransactionData) {
 
 nativeBalances:
 	for accountAddress, nativeBalance := range tx.NativeBalances {
-		if ctx.walletOwned(accountAddress) {
+		if ctx.WalletOwned(db.NetworkSolana, accountAddress) {
 			continue
 		}
 
@@ -345,26 +276,26 @@ nativeBalances:
 
 		switch {
 		case tokenBalanceExists:
-			if !ctx.walletOwned(tokenBalance.Owner) {
+			if !ctx.WalletOwned(db.NetworkSolana, tokenBalance.Owner) {
 				continue nativeBalances
 			}
 
 			if !accountExists {
 				var err ErrAccountMissing
-				err.init(ctx, accountAddress)
-				ctx.appendErr(accountAddress, &err)
+				err.init(&ctx, accountAddress)
+				ctx.AppendErr(accountAddress, &err)
 				continue nativeBalances
 			}
 
-			lt = findLifetime(ctx, lifetimes)
+			lt = findLifetime(&ctx, lifetimes)
 			if lt == nil {
 				var err ErrAccountMissing
-				err.init(ctx, accountAddress)
-				ctx.appendErr(accountAddress, &err)
+				err.init(&ctx, accountAddress)
+				ctx.AppendErr(accountAddress, &err)
 				continue nativeBalances
 			}
 		case accountExists:
-			lt = findLifetime(ctx, lifetimes)
+			lt = findLifetime(&ctx, lifetimes)
 			if lt == nil || !lt.Owned {
 				continue nativeBalances
 			}
@@ -375,9 +306,34 @@ nativeBalances:
 		// TODO: maybe validate account data ?
 		if lt.Balance != nativeBalance.Post {
 			var err ErrAccountBalanceMismatch
-			err.init(ctx, accountAddress, nativeBalance.Post, lt.Balance)
-			ctx.appendErr(accountAddress, &err)
+			err.init(&ctx, accountAddress, nativeBalance.Post, lt.Balance)
+			ctx.AppendErr(accountAddress, &err)
 			continue nativeBalances
 		}
+	}
+}
+
+func ProcessIx(
+	globalCtx GlobalCtx,
+	accounts map[string][]AccountLifetime,
+	events *[]db.Event,
+	txId string,
+	slot uint64,
+	tokensDecimal map[string]uint8,
+	ixIdx uint32,
+	ix *db.SolanaInstruction,
+) {
+	ctx := Context{
+		GlobalCtx:      globalCtx,
+		Accounts:       accounts,
+		TxId:           txId,
+		Slot:           slot,
+		TokensDecimals: tokensDecimal,
+		IxIdx:          ixIdx,
+	}
+
+	switch ix.ProgramAddress {
+	case SYSTEM_PROGRAM_ADDRESS:
+		processSystemIx(&ctx, events, ix)
 	}
 }

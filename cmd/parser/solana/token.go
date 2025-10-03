@@ -97,7 +97,7 @@ func preprocessTokenIx(ctx *Context, ix *db.SolanaInstruction) {
 		destination := ix.Accounts[1]
 		// fmt.Println(tokenAccount, owner)
 
-		if !ctx.walletOwned(owner) {
+		if !ctx.WalletOwned(db.NetworkSolana, owner) {
 			return
 		}
 
@@ -107,7 +107,7 @@ func preprocessTokenIx(ctx *Context, ix *db.SolanaInstruction) {
 		return
 	}
 
-	if !ctx.walletOwned(owner) {
+	if !ctx.WalletOwned(db.NetworkSolana, owner) {
 		return
 	}
 
