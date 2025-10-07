@@ -401,7 +401,7 @@ func (tx *Transaction) parseLogs(logMessages []string) error {
 	const (
 		INVOKE   = "invoke"
 		SUCCESS  = "success"
-		TRUNCATE = "Log runcated"
+		TRUNCATE = "Log truncated"
 	)
 
 	depth, ixIdx, iixIdx := 0, -1, -1

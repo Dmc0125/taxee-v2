@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	rpcsolana "taxee/cmd/fetcher/solana"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -150,10 +151,11 @@ type SolanaTransactionData struct {
 }
 
 type TransactionRow struct {
-	Id      string
-	Err     bool
-	Data    any
-	Network Network
+	Id        string
+	Err       bool
+	Data      any
+	Network   Network
+	Timestamp time.Time
 }
 
 func GetTransactions(
@@ -163,7 +165,7 @@ func GetTransactions(
 ) ([]*TransactionRow, error) {
 	query := `
 		select
-			tx.id, tx.err, tx.data, tx.network
+			tx.id, tx.err, tx.data, tx.network, tx.timestamp
 		from
 			tx
 		join
@@ -183,7 +185,7 @@ func GetTransactions(
 	for rows.Next() {
 		tx := TransactionRow{}
 		var dataBytes []byte
-		err := rows.Scan(&tx.Id, &tx.Err, &dataBytes, &tx.Network)
+		err := rows.Scan(&tx.Id, &tx.Err, &dataBytes, &tx.Network, &tx.Timestamp)
 		if err != nil {
 			return nil, fmt.Errorf("unable to scan transaction: %w", err)
 		}
@@ -251,4 +253,3 @@ func EnqueueInsertErr(
 		kind, address, data,
 	)
 }
-

@@ -2,9 +2,13 @@ begin;
 
 drop procedure dev_delete_parsed;
 
-drop table user_event;
+drop table event;
 
-drop type user_event_type;
+drop type ui_event_type;
+
+drop table pricepoint;
+
+drop table coingecko_token;
 
 drop table err;
 

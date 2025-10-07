@@ -1,35 +1,35 @@
-package solana
+package parser
 
 import (
 	"encoding/binary"
 	"taxee/pkg/db"
 )
 
-const ASSOCIATED_TOKEN_PROGRAM_ADDRESS = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+const SOL_ASSOCIATED_TOKEN_PROGRAM_ADDRESS = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 
-type associatedTokenIx int
+type solAssociatedTokenIx int
 
 const (
-	associatedTokenIxCreate associatedTokenIx = iota
-	associatedTokenIxCreateIdempotent
-	associatedTokenIxRecoverNested
+	solAssociatedTokenIxCreate solAssociatedTokenIx = iota
+	solAssociatedTokenIxCreateIdempotent
+	solAssociatedTokenIxRecoverNested
 )
 
-func associatedTokenIxFromData(data []byte) (ix associatedTokenIx, ok bool) {
+func solAssociatedTokenIxFromData(data []byte) (ix solAssociatedTokenIx, ok bool) {
 	ok = true
 
 	if len(data) == 0 {
-		ix = associatedTokenIxCreate
+		ix = solAssociatedTokenIxCreate
 		return
 	}
 
 	switch data[0] {
 	case 0:
-		ix = associatedTokenIxCreate
+		ix = solAssociatedTokenIxCreate
 	case 1:
-		ix = associatedTokenIxCreateIdempotent
+		ix = solAssociatedTokenIxCreateIdempotent
 	case 2:
-		ix = associatedTokenIxRecoverNested
+		ix = solAssociatedTokenIxRecoverNested
 	default:
 		ok = false
 		return
@@ -38,18 +38,18 @@ func associatedTokenIxFromData(data []byte) (ix associatedTokenIx, ok bool) {
 	return
 }
 
-func associatedTokenIxRelatedAccounts(
+func solAssociatedTokenIxRelatedAccounts(
 	relatedAccounts relatedAccounts,
 	walletAddress string,
 	ix *db.SolanaInstruction,
 ) {
-	ixType, ok := associatedTokenIxFromData(ix.Data)
+	ixType, ok := solAssociatedTokenIxFromData(ix.Data)
 	if !ok {
 		return
 	}
 
 	switch ixType {
-	case associatedTokenIxCreate, associatedTokenIxCreateIdempotent:
+	case solAssociatedTokenIxCreate, solAssociatedTokenIxCreateIdempotent:
 		if len(ix.InnerInstructions) == 0 {
 			return
 		}
@@ -62,22 +62,22 @@ func associatedTokenIxRelatedAccounts(
 	}
 }
 
-func preprocessAssociatedTokenIx(ctx *Context, ix *db.SolanaInstruction) {
-	ixType, ok := associatedTokenIxFromData(ix.Data)
+func solPreprocessAssociatedTokenIx(ctx *solanaContext, ix *db.SolanaInstruction) {
+	ixType, ok := solAssociatedTokenIxFromData(ix.Data)
 	if !ok {
 		return
 	}
 
 	switch ixType {
-	case associatedTokenIxCreateIdempotent:
+	case solAssociatedTokenIxCreateIdempotent:
 		if len(ix.InnerInstructions) == 0 {
 			return
 		}
 		fallthrough
-	case associatedTokenIxCreate:
+	case solAssociatedTokenIxCreate:
 		tokenAccount, owner, mint := ix.Accounts[1], ix.Accounts[2], ix.Accounts[3]
 
-		if !ctx.WalletOwned(db.NetworkSolana, owner) {
+		if !ctx.walletOwned(owner) {
 			return
 		}
 
@@ -89,13 +89,13 @@ func preprocessAssociatedTokenIx(ctx *Context, ix *db.SolanaInstruction) {
 		// len 4 (account empty) -> transfer 2nd
 		transferIx := ix.InnerInstructions[1]
 		amount := binary.LittleEndian.Uint64(transferIx.Data[4:])
-		ctx.accountReceiveSol(tokenAccount, amount)
+		ctx.receiveSol(tokenAccount, amount)
 
-		data := TokenAccountData{
+		data := SolTokenAccountData{
 			Mint:  mint,
 			Owner: owner,
 		}
-		ctx.accountInitOwned(tokenAccount, &data)
-	case associatedTokenIxRecoverNested:
+		ctx.initOwned(tokenAccount, &data)
+	case solAssociatedTokenIxRecoverNested:
 	}
 }

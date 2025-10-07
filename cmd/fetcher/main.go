@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"taxee/cmd/fetcher/solana"
-	solanaparsing "taxee/cmd/parser/solana"
+	"taxee/cmd/parser"
 	"taxee/pkg/assert"
 	"taxee/pkg/db"
 	"taxee/pkg/logger"
@@ -265,7 +265,7 @@ func fetchSolana(
 					}
 
 					if !account.related && !tx.Err {
-						solanaparsing.RelatedAccountsFromTx(
+						parser.RelatedAccountsFromTx(
 							(*solanaAccounts)(accounts),
 							account.Address,
 							&txData,

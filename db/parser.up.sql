@@ -28,41 +28,51 @@ create table err (
     data jsonb 
 );
 
-create table app_metadata (
-    network network not null
-    address varchar(64) not null,
-    image_url varchar,
-    label varchar not null,
+create table coingecko_token (
+    id serial primary key,
+    network network not null,
+    coingecko_id varchar not null,
+    token varchar not null,
 
-    primary key (network, address)
+    unique (network, coingecko_id, token)
 );
 
-create type user_event_type as enum (
+create table pricepoint (
+    token_id integer not null,
+    foreign key (token_id) references coingecko_token (
+        id
+    ) on delete cascade,
+
+    timestamp timestamptz not null,
+    price varchar not null,
+
+    primary key (token_id, timestamp)
+);
+
+create type ui_event_type as enum (
     'transfer'
 );
 
-create table user_event (
+create table event (
     user_account_id integer not null,
     tx_id varchar not null,
+    network network not null,
+    ix_idx integer,
+    idx integer not null,
+    timestamp timestamptz not null,
+
+    -- TODO: review this later
+    primary key (user_account_id, tx_id, network, ix_idx, idx),
+
     foreign key (user_account_id, tx_id) references tx_ref (
         user_account_id, tx_id
     ) on delete cascade,
 
-    ix_idx integer,
-    idx integer not null, 
-    unique (user_account_id, tx_id, ix_idx, idx),
+    ui_app_name varchar not null,
+    ui_method_name varchar not null,
+    ui_type ui_event_type not null,
 
-    -- TODO: think of something more ergonomic, some global store of these
-    -- things, not sure if makes sense
-    network network not null,
-    app varchar(64) not null,
-    app_method varchar not null,
-    foreign key (network, app) references app_metadata (
-        network, address
-    ) on delete cascade,
-
-    type user_event_type not null,
-    data jsonb not null
+    transfers jsonb not null
 );
 
 create procedure dev_delete_parsed(
@@ -73,7 +83,7 @@ as $$
 declare
 begin
     delete from err where user_account_id = p_user_account_id;
-    delete from user_event where user_account_id = p_user_account_id;
+    delete from event where user_account_id = p_user_account_id;
 end;
 $$;
 

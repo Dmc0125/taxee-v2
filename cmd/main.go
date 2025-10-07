@@ -10,10 +10,12 @@ import (
 	"taxee/cmd/fetcher/solana"
 	"taxee/cmd/parser"
 	"taxee/pkg/assert"
+	"taxee/pkg/coingecko"
 	"taxee/pkg/db"
 	"taxee/pkg/dotenv"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func main() {
@@ -54,6 +56,30 @@ func main() {
 		} else {
 			fmt.Println(string(output))
 		}
+	case "seed":
+		coingecko.Init()
+
+		coins, err := coingecko.GetCoins()
+		assert.NoErr(err, "unable to get coingecko coins")
+
+		batch := pgx.Batch{}
+		for _, coin := range coins {
+			for platform, mint := range coin.Platforms {
+				switch platform {
+				case "solana":
+					q := db.EnqueueInsertCoingeckoToken(
+						&batch,
+						db.NetworkSolana,
+						coin.Id,
+						mint,
+					)
+					q.Exec(func(_ pgconn.CommandTag) error { return nil })
+				}
+			}
+		}
+
+		br := pool.SendBatch(context.Background(), &batch)
+		assert.NoErr(br.Close(), "")
 	case "fetch":
 		// fetch txs
 		assert.True(appEnv != "prod", "this command must not be run in production env")
@@ -87,8 +113,9 @@ func main() {
 			fresh,
 		)
 	case "parse":
-		// parse
 		assert.True(appEnv != "prod", "this command must not be run in production env")
+
+		coingecko.Init()
 		parser.Parse(context.Background(), pool, 1, true)
 	case "parse-server":
 		// long running server

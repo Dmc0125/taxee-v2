@@ -8,50 +8,49 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"sync"
-	"taxee/cmd/parser/solana"
 	"taxee/pkg/assert"
+	"taxee/pkg/coingecko"
 	"taxee/pkg/db"
+	"taxee/pkg/logger"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 )
 
 type parserError interface {
-	IsEqual(other any) bool
+	IsEq(parserError) bool
+	Address() string
 }
 
-type globalContext struct {
-	wallets []*db.WalletRow
-	errors  map[string][]parserError
-}
+type parserErrors map[string][]parserError
 
-func (ctx *globalContext) AppendErr(account string, err any) {
-	e, ok := err.(parserError)
-	assert.True(ok, "invalid err: %T", err)
-	accountErrs := ctx.errors[account]
+func (errors parserErrors) appendErr(
+	err parserError,
+) {
+	addr := err.Address()
+	accountErrors := errors[addr]
 
 	switch {
-	case len(accountErrs) == 0:
-		accountErrs = append(accountErrs, e)
+	case len(accountErrors) == 0:
+		accountErrors = append(accountErrors, err)
 	default:
-		last := accountErrs[len(accountErrs)-1]
-		if !last.IsEqual(err) {
-			accountErrs = append(accountErrs, e)
+		last := accountErrors[len(accountErrors)-1]
+		if !last.IsEq(err) {
+			accountErrors = append(accountErrors, err)
 		}
 	}
 
-	ctx.errors[account] = accountErrs
+	errors[addr] = accountErrors
 }
 
-func (ctx *globalContext) WalletOwned(network db.Network, address string) bool {
-	for _, w := range ctx.wallets {
-		if w.Network == network && w.Address == address {
-			return true
-		}
-	}
-	return false
+type parserState struct {
+	errors         parserErrors
+	solanaAccounts map[string][]accountLifetime
+	events         []*db.Event
 }
 
 func devDeleteParsed(
@@ -66,17 +65,6 @@ func devDeleteParsed(
 	}
 	return nil
 }
-
-type inventoryAccountId struct {
-	address string
-	network db.Network
-	token   string
-}
-
-type inventory struct {
-}
-
-func (inv *inventory) processEvent(event db.Event) {}
 
 func Parse(
 	ctx context.Context,
@@ -105,11 +93,19 @@ func Parse(
 	wallets, err := db.GetWallets(ctx, pool, userAccountId)
 	assert.NoErr(err, "")
 
-	globalCtx := globalContext{
-		wallets: wallets,
-		errors:  make(map[string][]parserError),
+	parserState := parserState{
+		errors:         make(parserErrors),
+		solanaAccounts: make(map[string][]accountLifetime),
+		events:         make([]*db.Event, 0),
 	}
-	solanaAccounts := make(map[string][]solana.AccountLifetime)
+	solanaWallets := make([]string, 0)
+
+	for _, w := range wallets {
+		switch w.Network {
+		case db.NetworkSolana:
+			solanaWallets = append(solanaWallets, w.Address)
+		}
+	}
 
 	// TODO:
 	// pagination ??
@@ -128,7 +124,12 @@ func Parse(
 
 		switch txData := tx.Data.(type) {
 		case *db.SolanaTransactionData:
-			solana.PreprocessTx(&globalCtx, solanaAccounts, tx.Id, txData)
+			solPreprocessTx(
+				&parserState,
+				solanaWallets,
+				tx.Id,
+				txData,
+			)
 		}
 	}
 
@@ -137,7 +138,7 @@ func Parse(
 	// always created in the correct order, so just keeping global
 	// position is fine
 	errPos := int32(0)
-	for _, errs := range globalCtx.errors {
+	for _, errs := range parserState.errors {
 		for _, err := range errs {
 			txId, address, ixIdx := "", "", int32(0)
 			var (
@@ -146,19 +147,19 @@ func Parse(
 			)
 
 			switch e := err.(type) {
-			case *solana.ErrAccountMissing:
-				txId, address = e.TxId, e.Address
-				ixIdx = int32(e.IxIdx)
+			case *errAccountMissing:
+				txId, address = e.txId, e.address
+				ixIdx = int32(e.ixIdx)
 				kind = db.ErrTypeAccountMissing
-			case *solana.ErrAccountBalanceMismatch:
-				txId, address = e.TxId, e.Address
-				ixIdx = int32(e.IxIdx)
+			case *errAccountBalanceMismatch:
+				txId, address = e.txId, e.address
+				ixIdx = int32(e.ixIdx)
 				kind = db.ErrTypeAccountBalanceMismatch
 
 				var mErr error
 				data, mErr = json.Marshal(db.ErrAccountBalanceMismatch{
-					Expected: e.Expected,
-					Had:      e.Had,
+					Expected: e.expected,
+					Had:      e.had,
 				})
 				assert.NoErr(mErr, "unable to serialize ErrAccountBalanceMismatch")
 			}
@@ -185,50 +186,150 @@ func Parse(
 
 	///////////////////
 	// process txs
-	inv := inventory{}
-	batch = pgx.Batch{}
 
 	for _, tx := range txs {
+		if tx.Err {
+			continue
+		}
+
 		switch txData := tx.Data.(type) {
 		case *db.SolanaTransactionData:
-			if tx.Err {
-				// only fee
-				continue
+			solanaCtx := solanaContext{
+				wallets:        solanaWallets,
+				accounts:       parserState.solanaAccounts,
+				parserErrors:   parserState.errors,
+				txId:           tx.Id,
+				slot:           txData.Slot,
+				timestamp:      tx.Timestamp,
+				tokensDecimals: txData.TokenDecimals,
 			}
 
 			for ixIdx, ix := range txData.Instructions {
-				events := make([]db.Event, 0)
-				solana.ProcessIx(
-					&globalCtx,
-					solanaAccounts,
-					&events,
-					tx.Id,
-					txData.Slot,
-					txData.TokenDecimals,
-					uint32(ixIdx),
-					ix,
-				)
-
-				for eventIdx, event := range events {
-					inv.processEvent(event)
-
-					q := db.EnqueueInsertUserEvent(
-						&batch,
-						userAccountId,
-						tx.Id,
-						int32(ixIdx),
-						int32(eventIdx),
-						event,
-					)
-					q.Exec(func(_ pgconn.CommandTag) error { return nil })
-				}
+				solanaCtx.ixIdx = uint32(ixIdx)
+				solProcessIx(&parserState.events, &solanaCtx, ix)
 			}
-
-			// validate balances
 		}
 	}
 
-	br = pool.SendBatch(ctx, &batch)
+	queryPricesBatch := pgx.Batch{}
+	type tokenPriceToFetch struct {
+		coingeckoId string
+		timestamp   int64
+		eventIdx    int
+		transferIdx int
+	}
+	tokenPricesToFetch := make([]tokenPriceToFetch, 0)
+
+	for eventIdx, event := range parserState.events {
+		for tranfserIdx, transfer := range event.Transfers {
+			const hour, halfHour = 60 * 60, 60 * 30
+			roundedTimestamp := time.Unix(
+				(event.Timestamp.Unix()+halfHour)/int64(hour)*int64(hour),
+				0,
+			)
+
+			q := db.EnqueueGetPricepoint(
+				&queryPricesBatch,
+				event.Network,
+				transfer.Token,
+				roundedTimestamp,
+			)
+			q.QueryRow(func(row pgx.Row) error {
+				price, coingeckoId, ok, err := db.QueueScanPricepoint(row)
+				// TODO: coingecko may not have the information about the token
+				assert.NoErr(err, "unable to scan pricepoint")
+
+				if ok {
+					logger.Info("Found pricepoint in db: %s %s", coingeckoId, roundedTimestamp)
+					transfer.Price = price
+					transfer.Value = transfer.Amount.Mul(price)
+				} else {
+					tokenPricesToFetch = append(
+						tokenPricesToFetch,
+						tokenPriceToFetch{
+							coingeckoId,
+							roundedTimestamp.Unix(),
+							eventIdx,
+							tranfserIdx,
+						},
+					)
+				}
+				return nil
+			})
+		}
+	}
+
+	br = pool.SendBatch(ctx, &queryPricesBatch)
+	err = br.Close()
+	assert.NoErr(err, "unable to query prices")
+
+	type coingeckoTokenPriceId struct {
+		coingeckoId string
+		timestamp   int64
+	}
+	coingeckoTokensPrices := make(map[coingeckoTokenPriceId]decimal.Decimal)
+
+	for _, token := range tokenPricesToFetch {
+		ts := time.Unix(token.timestamp, 0)
+		price, ok := coingeckoTokensPrices[coingeckoTokenPriceId{
+			token.coingeckoId, token.timestamp,
+		}]
+
+		if !ok {
+			coingeckoPrices, err := coingecko.GetCoinOhlc(
+				token.coingeckoId,
+				coingecko.FiatCurrencyEur,
+				ts,
+			)
+			assert.NoErr(err, "unable to get coingecko prices")
+
+			if len(coingeckoPrices) > 0 {
+				insertPricesBatch := pgx.Batch{}
+				for _, p := range coingeckoPrices {
+					q := db.EnqueueInsertPricepoint(
+						&insertPricesBatch, p.Close, p.Timestamp, token.coingeckoId,
+					)
+					q.Exec(func(ct pgconn.CommandTag) error { return nil })
+
+					id := coingeckoTokenPriceId{token.coingeckoId, p.Timestamp.Unix()}
+					coingeckoTokensPrices[id] = p.Close
+				}
+				br := pool.SendBatch(ctx, &insertPricesBatch)
+				err := br.Close()
+				assert.NoErr(err, "unable to insert coingecko prices")
+
+			}
+			if p := coingeckoPrices[0]; p.Timestamp.Equal(ts) {
+				logger.Info("Fetched pricepoint from coingecko: %s %s", token.coingeckoId, ts)
+				price, ok = p.Close, true
+			}
+		} else {
+			logger.Info("Found pricepoint in coingecko prices: %s %s", token.coingeckoId, ts)
+		}
+
+		event := parserState.events[token.eventIdx]
+		transfer := event.Transfers[token.transferIdx]
+		transfer.Price = price
+		transfer.Value = transfer.Amount.Mul(price)
+	}
+
+	inv := inventory{
+		accounts: make(map[inventoryAccountId][]*inventoryAccount),
+	}
+	eventsBatch := pgx.Batch{}
+	for eventIdx, event := range parserState.events {
+		inv.processEvent(event)
+
+		_, err := db.EnqueueInsertEvent(
+			&eventsBatch,
+			userAccountId,
+			int32(eventIdx),
+			event,
+		)
+		assert.NoErr(err, "")
+	}
+
+	br = pool.SendBatch(ctx, &eventsBatch)
 	err = br.Close()
 	assert.NoErr(err, "unable to insert events")
 }
