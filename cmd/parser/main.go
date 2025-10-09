@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -20,6 +21,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 )
+
+func newDecimalFromRawAmount(amount uint64, decimals uint8) decimal.Decimal {
+	d := decimal.NewFromBigInt(
+		new(big.Int).SetUint64(amount),
+		-int32(decimals),
+	)
+	return d
+}
 
 type parserError interface {
 	IsEq(parserError) bool
@@ -45,12 +54,6 @@ func (errors parserErrors) appendErr(
 	}
 
 	errors[addr] = accountErrors
-}
-
-type parserState struct {
-	errors         parserErrors
-	solanaAccounts map[string][]accountLifetime
-	events         []*db.Event
 }
 
 func devDeleteParsed(
@@ -93,11 +96,6 @@ func Parse(
 	wallets, err := db.GetWallets(ctx, pool, userAccountId)
 	assert.NoErr(err, "")
 
-	parserState := parserState{
-		errors:         make(parserErrors),
-		solanaAccounts: make(map[string][]accountLifetime),
-		events:         make([]*db.Event, 0),
-	}
 	solanaWallets := make([]string, 0)
 
 	for _, w := range wallets {
@@ -116,6 +114,8 @@ func Parse(
 
 	///////////////////
 	// preprocess txs
+	errors := make(parserErrors)
+	solanaAccounts := make(map[string][]accountLifetime)
 
 	for _, tx := range txs {
 		if tx.Err {
@@ -125,7 +125,8 @@ func Parse(
 		switch txData := tx.Data.(type) {
 		case *db.SolanaTransactionData:
 			solPreprocessTx(
-				&parserState,
+				errors,
+				solanaAccounts,
 				solanaWallets,
 				tx.Id,
 				txData,
@@ -138,7 +139,7 @@ func Parse(
 	// always created in the correct order, so just keeping global
 	// position is fine
 	errPos := int32(0)
-	for _, errs := range parserState.errors {
+	for _, errs := range errors {
 		for _, err := range errs {
 			txId, address, ixIdx := "", "", int32(0)
 			var (
@@ -187,6 +188,8 @@ func Parse(
 	///////////////////
 	// process txs
 
+	events := make([]*db.Event, 0)
+
 	for _, tx := range txs {
 		if tx.Err {
 			continue
@@ -196,8 +199,8 @@ func Parse(
 		case *db.SolanaTransactionData:
 			solanaCtx := solanaContext{
 				wallets:        solanaWallets,
-				accounts:       parserState.solanaAccounts,
-				parserErrors:   parserState.errors,
+				accounts:       solanaAccounts,
+				parserErrors:   errors,
 				txId:           tx.Id,
 				slot:           txData.Slot,
 				timestamp:      tx.Timestamp,
@@ -206,7 +209,7 @@ func Parse(
 
 			for ixIdx, ix := range txData.Instructions {
 				solanaCtx.ixIdx = uint32(ixIdx)
-				solProcessIx(&parserState.events, &solanaCtx, ix)
+				solProcessIx(&events, &solanaCtx, ix)
 			}
 		}
 	}
@@ -216,47 +219,54 @@ func Parse(
 		coingeckoId string
 		timestamp   int64
 		eventIdx    int
-		transferIdx int
 	}
 	tokenPricesToFetch := make([]tokenPriceToFetch, 0)
 
-	for eventIdx, event := range parserState.events {
-		for tranfserIdx, transfer := range event.Transfers {
-			const hour, halfHour = 60 * 60, 60 * 30
-			roundedTimestamp := time.Unix(
-				(event.Timestamp.Unix()+halfHour)/int64(hour)*int64(hour),
-				0,
-			)
+	for eventIdx, event := range events {
+		var token string
 
-			q := db.EnqueueGetPricepoint(
-				&queryPricesBatch,
-				event.Network,
-				transfer.Token,
-				roundedTimestamp,
-			)
-			q.QueryRow(func(row pgx.Row) error {
-				price, coingeckoId, ok, err := db.QueueScanPricepoint(row)
-				// TODO: coingecko may not have the information about the token
-				assert.NoErr(err, "unable to scan pricepoint")
-
-				if ok {
-					logger.Info("Found pricepoint in db: %s %s", coingeckoId, roundedTimestamp)
-					transfer.Price = price
-					transfer.Value = transfer.Amount.Mul(price)
-				} else {
-					tokenPricesToFetch = append(
-						tokenPricesToFetch,
-						tokenPriceToFetch{
-							coingeckoId,
-							roundedTimestamp.Unix(),
-							eventIdx,
-							tranfserIdx,
-						},
-					)
-				}
-				return nil
-			})
+		switch data := event.Data.(type) {
+		case *db.EventTransferInternal:
+			token = data.Token
+		case *db.EventTransfer:
+			token = data.Token
+		default:
+			assert.True(false, "unknown event data: %T %#v", data, *event)
+			continue
 		}
+
+		const hour, halfHour = 60 * 60, 60 * 30
+		roundedTimestamp := time.Unix(
+			(event.Timestamp.Unix()+halfHour)/int64(hour)*int64(hour),
+			0,
+		)
+
+		q := db.EnqueueGetPricepoint(
+			&queryPricesBatch,
+			event.Network,
+			token,
+			roundedTimestamp,
+		)
+		q.QueryRow(func(row pgx.Row) error {
+			price, coingeckoId, ok, err := db.QueueScanPricepoint(row)
+			// TODO: coingecko may not have the information about the token
+			assert.NoErr(err, "unable to scan pricepoint")
+
+			if ok {
+				logger.Info("Found pricepoint in db: %s %s", coingeckoId, roundedTimestamp)
+				event.Data.SetPrice(price)
+			} else {
+				tokenPricesToFetch = append(
+					tokenPricesToFetch,
+					tokenPriceToFetch{
+						coingeckoId,
+						roundedTimestamp.Unix(),
+						eventIdx,
+					},
+				)
+			}
+			return nil
+		})
 	}
 
 	br = pool.SendBatch(ctx, &queryPricesBatch)
@@ -307,17 +317,15 @@ func Parse(
 			logger.Info("Found pricepoint in coingecko prices: %s %s", token.coingeckoId, ts)
 		}
 
-		event := parserState.events[token.eventIdx]
-		transfer := event.Transfers[token.transferIdx]
-		transfer.Price = price
-		transfer.Value = transfer.Amount.Mul(price)
+		event := events[token.eventIdx]
+		event.Data.SetPrice(price)
 	}
 
 	inv := inventory{
 		accounts: make(map[inventoryAccountId][]*inventoryAccount),
 	}
 	eventsBatch := pgx.Batch{}
-	for eventIdx, event := range parserState.events {
+	for eventIdx, event := range events {
 		inv.processEvent(event)
 
 		_, err := db.EnqueueInsertEvent(

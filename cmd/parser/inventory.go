@@ -25,93 +25,104 @@ type inventory struct {
 	accounts    map[inventoryAccountId][]*inventoryAccount
 }
 
+func invSubBalance(
+	balances *[]*inventoryAccount,
+	amount decimal.Decimal,
+) (newAmount decimal.Decimal, removedAmount decimal.Decimal) {
+	balance := (*balances)[0]
+
+	if amount.GreaterThanOrEqual(balance.amount) {
+		removedAmount = balance.amount
+		newAmount = amount.Sub(balance.amount)
+		*balances = (*balances)[1:]
+	} else {
+		removedAmount = amount
+		balance.amount = balance.amount.Sub(amount)
+		newAmount = decimal.Zero
+	}
+
+	return
+}
+
 func (inv *inventory) processEvent(event *db.Event) {
-	internalBalances := make([]*inventoryAccount, 0)
+	switch data := event.Data.(type) {
+	case *db.EventTransferInternal:
+		fromAccountId := inventoryAccountId{event.Network, data.FromAccount, data.Token}
+		fromBalances := inv.accounts[fromAccountId]
 
-	for _, transfer := range event.Transfers {
-		accountId := inventoryAccountId{event.Network, transfer.Account, transfer.Token}
-		accountBalances := inv.accounts[accountId]
+		toAccountId := inventoryAccountId{event.Network, data.ToAccount, data.Token}
+		toBalances := inv.accounts[toAccountId]
 
-		internal := transfer.Type>>7 == 1
+		remainingAmount := data.Amount
 
-		switch transfer.Type & db.EventTransferTypeMask {
-		case db.EventTransferOutgoing:
-			remainingAmount := transfer.Amount
+		for len(fromBalances) > 0 && remainingAmount.GreaterThan(decimal.Zero) {
+			acqPrice := fromBalances[0].acqPrice
 
-			for len(accountBalances) > 0 {
-				balance := accountBalances[0]
+			var movedAmount decimal.Decimal
+			remainingAmount, movedAmount = invSubBalance(
+				&fromBalances,
+				remainingAmount,
+			)
 
-				if remainingAmount.GreaterThan(balance.amount) {
-					if internal {
-						internalBalances = append(
-							internalBalances,
-							accountBalances[0],
-						)
-					} else {
-						dispValue := balance.amount.Mul(transfer.Price)
-						transfer.Profit = transfer.Profit.Add(
-							dispValue.Sub(
-								balance.amount.Sub(balance.acqPrice),
-							),
-						)
-						inv.disposal = inv.disposal.Add(dispValue)
-					}
+			toBalances = append(toBalances, &inventoryAccount{
+				amount:   movedAmount,
+				acqPrice: acqPrice,
+			})
+		}
 
-					remainingAmount = remainingAmount.Sub(balance.amount)
-					accountBalances = accountBalances[1:]
-				} else {
-					if internal {
-						internalBalances = append(
-							internalBalances,
-							accountBalances[0],
-						)
-					} else {
-						dispValue := remainingAmount.Mul(transfer.Price)
-						transfer.Profit = transfer.Profit.Add(
-							dispValue.Sub(
-								remainingAmount.Sub(balance.acqPrice),
-							),
-						)
-						inv.disposal = inv.disposal.Add(dispValue)
-					}
+		if remainingAmount.GreaterThan(decimal.Zero) {
+			// TODO: missing amount error
+			inv.income = inv.income.Add(data.Value)
 
-					balance.amount = balance.amount.Sub(remainingAmount)
-					remainingAmount = decimal.Zero
-				}
-			}
+			toBalances = append(toBalances, &inventoryAccount{
+				amount:   remainingAmount,
+				acqPrice: data.Price,
+			})
+		}
 
-			if remainingAmount.GreaterThan(decimal.Zero) {
-				// TODO: missing balance error
-				if internal {
-					internalBalances = append(internalBalances, &inventoryAccount{
-						amount:   remainingAmount,
-						acqPrice: decimal.Zero,
-					})
-				} else {
-					dispValue := remainingAmount.Mul(transfer.Price)
-					inv.income = inv.income.Add(dispValue)
-					transfer.Profit = transfer.Profit.Add(dispValue)
-				}
-			}
+		inv.accounts[fromAccountId] = fromBalances
+		inv.accounts[toAccountId] = toBalances
+	case *db.EventTransfer:
+		accountId := inventoryAccountId{event.Network, data.Account, data.Token}
+		balances := inv.accounts[accountId]
+
+		switch data.Direction {
 		case db.EventTransferIncoming:
-			if !internal {
-				acqValue := transfer.Amount.Mul(transfer.Price)
-				inv.income = inv.income.Add(acqValue)
-				transfer.Profit = acqValue
-				accountBalances = append(accountBalances, &inventoryAccount{
-					amount:   transfer.Amount,
-					acqPrice: transfer.Price,
-				})
-			} else {
-				for _, b := range internalBalances {
-					accountBalances = append(accountBalances, b)
+			if event.Type == db.EventTypeTransfer {
+				inv.income = inv.income.Add(data.Value)
+				data.Profit = data.Value
+			}
+
+			balances = append(balances, &inventoryAccount{
+				amount:   data.Amount,
+				acqPrice: data.Price,
+			})
+		case db.EventTransferOutgoing:
+			remainingAmount := data.Amount
+
+			for len(balances) > 0 && remainingAmount.GreaterThan(decimal.Zero) {
+				acqPrice := balances[0].acqPrice
+
+				var movedAmount decimal.Decimal
+				remainingAmount, movedAmount = invSubBalance(
+					&balances,
+					remainingAmount,
+				)
+
+				// TODO: should burn increase profits?
+				if event.Type == db.EventTypeTransfer {
+					disposal := movedAmount.Mul(data.Price)
+					acquisition := movedAmount.Mul(acqPrice)
+
+					data.Profit = disposal.Sub(acquisition)
+					inv.disposal = inv.disposal.Add(disposal)
+					inv.acquisition = inv.acquisition.Add(acquisition)
 				}
 			}
 		default:
-			assert.True(false, "unknown event type: %s", transfer.Type)
+			assert.True(false, "invalid direction: %d", data.Direction)
 		}
 
-		inv.accounts[accountId] = accountBalances
-
+		inv.accounts[accountId] = balances
 	}
 }

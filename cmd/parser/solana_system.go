@@ -61,8 +61,8 @@ func solParseSystemIxSolTransfer(
 		from, to = accounts[0], accounts[1]
 
 		// amount offset -> 4 (disc) + 32 (base address) + 4 (seed len) +  seed len * u8
-		seedLen := binary.LittleEndian.Uint32(data[36:])
-		offset := 40 + seedLen
+		seedLen := binary.LittleEndian.Uint64(data[36:])
+		offset := 44 + seedLen
 		amount = binary.LittleEndian.Uint64(data[offset:])
 	default:
 		ok = false
@@ -95,7 +95,7 @@ func solProcessSystemIx(
 	}
 
 	from, to, amount, ok := solParseSystemIxSolTransfer(ixType, ix.Accounts, ix.Data)
-	if !ok {
+	if !ok || amount == 0 {
 		return
 	}
 
@@ -110,39 +110,34 @@ func solProcessSystemIx(
 	event := db.Event{
 		UiAppName:    "system_program",
 		UiMethodName: method,
-		UiType:       db.UiEventTransfer,
-		Transfers:    make([]*db.EventTransfer, 0),
 	}
 	ctx.initEvent(&event)
 
-	if fromInternal {
-		transfer := db.EventTransfer{
-			Type:    db.EventTransferOutgoing | db.EventTransferInternal,
-			Account: from,
-			Token:   SOL_MINT_ADDRESS,
+	switch {
+	case fromInternal && toInternal:
+		event.Type = db.EventTypeTransferInternal
+		event.Data = &db.EventTransferInternal{
+			FromAccount: from,
+			ToAccount:   to,
+			Token:       SOL_MINT_ADDRESS,
+			Amount:      newDecimalFromRawAmount(amount, 9),
 		}
-		transfer.WithRawAmount(amount, 9)
-
-		if toInternal {
-			transfer.Type |= db.EventTransferInternal
+	case fromInternal:
+		event.Type = db.EventTypeTransfer
+		event.Data = &db.EventTransfer{
+			Direction: db.EventTransferOutgoing,
+			Account:   from,
+			Token:     SOL_MINT_ADDRESS,
+			Amount:    newDecimalFromRawAmount(amount, 9),
 		}
-
-		event.Transfers = append(event.Transfers, &transfer)
-	}
-
-	if toInternal {
-		transfer := db.EventTransfer{
-			Type:    db.EventTransferIncoming | db.EventTransferInternal,
-			Account: to,
-			Token:   SOL_MINT_ADDRESS,
+	case toInternal:
+		event.Type = db.EventTypeTransfer
+		event.Data = &db.EventTransfer{
+			Direction: db.EventTransferIncoming,
+			Account:   to,
+			Token:     SOL_MINT_ADDRESS,
+			Amount:    newDecimalFromRawAmount(amount, 9),
 		}
-		transfer.WithRawAmount(amount, 9)
-
-		if fromInternal {
-			transfer.Type |= db.EventTransferInternal
-		}
-
-		event.Transfers = append(event.Transfers, &transfer)
 	}
 
 	*events = append(*events, &event)

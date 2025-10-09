@@ -49,8 +49,11 @@ create table pricepoint (
     primary key (token_id, timestamp)
 );
 
-create type ui_event_type as enum (
-    'transfer'
+create type event_type as enum (
+    'transfer',
+    'transfer_internal',
+    'mint',
+    'burn'
 );
 
 create table event (
@@ -70,9 +73,9 @@ create table event (
 
     ui_app_name varchar not null,
     ui_method_name varchar not null,
-    ui_type ui_event_type not null,
+    type event_type not null,
 
-    transfers jsonb not null
+    data jsonb not null
 );
 
 create procedure dev_delete_parsed(

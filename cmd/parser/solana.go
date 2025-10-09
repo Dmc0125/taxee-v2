@@ -248,15 +248,16 @@ func solDecimalsMust(ctx *solanaContext, mint string) uint8 {
 }
 
 func solPreprocessTx(
-	parserState *parserState,
+	errors parserErrors,
+	solanaAccounts map[string][]accountLifetime,
 	wallets []string,
 	txId string,
 	txData *db.SolanaTransactionData,
 ) {
 	ctx := solanaContext{
 		wallets:      wallets,
-		accounts:     parserState.solanaAccounts,
-		parserErrors: parserState.errors,
+		accounts:     solanaAccounts,
+		parserErrors: errors,
 
 		txId:           txId,
 		slot:           txData.Slot,

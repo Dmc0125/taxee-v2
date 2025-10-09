@@ -20,6 +20,10 @@ const (
 
 	// Economic
 	solTokenIxTransfer solTokenIx = 50 + iota
+	solTokenIxMint
+	solTokenIxMintChecked
+	solTokenIxBurn
+	solTokenIxBurnChecked
 )
 
 func solTokenIxFromByte(disc byte) (ix solTokenIx, method string, ok bool) {
@@ -39,6 +43,14 @@ func solTokenIxFromByte(disc byte) (ix solTokenIx, method string, ok bool) {
 	// Economic
 	case 3:
 		ix, method = solTokenIxTransfer, "transfer"
+	case 7:
+		ix, method = solTokenIxMint, "mint"
+	case 14:
+		ix, method = solTokenIxMintChecked, "mint"
+	case 8:
+		ix, method = solTokenIxBurn, "burn"
+	case 15:
+		ix, method = solTokenIxBurnChecked, "burn"
 	default:
 		ok = false
 	}
@@ -132,6 +144,11 @@ func solProcessTokenIx(
 
 	switch ixType {
 	case solTokenIxTransfer:
+		amount := binary.LittleEndian.Uint64(ix.Data[1:])
+		if amount == 0 {
+			return
+		}
+
 		from, to := ix.Accounts[0], ix.Accounts[1]
 		fromAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, from)
 		toAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, to)
@@ -143,56 +160,116 @@ func solProcessTokenIx(
 		event := db.Event{
 			UiAppName:    app,
 			UiMethodName: method,
-			UiType:       db.UiEventTransfer,
-			Transfers:    make([]*db.EventTransfer, 0),
 		}
 		ctx.initEvent(&event)
-		amount := binary.LittleEndian.Uint64(ix.Data[1:])
 
-		var transferOutgoing *db.EventTransfer
-		var fromAccountData *SolTokenAccountData
-		decimals := uint8(255)
+		if fromAccount != nil && toAccount != nil {
+			fromAccountData := solAccountDataMust[SolTokenAccountData](fromAccount)
+			decimals := solDecimalsMust(ctx, fromAccountData.Mint)
 
-		if fromAccount != nil {
-			fromAccountData = solAccountDataMust[SolTokenAccountData](fromAccount)
-			decimals = solDecimalsMust(ctx, fromAccountData.Mint)
-
-			transferOutgoing = &db.EventTransfer{
-				Type:    db.EventTransferOutgoing,
-				Account: from,
-				Token:   fromAccountData.Mint,
+			// TODO: check toAccount, it should have the same mint as fromAccount
+			event.Type = db.EventTypeTransferInternal
+			event.Data = &db.EventTransferInternal{
+				FromAccount: from,
+				ToAccount:   to,
+				Token:       fromAccountData.Mint,
+				Amount:      newDecimalFromRawAmount(amount, decimals),
 			}
-			transferOutgoing.WithRawAmount(amount, decimals)
-
-			event.Transfers = append(event.Transfers, transferOutgoing)
+			*events = append(*events, &event)
+			return
 		}
 
-		if toAccount != nil {
-			transferIncoming := &db.EventTransfer{
-				Type:    db.EventTransferIncoming,
-				Account: to,
-			}
+		var tokenAccountData *SolTokenAccountData
+		var tokenAccount string
+		var direction db.EventTransferDirection
 
-			if fromAccountData != nil {
-				transferOutgoing.Type |= db.EventTransferInternal
-
-				transferIncoming.Type |= db.EventTransferInternal
-				transferIncoming.Token = fromAccountData.Mint
-				transferIncoming.WithRawAmount(amount, decimals)
-			} else {
-				toAccountData := solAccountDataMust[SolTokenAccountData](toAccount)
-				decimals := solDecimalsMust(ctx, toAccountData.Mint)
-
-				transferIncoming.Token = toAccountData.Mint
-				transferIncoming.WithRawAmount(amount, decimals)
-			}
-
-			event.Transfers = append(event.Transfers, transferIncoming)
+		switch {
+		case fromAccount != nil:
+			tokenAccountData = solAccountDataMust[SolTokenAccountData](fromAccount)
+			direction, tokenAccount = db.EventTransferOutgoing, from
+		case toAccount != nil:
+			tokenAccountData = solAccountDataMust[SolTokenAccountData](toAccount)
+			direction, tokenAccount = db.EventTransferIncoming, to
+		default:
+			return
 		}
 
+		decimals := solDecimalsMust(ctx, tokenAccountData.Mint)
+		event.Type = db.EventTypeTransfer
+		event.Data = &db.EventTransfer{
+			Direction: direction,
+			Account:   tokenAccount,
+			Token:     tokenAccountData.Mint,
+			Amount:    newDecimalFromRawAmount(amount, decimals),
+		}
 		*events = append(*events, &event)
 	case solTokenIxClose:
+	case solTokenIxMint, solTokenIxMintChecked:
+		mint, receiver := ix.Accounts[0], ix.Accounts[1]
+		amount := binary.LittleEndian.Uint64(ix.Data[1:])
+		if amount == 0 {
+			return
+		}
+
+		receiverAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, receiver)
+		if receiverAccount == nil {
+			return
+		}
+
+		accountData := solAccountDataMust[SolTokenAccountData](receiverAccount)
+		if accountData.Mint != mint {
+			// TODO: error
+			return
+		}
+
+		decimals := solDecimalsMust(ctx, accountData.Mint)
+		event := db.Event{
+			UiAppName:    app,
+			UiMethodName: method,
+			Type:         db.EventTypeMint,
+			Data: &db.EventTransfer{
+				Account: receiver,
+				Token:   accountData.Mint,
+				Amount:  newDecimalFromRawAmount(amount, decimals),
+			},
+		}
+		ctx.initEvent(&event)
+
+		*events = append(*events, &event)
+	case solTokenIxBurn, solTokenIxBurnChecked:
+		sender, mint := ix.Accounts[0], ix.Accounts[1]
+		amount := binary.LittleEndian.Uint64(ix.Data[1:])
+		if amount == 0 {
+			return
+		}
+
+		senderAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, sender)
+		if senderAccount == nil {
+			return
+		}
+
+		accountData := solAccountDataMust[SolTokenAccountData](senderAccount)
+		if accountData.Mint != mint {
+			// TOOD: error
+			return
+		}
+
+		decimals := solDecimalsMust(ctx, accountData.Mint)
+		event := db.Event{
+			UiAppName:    app,
+			UiMethodName: method,
+			Type:         db.EventTypeBurn,
+			Data: &db.EventTransfer{
+				Account: sender,
+				Token:   accountData.Mint,
+				Amount:  newDecimalFromRawAmount(amount, decimals),
+			},
+		}
+		ctx.initEvent(&event)
+
+		*events = append(*events, &event)
 	default:
+
 		return
 	}
 }

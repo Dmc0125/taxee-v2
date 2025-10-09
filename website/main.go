@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -20,6 +19,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+var eventsGroupHeaderComponent = `
+{{ define "events_group_header" }}
+<li class="
+	col-span-full w-full rounded-md bg-gray-200 px-4 mt-4 h-8 bg-crossed
+	flex items-center
+">
+	<p>{{ formatDate . }}</p>
+</li>
+{{ end }}
+`
+
 type parserErr struct {
 	IxIdx   int32
 	Kind    db.ErrType
@@ -27,112 +37,107 @@ type parserErr struct {
 	Data    any
 }
 
-type TransactionCmpData struct {
-	Id             string
-	Timestamp      time.Time
-	Err            bool
-	PreprocessErrs []*parserErr
-	ParserErrs     []*parserErr
+type TransactionComponentData struct {
+	TxId       string
+	App        string
+	MethodType string
+	Timestamp  time.Time
+
+	DisposalsAmounts    template.HTML
+	DisposalsValues     template.HTML
+	AcquisitionsAmounts template.HTML
+	AcquisitionsValues  template.HTML
+	Gain                string
 }
 
-var transactionCmp = `
+var transactionComponent = `
 {{define "transaction"}}
 	<li class="
-			bg-gray-50 rounded-lg border border-gray-300 shadow-xs
-			py-2 px-4
-		"
-	>
-		{{ $preprocessErrsLen := len .PreprocessErrs }}
-		{{ $parserErrsLen := len .ParserErrs }}
+		col-span-full grid grid-cols-subgrid items-center
+		mt-4 relative w-full px-4 min-h-16
+	">
+		<div class="flex flex-col">
+			<a href="https://solscan.io/tx/{{ .TxId }}" target="_blank">
+				{{ shorten .TxId 4 2 }}
+			</a>
+			<p class="text-sm text-gray-600">{{ formatTime .Timestamp }}</p>
+		</div>
 
-		<div class="flex justify-between">
-			<div class="flex gap-x-4 items-center">
-				<a
-					class="font-mono text-gray-900"
-					href="https://solscan.io/tx/{{.Id}}"
-					target="_blank"
-					rel="noopener noreferrer"
-				>{{shorten .Id 8 8}}</a>
-				<p class="font-mono text-gray-600 text-sm">{{formatDate .Timestamp}}</p>
-			</div>
-			<div>
-				{{if .Err}}
-					<div class="
-						bg-orange-200 border border-yellow-300 py-1 px-3 rounded-full
-						text-yellow-600 text-xs font-semibold
-					">
-						Onchain error
-					</div>
-				{{end}}
-				{{if ne 0 $preprocessErrsLen}}
-					<div class="
-						bg-pink-600 rounded-md py-1 px-2 
-						text-gray-100 text-xs font-semibold
-					">
-						{{ $preprocessErrsLen }}
-					</div>
-				{{end}}
+		<!-- card bg -->
+		<div 
+			class="
+				absolute col-[2/-1] top-0 left-0 bottom-0 -right-4
+				bg-none border border-gray-200
+				mouse-events-none bg-gray-100 rounded-lg
+			"
+		></div>
+
+		<!-- divider -->
+		<div class="col-[2/3]"></div>
+
+		<!-- app / method info -->
+		<div class="flex items-center absolute col-[3/4] h-full">
+			<div class="w-10 h-10 rounded-full bg-gray-400"></div>
+			<div class="flex flex-col ml-4">
+				<h3 class="font-medium">{{ toTitle .MethodType }}</h3>
+				<p class="text-sm text-gray-600">{{ toTitle .App }}</p>
 			</div>
 		</div>
 
-		{{if ne 0 $preprocessErrsLen}}
-			<div class="mt-4">
-				<h3 class="font-semibold text-gray-800">Preprocess Errors</h3>
-
-				<div class="mt-2 flex flex-wrap gap-4">
-					{{range .PreprocessErrs}}
-						<div class="bg-red-100 border-red-300 border rounded-md py-2 px-4">
-							<div class="flex gap-2">
-								<p class="font-semibold text-sm text-gray-800">
-									{{toTitle (printf "%s" .Kind)}}
-								</p>
-								{{if ne .IxIdx -1}}
-									<p class="text-sm text-gray-700">Ix: {{ .IxIdx }}</p>
-								{{end}}
-							</div>
-							<p class="font-mono text-gray-800">
-								{{shorten .Address 4 4}}
-							</p>
-							{{if eq .Kind "account_balance_mismatch"}}
-								<div>
-									<h1 class="text-3xl font-bold">FIXME</h1>
-									<p>Expected: {{index .Data "expected"}}</p>
-									<p>Had: {{index .Data "had"}}</p>
-								</div>
-							{{end}}
-						</div>
-					{{end}}
-				</div>
-			</div>
-		{{end}}
+		<!-- Disposals -->
+		<div class="absolute col-[4/5]">
+			{{ .DisposalsAmounts }}
+		</div>
+		<div class="absolute col-[5/6]">
+			{{ .DisposalsValues }}
+		</div>
+		<div class="absolute col-[6/7]">
+			{{ .AcquisitionsAmounts }}
+		</div>
+		<div class="absolute col-[7/8]">
+			{{ .AcquisitionsValues }}
+		</div>
+		<p class="absolute col-[8/9]">{{ .Gain }}</p>
 	</li>
 {{end}}
 `
 
-type TransactionsCmpData struct {
-	NextSlot       int64
-	NextBlockIndex int32
-	Transactions   []TransactionCmpData
+type TransactionsComponentData struct {
+	Events template.HTML
 }
 
-var transactionsCmp = `
+var transactionsComponent = `
 {{define "transactions"}}
-	<div class="mx-auto w-[70%] py-10">
+	<div class="mx-auto w-[80%] py-10">
 		<header class="py-10 flex items-center justify-between">
 			<h1 class="text-3xl font-semibold text-gray-900">Transactions</h1>
 
 			<div>
 				<a
-					href="?from_slot={{.NextSlot}}&from_block_index={{.NextBlockIndex}}"
+					href="?from_slot=&from_block_index="
 				>
 					Next
 				</a>
 			</div>
 		</header>
-		<ul class="flex flex-col gap-y-4">
-			{{range .Transactions}}
-				{{template "transaction" .}}
-			{{end}}
+		<ul class="
+			w-full relative
+			grid grid-cols-[180px_1rem_minmax(250px,20%)_repeat(4,1fr)_8%]
+		">
+			<li class="
+				h-10 px-4 col-span-full grid grid-cols-subgrid items-center 
+				sticky top-2 z-100 bg-gray-50 border rounded-lg border-gray-200
+			">
+				<p>Date</p> 
+				<div></div>
+				<p>App</p>
+				<p>Sent</p>
+				<p>Disposal</p>
+				<p>Received</p>
+				<p>Acquisition</p>
+				<p>Gain</p>
+			</li>
+			{{ .Events }}
 		</ul>
 	</div>
 {{end}}
@@ -166,14 +171,13 @@ func (b *bufWriter) Write(n []byte) (int, error) {
 	return len(n), nil
 }
 
-func executeTemplate(tmpl *template.Template, w http.ResponseWriter, name string, data any) error {
+func executeTemplate(tmpl *template.Template, name string, data any) ([]byte, error) {
 	buf := bufWriter([]byte{})
 	err := tmpl.ExecuteTemplate(&buf, name, data)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	w.Write(buf)
-	return nil
+	return buf, nil
 }
 
 func serveStaticFiles(prod bool) {
@@ -193,7 +197,7 @@ func serveStaticFiles(prod bool) {
 	http.Handle("/static/", http.StripPrefix("/static/", handler))
 }
 
-type getTxsWithParserErrsPaginatedRowParserErr struct {
+type EventErr struct {
 	IxIdx   pgtype.Int4
 	Idx     int32
 	Origin  db.ErrOrigin
@@ -202,34 +206,25 @@ type getTxsWithParserErrsPaginatedRowParserErr struct {
 	Data    []byte
 }
 
-type getTxsWithParserErrsPaginatedRow struct {
-	Id         string
-	Err        bool
-	Fee        int64
-	Signer     string
-	Timestamp  time.Time
-	Data       *db.SolanaTransactionData
-	ParserErrs pgtype.FlatArray[*getTxsWithParserErrsPaginatedRowParserErr]
+type eventWithErrors struct {
+	db.Event
+	errs pgtype.FlatArray[*EventErr]
 }
 
-func getTxsWithParserErrsPaginated(
+func getEventsWithErrors(
+	ctx context.Context,
 	pool *pgxpool.Pool,
 	userAccountId int32,
-	slot int64,
-	blockIndex int32,
 	limit int32,
-) (
-	[]*getTxsWithParserErrsPaginatedRow,
-	int64,
-	int32,
-	error,
-) {
-	const query = `
+) ([]*eventWithErrors, error) {
+	// TODO: still will probably require tx ?? slot based search ?
+	const q = `
 		select
-			tx.id, tx.err, tx.fee, tx.signer, tx.timestamp, tx.data,
+			e.tx_id, e.network, e.ix_idx, e.timestamp,
+			e.ui_app_name, e.ui_method_name, e.type,
+			e.data,
 			array_agg(
 				row(
-					err.ix_idx,
 					err.idx,
 					err.origin,
 					err.type,
@@ -238,64 +233,57 @@ func getTxsWithParserErrsPaginated(
 				) order by err.idx asc
 			) filter (where err.id is not null) as errs
 		from
-			tx
-		inner join
-			tx_ref on tx_ref.tx_id = tx.id and tx_ref.user_account_id = $1
+			event e
 		left join
-			err on err.tx_id = tx.id and err.user_account_id = $1
+			err on
+				err.user_account_id = e.user_account_id and
+				err.tx_id = e.tx_id and
+				err.ix_idx = e.ix_idx 
 		where
-			(
-				(tx.data->>'slot')::bigint = $2 and
-				(tx.data->>'blockIndex')::integer > $3 
-			) or 
-			(tx.data->>'slot')::bigint > $2
+			e.user_account_id = $1
 		group by
-			tx.id
+			e.tx_id, e.network, e.idx, e.ix_idx, e.timestamp,
+			e.ui_app_name, e.ui_method_name, e.type,
+			e.data
 		order by
-			(tx.data->>'blockIndex')::integer asc,
-			(tx.data->>'slot')::bigint asc
+			e.idx asc
 		limit
-			$4
+			$2
 	`
-	rows, err := pool.Query(
-		context.Background(), query, userAccountId, slot, blockIndex, limit,
-	)
+	rows, err := pool.Query(ctx, q, userAccountId, limit)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, fmt.Errorf("unable to get events with errors: %w", err)
 	}
 
-	res := make([]*getTxsWithParserErrsPaginatedRow, 0)
+	res := make([]*eventWithErrors, 0)
 	for rows.Next() {
-		var tx getTxsWithParserErrsPaginatedRow
-		var dataMarshalled []byte
-		err = rows.Scan(
-			&tx.Id, &tx.Err, &tx.Fee, &tx.Signer, &tx.Timestamp, &dataMarshalled, &tx.ParserErrs,
+		e := eventWithErrors{}
+		var dataMarshaled []byte
+		err := rows.Scan(
+			&e.TxId,
+			&e.Network,
+			&e.IxIdx,
+			&e.Timestamp,
+			&e.UiAppName,
+			&e.UiMethodName,
+			&e.Type,
+			&dataMarshaled,
+			&e.errs,
 		)
 		if err != nil {
-			return nil, 0, 0, err
+			return nil, fmt.Errorf("unable to scan event: %w", err)
 		}
 
-		data := new(db.SolanaTransactionData)
-		if err = json.Unmarshal(dataMarshalled, &data); err != nil {
-			return nil, 0, 0, err
-		}
-
-		tx.Data = data
-		res = append(res, &tx)
+		err = e.Event.UnmarshalData(dataMarshaled)
+		assert.NoErr(err, "unable to unmarshal transfers")
+		res = append(res, &e)
 	}
 
-	if err = rows.Err(); err != nil {
-		return nil, 0, 0, err
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("unable to scan events: %w", err)
 	}
 
-	lastSlot, lastBlockIndex := int64(-1), int32(-1)
-
-	if len(res) > 0 {
-		lastSlot = int64(res[len(res)-1].Data.Slot)
-		lastBlockIndex = int32(res[len(res)-1].Data.BlockIndex)
-	}
-
-	return res, lastSlot, lastBlockIndex, nil
+	return res, nil
 }
 
 func main() {
@@ -308,7 +296,10 @@ func main() {
 
 	templateFuncs := template.FuncMap{
 		"formatDate": func(t time.Time) string {
-			return t.Format("02/01/2006 15:04:05")
+			return t.Format("02/01/2006")
+		},
+		"formatTime": func(t time.Time) string {
+			return t.Format("15:04:05")
 		},
 		"shorten": func(s string, start, end int) string {
 			return fmt.Sprintf("%s...%s", s[:start], s[len(s)-end:])
@@ -350,17 +341,26 @@ func main() {
 	}
 	var templates *template.Template = template.New("root").Funcs(templateFuncs)
 	loadTemplate(templates, transactionsPage)
-	loadTemplate(templates, transactionsCmp)
-	loadTemplate(templates, transactionCmp)
+	loadTemplate(templates, transactionsComponent)
+	loadTemplate(templates, transactionComponent)
+	loadTemplate(templates, eventsGroupHeaderComponent)
 
 	pool, err := db.InitPool(context.Background(), appEnv)
 	assert.NoErr(err, "")
 
 	serveStaticFiles(prod)
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		query := r.URL.Query()
+	http.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/static/favicon.ico", http.StatusMovedPermanently)
+	})
 
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.String() != "/" {
+			w.WriteHeader(404)
+			return
+		}
+
+		query := r.URL.Query()
 		userAccountId := int32(1)
 		if prod {
 			userAccountIdParam := query.Get("user_account_id")
@@ -375,85 +375,103 @@ func main() {
 			// TODO: Auth
 		}
 
-		fromSlotParam, fromBlockIndexParam := query.Get("from_slot"), query.Get("from_block_index")
-		fromSlot, err := strconv.Atoi(fromSlotParam)
-		if err != nil {
-			fromSlot = -1
-		}
-		fromBlockIndex, err := strconv.Atoi(fromBlockIndexParam)
-		if err != nil {
-			fromBlockIndex = -1
-		}
-
-		const LIMIT = 50
-		var (
-			txs            []*getTxsWithParserErrsPaginatedRow
-			nextSlot       int64
-			nextBlockIndex int32
-		)
-		txs, nextSlot, nextBlockIndex, err = getTxsWithParserErrsPaginated(
-			pool, userAccountId, int64(fromSlot), int32(fromBlockIndex), LIMIT,
+		const limit = 50
+		events, err := getEventsWithErrors(
+			context.Background(), pool, userAccountId, limit,
 		)
 		if err != nil {
 			w.WriteHeader(500)
-			msg := fmt.Sprintf("500 server error: %s", err)
-			w.Write([]byte(msg))
+			m := fmt.Sprintf("unable to query events: %s", err)
+			w.Write([]byte(m))
 			return
 		}
 
-		txsCompData := TransactionsCmpData{
-			NextSlot:       nextSlot,
-			NextBlockIndex: nextBlockIndex,
-			Transactions:   make([]TransactionCmpData, len(txs)),
-		}
+		renderedTransactions := make([]byte, 0)
+		var prevGroupTsUnix int64
 
-		for i, tx := range txs {
-			txsCompData.Transactions[i].Id = tx.Id
-			txsCompData.Transactions[i].Timestamp = tx.Timestamp
-			txsCompData.Transactions[i].Err = tx.Err
-
-			preprocessErrs := make([]*parserErr, 0)
-			parserErrs := make([]*parserErr, 0)
-
-			for _, err := range tx.ParserErrs {
-				var data any = struct{}{}
-				switch err.Kind {
-				case db.ErrTypeAccountBalanceMismatch:
-					err := json.Unmarshal(err.Data, &data)
-					assert.NoErr(err, "unable to unmarshal")
-				case db.ErrTypeAccountMissing:
+		for _, event := range events {
+			const oneDay = 60 * 60 * 24
+			dateTsUnix := event.Timestamp.Unix() / oneDay * oneDay
+			if prevGroupTsUnix != dateTsUnix {
+				groupHeader, err := executeTemplate(
+					templates, "events_group_header", time.Unix(dateTsUnix, 0),
+				)
+				if err != nil {
+					w.WriteHeader(500)
+					w.Write(fmt.Appendf(nil, "500 server error: %s", err))
+					return
 				}
-
-				e := &parserErr{
-					IxIdx:   -1,
-					Kind:    err.Kind,
-					Address: err.Address,
-					Data:    data,
-				}
-
-				if err.IxIdx.Valid {
-					e.IxIdx = err.IxIdx.Int32
-				}
-
-				switch err.Origin {
-				case db.ErrOriginPreprocess:
-					preprocessErrs = append(preprocessErrs, e)
-				case db.ErrOriginParse:
-					parserErrs = append(parserErrs, e)
-				}
+				renderedTransactions = append(renderedTransactions, groupHeader...)
+				prevGroupTsUnix = dateTsUnix
 			}
 
-			txsCompData.Transactions[i].PreprocessErrs = preprocessErrs
-			txsCompData.Transactions[i].ParserErrs = parserErrs
+			cmpData := TransactionComponentData{
+				TxId:       event.TxId,
+				App:        event.UiAppName,
+				MethodType: string(event.Type),
+				Timestamp:  event.Timestamp,
+			}
+
+			switch data := event.Data.(type) {
+			case *db.EventTransferInternal:
+				amount := fmt.Sprintf("<p>%s</p>", data.Amount.StringFixed(2))
+				value := fmt.Sprintf("<p>%s</p>", data.Value.StringFixed(2))
+
+				cmpData.DisposalsAmounts = template.HTML(amount)
+				cmpData.DisposalsValues = template.HTML(value)
+				cmpData.AcquisitionsAmounts = template.HTML(amount)
+				cmpData.AcquisitionsValues = template.HTML(value)
+
+				cmpData.Gain = data.Profit.StringFixed(2)
+			case *db.EventTransfer:
+				if event.Type == db.EventTypeMint ||
+					(event.Type == db.EventTypeTransfer && data.Direction == db.EventTransferIncoming) {
+					cmpData.DisposalsAmounts = "<p>-</p>"
+					cmpData.DisposalsValues = "<p>-</p>"
+					cmpData.AcquisitionsAmounts = template.HTML(fmt.Sprintf(
+						"<p>%s</p>", data.Amount.StringFixed(2),
+					))
+					cmpData.AcquisitionsValues = template.HTML(fmt.Sprintf(
+						"<p>%s</p>", data.Value.StringFixed(2),
+					))
+				} else if event.Type == db.EventTypeBurn ||
+					(event.Type == db.EventTypeTransfer && data.Direction == db.EventTransferOutgoing) {
+					cmpData.DisposalsAmounts = template.HTML(fmt.Sprintf(
+						"<p>%s</p>", data.Amount.StringFixed(2),
+					))
+					cmpData.DisposalsValues = template.HTML(fmt.Sprintf(
+						"<p>%s</p>", data.Value.StringFixed(2),
+					))
+					cmpData.AcquisitionsAmounts = "<p>-</p>"
+					cmpData.AcquisitionsValues = "<p>-</p>"
+				} else {
+					assert.True(false, "invalid event type: %T", event.Type)
+				}
+
+				cmpData.Gain = data.Profit.StringFixed(2)
+			default:
+				assert.True(false, "invalid event data: %T", data)
+			}
+
+			rendered, err := executeTemplate(templates, "transaction", cmpData)
+			if err != nil {
+				w.WriteHeader(500)
+				w.Write(fmt.Appendf(nil, "500 server error: %s", err))
+				return
+			}
+			renderedTransactions = append(renderedTransactions, rendered...)
 		}
 
 		w.Header().Set("content-type", "text/html")
-		err = executeTemplate(templates, w, "transactions_page", txsCompData)
+		buf, err := executeTemplate(templates, "transactions_page", TransactionsComponentData{
+			Events: template.HTML(renderedTransactions),
+		})
 		if err != nil {
 			w.WriteHeader(500)
 			m := fmt.Sprintf("500 server error: %s", err)
 			w.Write([]byte(m))
 		}
+		w.Write(buf)
 	})
 
 	fmt.Println("Listening at: http://localhost:8888")

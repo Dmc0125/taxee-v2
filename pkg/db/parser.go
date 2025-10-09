@@ -3,7 +3,6 @@ package db
 import (
 	"encoding/json"
 	"fmt"
-	"math/big"
 	"taxee/pkg/assert"
 	"time"
 
@@ -105,88 +104,85 @@ func QueueScanPricepoint(
 	return
 }
 
-type EventTransferType byte
-
-func (t EventTransferType) String() string {
-	buf := [8]byte{}
-	for i := 0; i < len(buf); i += 1 {
-		c := (t >> (7 - i)) & 1
-		switch c {
-		case 1:
-			buf[i] = '1'
-		default:
-			buf[i] = '0'
-		}
-	}
-	return string(buf[:])
+type EventData interface {
+	SetPrice(decimal.Decimal)
 }
 
-const (
-	// types
-	EventTransferTypeMask EventTransferType = 0b00001111
-	EventTransferIncoming EventTransferType = iota
-	EventTransferOutgoing
+type EventTransferInternal struct {
+	FromAccount string          `json:"fromAccount"`
+	ToAccount   string          `json:"toAccount"`
+	Token       string          `json:"token"`
+	Amount      decimal.Decimal `json:"amount"`
+	Price       decimal.Decimal `json:"price"`
+	Value       decimal.Decimal `json:"value"`
+	Profit      decimal.Decimal `json:"profit"`
+}
 
-	// type flags
-	EventTransferInternal EventTransferType = 1 << 7
-	EventTransferMint
-	EventTransferBurn
+func (internal *EventTransferInternal) SetPrice(price decimal.Decimal) {
+	internal.Price = price
+	internal.Value = price.Mul(internal.Amount)
+}
+
+type EventTransferDirection uint8
+
+const (
+	EventTransferIncoming EventTransferDirection = iota
+	EventTransferOutgoing
 )
 
 type EventTransfer struct {
-	Type    EventTransferType
-	Account string
-	Token   string
-	Amount  decimal.Decimal
-	Price   decimal.Decimal
-	Value   decimal.Decimal
-	Profit  decimal.Decimal
+	Direction EventTransferDirection `json:"direction"`
+	Account   string                 `json:"account"`
+	Token     string                 `json:"token"`
+	Amount    decimal.Decimal        `json:"amount"`
+	Price     decimal.Decimal        `json:"price"`
+	Value     decimal.Decimal        `json:"value"`
+	Profit    decimal.Decimal        `json:"profit"`
 }
 
-func (transfer *EventTransfer) WithRawAmount(raw uint64, decimals uint8) {
-	transfer.Amount = decimal.NewFromBigInt(
-		new(big.Int).SetUint64(raw),
-		int32(decimals),
-	)
+func (transfer *EventTransfer) SetPrice(price decimal.Decimal) {
+	transfer.Price = price
+	transfer.Value = price.Mul(transfer.Amount)
 }
 
-// TODO: assertions to check the correctness of the events
-func NewEventTransfer(
-	transferType EventTransferType,
-	account, token string,
-	amountRaw uint64,
-	decimals uint8,
-) EventTransfer {
-	event := EventTransfer{
-		Type:    transferType,
-		Account: account,
-		Token:   token,
-	}
-	event.WithRawAmount(amountRaw, decimals)
-	return event
-}
-
-type UiEventType string
+type EventType string
 
 const (
-	UiEventTransfer UiEventType = "transfer"
-	UiEventSwap     UiEventType = "swap"
-	// UiEventTransfer UiEventType = "transfer"
-	// UiEventTransfer UiEventType = "transfer"
+	EventTypeTransfer         EventType = "transfer"
+	EventTypeTransferInternal EventType = "transfer_internal"
+	EventTypeMint             EventType = "mint"
+	EventTypeBurn             EventType = "burn"
 )
 
-// TODO: assertions to check the correctness of the events
-// like if the event is internal transfer, there will be 2 Transfers
-// both of the **must** be internal
 type Event struct {
 	UiAppName    string
 	UiMethodName string
-	UiType       UiEventType
 	Timestamp    time.Time
 	Network      Network
 	TxId         string
 	IxIdx        int32
-	Transfers    []*EventTransfer
+
+	Type EventType
+	Data EventData
+}
+
+func (event *Event) UnmarshalData(src []byte) error {
+	switch event.Type {
+	case EventTypeTransferInternal:
+		data := new(EventTransferInternal)
+		if err := json.Unmarshal(src, data); err != nil {
+			return fmt.Errorf("unable to unmarshal %s event data: %w", event.Type, err)
+		}
+		event.Data = data
+	case EventTypeTransfer, EventTypeMint, EventTypeBurn:
+		data := new(EventTransfer)
+		if err := json.Unmarshal(src, data); err != nil {
+			return fmt.Errorf("unable to unmarshal %s event data: %w", event.Type, err)
+		}
+		event.Data = data
+	}
+
+	return nil
 }
 
 func EnqueueInsertEvent(
@@ -198,21 +194,21 @@ func EnqueueInsertEvent(
 	const q = `
 		insert into event (
 			user_account_id, tx_id, network, ix_idx, idx, timestamp,
-			ui_app_name, ui_method_name, ui_type,
-			transfers
+			ui_app_name, ui_method_name, type,
+			data
 		) values (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10
 		)
 	`
 
-	data, err := json.Marshal(event.Transfers)
+	data, err := json.Marshal(event.Data)
 	if err != nil {
-		return nil, fmt.Errorf("unable to marshal transfers: %w", err)
+		return nil, fmt.Errorf("unable to marshal event data: %w", err)
 	}
 
 	return batch.Queue(
 		q,
 		userAccountId, event.TxId, event.Network, event.IxIdx, idx, event.Timestamp,
-		event.UiAppName, event.UiMethodName, event.UiType, data,
+		event.UiAppName, event.UiMethodName, event.Type, data,
 	), nil
 }

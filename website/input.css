@@ -1,1 +1,19 @@
 @import "tailwindcss";
+
+@font-face {
+    font-family: "Geist-mono";
+    font-weight: 100 900;
+    src: url("/static/geist-mono.ttf");
+}
+
+* {
+    font-family: "Geist-mono";
+}
+
+.bg-crossed {
+    background-image: repeating-linear-gradient(
+        -55deg,
+        var(--color-gray-300) 0 2px,
+        transparent 2px 8px
+    );
+}
