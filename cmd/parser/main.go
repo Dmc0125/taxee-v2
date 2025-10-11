@@ -297,7 +297,10 @@ func Parse(
 				insertPricesBatch := pgx.Batch{}
 				for _, p := range coingeckoPrices {
 					q := db.EnqueueInsertPricepoint(
-						&insertPricesBatch, p.Close, p.Timestamp, token.coingeckoId,
+						&insertPricesBatch,
+						p.Close,
+						p.Timestamp,
+						token.coingeckoId,
 					)
 					q.Exec(func(ct pgconn.CommandTag) error { return nil })
 

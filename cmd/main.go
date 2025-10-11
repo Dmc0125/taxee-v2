@@ -64,13 +64,21 @@ func main() {
 
 		batch := pgx.Batch{}
 		for _, coin := range coins {
+			q := db.EnqueueInsertCoingeckoTokenData(
+				&batch,
+				coin.Id,
+				coin.Symbol,
+				coin.Name,
+			)
+			q.Exec(func(ct pgconn.CommandTag) error { return nil })
+
 			for platform, mint := range coin.Platforms {
 				switch platform {
 				case "solana":
 					q := db.EnqueueInsertCoingeckoToken(
 						&batch,
-						db.NetworkSolana,
 						coin.Id,
+						db.NetworkSolana,
 						mint,
 					)
 					q.Exec(func(_ pgconn.CommandTag) error { return nil })

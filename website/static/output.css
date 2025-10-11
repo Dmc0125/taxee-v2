@@ -188,9 +188,6 @@
   .sticky {
     position: sticky;
   }
-  .inset-0 {
-    inset: calc(var(--spacing) * 0);
-  }
   .top-0 {
     top: calc(var(--spacing) * 0);
   }
@@ -214,9 +211,6 @@
   }
   .col-\[2\/3\] {
     grid-column: 2/3;
-  }
-  .col-\[2\/8\] {
-    grid-column: 2/8;
   }
   .col-\[3\/4\] {
     grid-column: 3/4;
@@ -284,20 +278,8 @@
   .w-full {
     width: 100%;
   }
-  .grid-cols-\[180px_1rem_220px_repeat\(4\,1fr\)_8\%\] {
-    grid-template-columns: 180px 1rem 220px repeat(4,1fr) 8%;
-  }
   .grid-cols-\[180px_1rem_minmax\(250px\,20\%\)_repeat\(4\,1fr\)_8\%\] {
     grid-template-columns: 180px 1rem minmax(250px,20%) repeat(4,1fr) 8%;
-  }
-  .grid-cols-\[180px_2rem_220px_repeat\(4\,1fr\)_8\%\] {
-    grid-template-columns: 180px 2rem 220px repeat(4,1fr) 8%;
-  }
-  .grid-cols-\[180px_220px_2rem_repeat\(4\,1fr\)_8\%\] {
-    grid-template-columns: 180px 220px 2rem repeat(4,1fr) 8%;
-  }
-  .grid-cols-\[180px_220px_repeat\(4\,1fr\)_8\%\] {
-    grid-template-columns: 180px 220px repeat(4,1fr) 8%;
   }
   .grid-cols-subgrid {
     grid-template-columns: subgrid;
@@ -311,11 +293,8 @@
   .justify-between {
     justify-content: space-between;
   }
-  .gap-y-1 {
-    row-gap: calc(var(--spacing) * 1);
-  }
-  .gap-y-2 {
-    row-gap: calc(var(--spacing) * 2);
+  .gap-x-1 {
+    column-gap: calc(var(--spacing) * 1);
   }
   .rounded-full {
     border-radius: calc(infinity * 1px);

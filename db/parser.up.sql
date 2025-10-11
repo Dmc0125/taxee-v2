@@ -28,25 +28,30 @@ create table err (
     data jsonb 
 );
 
-create table coingecko_token (
-    id serial primary key,
-    network network not null,
-    coingecko_id varchar not null,
-    token varchar not null,
+-- TODO: the only token info right now is from coingecko, will habe to think
+-- about more general way if we have multiple source
+create table coingecko_token_data (
+    coingecko_id varchar not null primary key,
+    name varchar not null,
+    symbol varchar not null,
+    image_url varchar
+);
 
-    unique (network, coingecko_id, token)
+create table coingecko_token (
+    coingecko_id varchar not null,
+    foreign key (coingecko_id) references coingecko_token_data (coingecko_id) on delete cascade,
+    address varchar not null,
+    network network not null,
+    primary key (address, network)
 );
 
 create table pricepoint (
-    token_id integer not null,
-    foreign key (token_id) references coingecko_token (
-        id
-    ) on delete cascade,
+    coingecko_id varchar not null,
+    foreign key (coingecko_id) references coingecko_token_data (coingecko_id) on delete cascade,
 
     timestamp timestamptz not null,
     price varchar not null,
-
-    primary key (token_id, timestamp)
+    primary key (coingecko_id, timestamp)
 );
 
 create type event_type as enum (

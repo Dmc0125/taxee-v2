@@ -10,22 +10,36 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+func EnqueueInsertCoingeckoTokenData(
+	batch *pgx.Batch,
+	coingeckoId, symbol, name string,
+) *pgx.QueuedQuery {
+	const q = `
+		insert into coingecko_token_data (
+			coingecko_id, symbol, name
+		) values (
+			$1, $2, $3
+		) on conflict (coingecko_id) do nothing
+	`
+	return batch.Queue(
+		q, coingeckoId, symbol, name,
+	)
+}
+
 func EnqueueInsertCoingeckoToken(
 	batch *pgx.Batch,
+	coingeckoId string,
 	network Network,
-	coingeckoId,
-	token string,
+	address string,
 ) *pgx.QueuedQuery {
 	const q = `
 		insert into coingecko_token (
-			network, coingecko_id, token
+			coingecko_id, network, address
 		) values (
 			$1, $2, $3
-		) on conflict (
-			network, coingecko_id, token
-		) do nothing
+		) on conflict (network, address) do nothing
 	`
-	return batch.Queue(q, network, coingeckoId, token)
+	return batch.Queue(q, coingeckoId, network, address)
 }
 
 func EnqueueInsertPricepoint(
@@ -36,55 +50,38 @@ func EnqueueInsertPricepoint(
 ) *pgx.QueuedQuery {
 	const q = `
 		insert into pricepoint (
-			price, timestamp, token_id
+			price, timestamp, coingecko_id
 		) values (
-			$1, $2, (
-				select ct.id from coingecko_token ct where
-					ct.coingecko_id = $3
-			)
-		) on conflict (
-			timestamp, token_id
-		) do nothing
+			$1, $2, $3
+		) on conflict (timestamp, coingecko_id) do nothing
 	`
 	return batch.Queue(q, price, timestamp, coingeckoId)
 }
 
-const qGetPricepoint = `
-	select
-		ct.coingecko_id,
-		(
-			case
-				when pp.token_id is not null then pp.price
-				else ''
-			end
-		) as price
-	from
-		coingecko_token ct
-	left join
-		pricepoint pp on
-			pp.token_id = ct.id and pp.timestamp = $3
-	where
-		ct.network = $1 and ct.token = $2
-`
-
-// func GetPricepoint(
-// 	ctx context.Context,
-// 	pool *pgxpool.Pool,
-// 	network Network,
-// 	token string,
-// 	timestamp time.Time,
-// ) (price decimal.Decimal, coingeckoId string, ok bool, err error) {
-// 	row := pool.QueryRow(ctx, qGetPricepoint, network, token, timestamp)
-//
-// }
-
 func EnqueueGetPricepoint(
 	batch *pgx.Batch,
 	network Network,
-	token string,
+	address string,
 	timestamp time.Time,
 ) *pgx.QueuedQuery {
-	return batch.Queue(qGetPricepoint, network, token, timestamp)
+	const qGetPricepoint = `
+		select
+			ct.coingecko_id,
+			(
+				case
+					when pp.coingecko_id is not null then pp.price
+					else ''
+				end
+			) as price
+		from
+			coingecko_token ct
+		left join
+			pricepoint pp on
+				pp.coingecko_id = ct.coingecko_id and pp.timestamp = $1
+		where
+			ct.network = $2 and ct.address = $3
+	`
+	return batch.Queue(qGetPricepoint, timestamp, network, address)
 }
 
 func QueueScanPricepoint(

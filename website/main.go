@@ -15,6 +15,7 @@ import (
 	"taxee/pkg/dotenv"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -27,6 +28,25 @@ var eventsGroupHeaderComponent = `
 ">
 	<p>{{ formatDate . }}</p>
 </li>
+{{ end }}
+`
+
+type amountComponentData struct {
+	Symbol   string
+	Amount   string
+	ImageUrl string
+}
+
+var amountComponent = `
+{{ define "amount" }}
+	<div class="flex gap-x-1">
+		{{ if .Amount }}
+			<p>{{ .Amount }}</p>
+			<p>{{ upper .Symbol }}</p>
+		{{ else }}
+			<p>-</p>
+		{{ end }}
+	</div>
 {{ end }}
 `
 
@@ -47,7 +67,7 @@ type TransactionComponentData struct {
 	DisposalsValues     template.HTML
 	AcquisitionsAmounts template.HTML
 	AcquisitionsValues  template.HTML
-	Gain                string
+	Gain                template.HTML
 }
 
 var transactionComponent = `
@@ -97,7 +117,7 @@ var transactionComponent = `
 		<div class="absolute col-[7/8]">
 			{{ .AcquisitionsValues }}
 		</div>
-		<p class="absolute col-[8/9]">{{ .Gain }}</p>
+		<div class="absolute col-[8/9]">{{ .Gain }}</div>
 	</li>
 {{end}}
 `
@@ -178,6 +198,12 @@ func executeTemplate(tmpl *template.Template, name string, data any) ([]byte, er
 		return nil, err
 	}
 	return buf, nil
+}
+
+func executeTemplateMust(tmpl *template.Template, name string, data any) []byte {
+	buf, err := executeTemplate(tmpl, name, data)
+	assert.NoErr(err, "unable to execute template")
+	return buf
 }
 
 func serveStaticFiles(prod bool) {
@@ -286,6 +312,11 @@ func getEventsWithErrors(
 	return res, nil
 }
 
+func renderError(r http.ResponseWriter, statusCode int, msg string, args ...any) {
+	r.WriteHeader(statusCode)
+	r.Write(fmt.Appendf(nil, msg, args...))
+}
+
 func main() {
 	appEnv := os.Getenv("APP_ENV")
 	prod := true
@@ -300,6 +331,9 @@ func main() {
 		},
 		"formatTime": func(t time.Time) string {
 			return t.Format("15:04:05")
+		},
+		"upper": func(s string) string {
+			return strings.ToUpper(s)
 		},
 		"shorten": func(s string, start, end int) string {
 			return fmt.Sprintf("%s...%s", s[:start], s[len(s)-end:])
@@ -344,6 +378,7 @@ func main() {
 	loadTemplate(templates, transactionsComponent)
 	loadTemplate(templates, transactionComponent)
 	loadTemplate(templates, eventsGroupHeaderComponent)
+	loadTemplate(templates, amountComponent)
 
 	pool, err := db.InitPool(context.Background(), appEnv)
 	assert.NoErr(err, "")
@@ -356,7 +391,7 @@ func main() {
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.String() != "/" {
-			w.WriteHeader(404)
+			renderError(w, 404, "")
 			return
 		}
 
@@ -366,8 +401,7 @@ func main() {
 			userAccountIdParam := query.Get("user_account_id")
 			id, err := strconv.Atoi(userAccountIdParam)
 			if err != nil {
-				w.WriteHeader(400)
-				w.Write(fmt.Appendf(nil, "Invalid user account id: %s", userAccountIdParam))
+				renderError(w, 400, "invalid user account id: %s", userAccountIdParam)
 				return
 			}
 			userAccountId = int32(id)
@@ -380,9 +414,72 @@ func main() {
 			context.Background(), pool, userAccountId, limit,
 		)
 		if err != nil {
-			w.WriteHeader(500)
-			m := fmt.Sprintf("unable to query events: %s", err)
-			w.Write([]byte(m))
+			renderError(w, 500, "unable to query events: %s", err)
+			return
+		}
+
+		// fetch tokens
+		fetchTokensBatch := pgx.Batch{}
+		type tokenId struct {
+			address string
+			network db.Network
+		}
+		type tokenMeta struct {
+			symbol   string
+			imageUrl string
+		}
+		tokens := make(map[tokenId]tokenMeta)
+
+		for _, event := range events {
+			const q = `
+				select 
+					ctd.symbol, ctd.image_url
+				from
+					coingecko_token_data ctd
+				inner join
+					coingecko_token ct on
+						ct.coingecko_id = ctd.coingecko_id
+				where
+					ct.address = $1 and ct.network = $2
+			`
+
+			var token string
+
+			switch data := event.Data.(type) {
+			case *db.EventTransferInternal:
+				token = data.Token
+			case *db.EventTransfer:
+				token = data.Token
+			default:
+				assert.True(false, "unknown event data: %T", data)
+			}
+
+			queued := fetchTokensBatch.Queue(q, token, event.Network)
+			queued.QueryRow(func(row pgx.Row) error {
+				symbol, imgUrl := "", pgtype.Text{}
+				if err := row.Scan(&symbol, &imgUrl); err != nil {
+					return nil
+				}
+
+				meta := tokenMeta{
+					symbol: symbol,
+				}
+				if imgUrl.Valid {
+					meta.imageUrl = imgUrl.String
+				}
+
+				tokenId := tokenId{
+					address: token,
+					network: event.Network,
+				}
+				tokens[tokenId] = meta
+				return nil
+			})
+		}
+
+		br := pool.SendBatch(context.Background(), &fetchTokensBatch)
+		if err := br.Close(); err != nil {
+			renderError(w, 500, "unable to query tokens: %s", err)
 			return
 		}
 
@@ -396,11 +493,8 @@ func main() {
 				groupHeader, err := executeTemplate(
 					templates, "events_group_header", time.Unix(dateTsUnix, 0),
 				)
-				if err != nil {
-					w.WriteHeader(500)
-					w.Write(fmt.Appendf(nil, "500 server error: %s", err))
-					return
-				}
+				assert.NoErr(err, "unable to execute template")
+
 				renderedTransactions = append(renderedTransactions, groupHeader...)
 				prevGroupTsUnix = dateTsUnix
 			}
@@ -414,41 +508,70 @@ func main() {
 
 			switch data := event.Data.(type) {
 			case *db.EventTransferInternal:
-				amount := fmt.Sprintf("<p>%s</p>", data.Amount.StringFixed(2))
-				value := fmt.Sprintf("<p>%s</p>", data.Value.StringFixed(2))
+				token := tokens[tokenId{data.Token, event.Network}]
 
-				cmpData.DisposalsAmounts = template.HTML(amount)
-				cmpData.DisposalsValues = template.HTML(value)
-				cmpData.AcquisitionsAmounts = template.HTML(amount)
-				cmpData.AcquisitionsValues = template.HTML(value)
+				amountCmp := executeTemplateMust(templates, "amount", amountComponentData{
+					Symbol: token.symbol,
+					Amount: data.Amount.StringFixed(2),
+				})
+				valueCmp := executeTemplateMust(templates, "amount", amountComponentData{
+					Symbol: "eur",
+					Amount: data.Value.StringFixed(2),
+				})
 
-				cmpData.Gain = data.Profit.StringFixed(2)
+				cmpData.DisposalsAmounts = template.HTML(amountCmp)
+				cmpData.DisposalsValues = template.HTML(valueCmp)
+				cmpData.AcquisitionsAmounts = template.HTML(amountCmp)
+				cmpData.AcquisitionsValues = template.HTML(valueCmp)
+
+				cmpData.Gain = template.HTML(executeTemplateMust(templates, "amount", amountComponentData{
+					Symbol: "eur",
+					Amount: data.Profit.StringFixed(2),
+				}))
 			case *db.EventTransfer:
+				var disposalAmount, disposalValue,
+					acquisitionAmount, acquisitionValue []byte
+				token := tokens[tokenId{data.Token, event.Network}]
+
 				if event.Type == db.EventTypeMint ||
 					(event.Type == db.EventTypeTransfer && data.Direction == db.EventTransferIncoming) {
-					cmpData.DisposalsAmounts = "<p>-</p>"
-					cmpData.DisposalsValues = "<p>-</p>"
-					cmpData.AcquisitionsAmounts = template.HTML(fmt.Sprintf(
-						"<p>%s</p>", data.Amount.StringFixed(2),
-					))
-					cmpData.AcquisitionsValues = template.HTML(fmt.Sprintf(
-						"<p>%s</p>", data.Value.StringFixed(2),
-					))
+					disposalAmount = executeTemplateMust(templates, "amount", amountComponentData{})
+					disposalValue = disposalAmount
+
+					acquisitionAmount = executeTemplateMust(templates, "amount", amountComponentData{
+						Symbol: token.symbol,
+						Amount: data.Amount.StringFixed(2),
+					})
+					acquisitionValue = executeTemplateMust(templates, "amount", amountComponentData{
+						Symbol: "eur",
+						Amount: data.Value.StringFixed(2),
+					})
 				} else if event.Type == db.EventTypeBurn ||
 					(event.Type == db.EventTypeTransfer && data.Direction == db.EventTransferOutgoing) {
-					cmpData.DisposalsAmounts = template.HTML(fmt.Sprintf(
-						"<p>%s</p>", data.Amount.StringFixed(2),
-					))
-					cmpData.DisposalsValues = template.HTML(fmt.Sprintf(
-						"<p>%s</p>", data.Value.StringFixed(2),
-					))
-					cmpData.AcquisitionsAmounts = "<p>-</p>"
-					cmpData.AcquisitionsValues = "<p>-</p>"
+					disposalAmount = executeTemplateMust(templates, "amount", amountComponentData{
+						Symbol: token.symbol,
+						Amount: data.Amount.StringFixed(2),
+					})
+					disposalValue = executeTemplateMust(templates, "amount", amountComponentData{
+						Symbol: "eur",
+						Amount: data.Value.StringFixed(2),
+					})
+
+					acquisitionAmount := executeTemplateMust(templates, "amount", amountComponentData{})
+					acquisitionValue = acquisitionAmount
 				} else {
 					assert.True(false, "invalid event type: %T", event.Type)
 				}
 
-				cmpData.Gain = data.Profit.StringFixed(2)
+				cmpData.DisposalsAmounts = template.HTML(disposalAmount)
+				cmpData.DisposalsValues = template.HTML(disposalValue)
+				cmpData.AcquisitionsAmounts = template.HTML(acquisitionAmount)
+				cmpData.AcquisitionsValues = template.HTML(acquisitionValue)
+
+				cmpData.Gain = template.HTML(executeTemplateMust(templates, "amount", amountComponentData{
+					Symbol: "eur",
+					Amount: data.Profit.StringFixed(2),
+				}))
 			default:
 				assert.True(false, "invalid event data: %T", data)
 			}
