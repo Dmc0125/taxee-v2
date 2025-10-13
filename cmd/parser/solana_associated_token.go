@@ -95,7 +95,7 @@ func solPreprocessAssociatedTokenIx(ctx *solanaContext, ix *db.SolanaInstruction
 			Mint:  mint,
 			Owner: owner,
 		}
-		ctx.initOwned(tokenAccount, &data)
+		ctx.init(tokenAccount, true, &data)
 	case solAssociatedTokenIxRecoverNested:
 	}
 }

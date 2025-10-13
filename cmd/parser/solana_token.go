@@ -19,7 +19,9 @@ const (
 	solTokenIxClose
 
 	// Economic
-	solTokenIxTransfer solTokenIx = 50 + iota
+	solTokenIxEconomicBr
+	solTokenIxTransfer
+	solTokenIxTransferChecked
 	solTokenIxMint
 	solTokenIxMintChecked
 	solTokenIxBurn
@@ -43,14 +45,16 @@ func solTokenIxFromByte(disc byte) (ix solTokenIx, method string, ok bool) {
 	// Economic
 	case 3:
 		ix, method = solTokenIxTransfer, "transfer"
+	case 12:
+		ix, method = solTokenIxTransferChecked, "transfer_checked"
 	case 7:
 		ix, method = solTokenIxMint, "mint"
 	case 14:
-		ix, method = solTokenIxMintChecked, "mint"
+		ix, method = solTokenIxMintChecked, "mint_checked"
 	case 8:
 		ix, method = solTokenIxBurn, "burn"
 	case 15:
-		ix, method = solTokenIxBurnChecked, "burn"
+		ix, method = solTokenIxBurnChecked, "burn_checked"
 	default:
 		ok = false
 	}
@@ -64,7 +68,7 @@ func solTokenIxRelatedAccounts(
 	ix *db.SolanaInstruction,
 ) {
 	ixType, _, ok := solTokenIxFromByte(ix.Data[0])
-	if !ok || ixType > 50 {
+	if !ok || ixType > solTokenIxEconomicBr {
 		return
 	}
 
@@ -93,7 +97,7 @@ type SolTokenAccountData struct {
 
 func solPreprocessTokenIx(ctx *solanaContext, ix *db.SolanaInstruction) {
 	ixType, _, ok := solTokenIxFromByte(ix.Data[0])
-	if !ok || ixType > 50 {
+	if !ok || ixType > solTokenIxEconomicBr {
 		return
 	}
 
@@ -127,7 +131,63 @@ func solPreprocessTokenIx(ctx *solanaContext, ix *db.SolanaInstruction) {
 		Mint:  mint,
 		Owner: owner,
 	}
-	ctx.initOwned(tokenAccount, &data)
+	ctx.init(tokenAccount, true, &data)
+}
+
+func solTokenProcessTransfer(
+	ctx *solanaContext,
+	from, to string,
+	amount uint64,
+) (d db.EventData, t db.EventType, ok bool) {
+	fromAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, from)
+	toAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, to)
+
+	if fromAccount == nil && toAccount == nil {
+		return
+	}
+
+	if fromAccount != nil && toAccount != nil {
+		fromAccountData := solAccountDataMust[SolTokenAccountData](fromAccount)
+		decimals := solDecimalsMust(ctx, fromAccountData.Mint)
+
+		ok = true
+		// TODO: check toAccount, it should have the same mint as fromAccount
+		t = db.EventTypeTransferInternal
+		d = &db.EventTransferInternal{
+			FromAccount: from,
+			ToAccount:   to,
+			Token:       fromAccountData.Mint,
+			Amount:      newDecimalFromRawAmount(amount, decimals),
+		}
+		return
+	}
+
+	var tokenAccountData *SolTokenAccountData
+	var tokenAccount string
+	var direction db.EventTransferDirection
+
+	switch {
+	case fromAccount != nil:
+		tokenAccountData = solAccountDataMust[SolTokenAccountData](fromAccount)
+		direction, tokenAccount = db.EventTransferOutgoing, from
+	case toAccount != nil:
+		tokenAccountData = solAccountDataMust[SolTokenAccountData](toAccount)
+		direction, tokenAccount = db.EventTransferIncoming, to
+	default:
+		return
+	}
+
+	decimals := solDecimalsMust(ctx, tokenAccountData.Mint)
+	ok = true
+	t = db.EventTypeTransfer
+	d = &db.EventTransfer{
+		Direction: direction,
+		Account:   tokenAccount,
+		Token:     tokenAccountData.Mint,
+		Amount:    newDecimalFromRawAmount(amount, decimals),
+	}
+
+	return
 }
 
 func solProcessTokenIx(
@@ -143,65 +203,47 @@ func solProcessTokenIx(
 	const app = "token_program"
 
 	switch ixType {
-	case solTokenIxTransfer:
+	case solTokenIxTransferChecked:
 		amount := binary.LittleEndian.Uint64(ix.Data[1:])
 		if amount == 0 {
 			return
 		}
+		from, to := ix.Accounts[0], ix.Accounts[2]
 
-		from, to := ix.Accounts[0], ix.Accounts[1]
-		fromAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, from)
-		toAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, to)
-
-		if fromAccount == nil && toAccount == nil {
+		eventData, eventType, ok := solTokenProcessTransfer(ctx, from, to, amount)
+		if !ok {
 			return
 		}
 
 		event := db.Event{
 			UiAppName:    app,
 			UiMethodName: method,
+			Type:         eventType,
+			Data:         eventData,
 		}
 		ctx.initEvent(&event)
 
-		if fromAccount != nil && toAccount != nil {
-			fromAccountData := solAccountDataMust[SolTokenAccountData](fromAccount)
-			decimals := solDecimalsMust(ctx, fromAccountData.Mint)
+		*events = append(*events, &event)
+	case solTokenIxTransfer:
+		amount := binary.LittleEndian.Uint64(ix.Data[1:])
+		if amount == 0 {
+			return
+		}
+		from, to := ix.Accounts[0], ix.Accounts[1]
 
-			// TODO: check toAccount, it should have the same mint as fromAccount
-			event.Type = db.EventTypeTransferInternal
-			event.Data = &db.EventTransferInternal{
-				FromAccount: from,
-				ToAccount:   to,
-				Token:       fromAccountData.Mint,
-				Amount:      newDecimalFromRawAmount(amount, decimals),
-			}
-			*events = append(*events, &event)
+		eventData, eventType, ok := solTokenProcessTransfer(ctx, from, to, amount)
+		if !ok {
 			return
 		}
 
-		var tokenAccountData *SolTokenAccountData
-		var tokenAccount string
-		var direction db.EventTransferDirection
-
-		switch {
-		case fromAccount != nil:
-			tokenAccountData = solAccountDataMust[SolTokenAccountData](fromAccount)
-			direction, tokenAccount = db.EventTransferOutgoing, from
-		case toAccount != nil:
-			tokenAccountData = solAccountDataMust[SolTokenAccountData](toAccount)
-			direction, tokenAccount = db.EventTransferIncoming, to
-		default:
-			return
+		event := db.Event{
+			UiAppName:    app,
+			UiMethodName: method,
+			Type:         eventType,
+			Data:         eventData,
 		}
+		ctx.initEvent(&event)
 
-		decimals := solDecimalsMust(ctx, tokenAccountData.Mint)
-		event.Type = db.EventTypeTransfer
-		event.Data = &db.EventTransfer{
-			Direction: direction,
-			Account:   tokenAccount,
-			Token:     tokenAccountData.Mint,
-			Amount:    newDecimalFromRawAmount(amount, decimals),
-		}
 		*events = append(*events, &event)
 	case solTokenIxClose:
 	case solTokenIxMint, solTokenIxMintChecked:

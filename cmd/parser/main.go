@@ -3,6 +3,7 @@ package parser
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -114,7 +115,7 @@ func Parse(
 
 	///////////////////
 	// preprocess txs
-	errors := make(parserErrors)
+	errs := make(parserErrors)
 	solanaAccounts := make(map[string][]accountLifetime)
 
 	for _, tx := range txs {
@@ -125,7 +126,7 @@ func Parse(
 		switch txData := tx.Data.(type) {
 		case *db.SolanaTransactionData:
 			solPreprocessTx(
-				errors,
+				errs,
 				solanaAccounts,
 				solanaWallets,
 				tx.Id,
@@ -139,7 +140,7 @@ func Parse(
 	// always created in the correct order, so just keeping global
 	// position is fine
 	errPos := int32(0)
-	for _, errs := range errors {
+	for _, errs := range errs {
 		for _, err := range errs {
 			txId, address, ixIdx := "", "", int32(0)
 			var (
@@ -200,7 +201,7 @@ func Parse(
 			solanaCtx := solanaContext{
 				wallets:        solanaWallets,
 				accounts:       solanaAccounts,
-				parserErrors:   errors,
+				parserErrors:   errs,
 				txId:           tx.Id,
 				slot:           txData.Slot,
 				timestamp:      tx.Timestamp,
@@ -250,7 +251,13 @@ func Parse(
 		q.QueryRow(func(row pgx.Row) error {
 			price, coingeckoId, ok, err := db.QueueScanPricepoint(row)
 			// TODO: coingecko may not have the information about the token
-			assert.NoErr(err, "unable to scan pricepoint")
+			if errors.Is(err, pgx.ErrNoRows) {
+				// TODO: Error
+				// NOTE: coingecko does not have the token data
+				return nil
+			} else {
+				assert.NoErr(err, fmt.Sprintf("unable to scan pricepoint: %s", token))
+			}
 
 			if ok {
 				logger.Info("Found pricepoint in db: %s %s", coingeckoId, roundedTimestamp)

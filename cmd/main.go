@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"taxee/cmd/fetcher"
 	"taxee/cmd/fetcher/solana"
 	"taxee/cmd/parser"
@@ -31,6 +33,23 @@ func main() {
 	assert.NoErr(err, "")
 
 	switch cliArgs[1] {
+	case "parse-disc":
+		assert.True(len(cliArgs) > 2, "Missing hex discriminator")
+
+		decoded, err := hex.DecodeString(cliArgs[2])
+		assert.NoErr(err, "invalid hex")
+		
+		sb := strings.Builder{}
+		sb.WriteString("[]uint8{")
+		for i, b := range decoded {
+			sb.WriteString(fmt.Sprintf("%d", b))
+			if i != len(decoded) -1 {
+				sb.WriteRune(',')
+			}
+		}
+		sb.WriteRune('}')
+
+		fmt.Println(sb.String())
 	case "migrate":
 		assert.True(len(cliArgs) > 2, "Need to specify migration path")
 		migrationPath := cliArgs[2]

@@ -1,6 +1,8 @@
 package parser
 
 import (
+	"errors"
+	"fmt"
 	"math"
 	"slices"
 	"taxee/pkg/assert"
@@ -23,6 +25,8 @@ func RelatedAccountsFromTx(
 			solTokenIxRelatedAccounts(relatedAccounts, walletAddress, ix)
 		case SOL_ASSOCIATED_TOKEN_PROGRAM_ADDRESS:
 			solAssociatedTokenIxRelatedAccounts(relatedAccounts, walletAddress, ix)
+		case SOL_SQUADS_V4_PROGRAM_ADDRESS:
+			solSquadsV4IxRelatedAccounts(relatedAccounts, walletAddress, ix)
 		}
 	}
 }
@@ -94,9 +98,9 @@ type accountLifetime struct {
 	// used in preparse to know if an account is still
 	// open inside one instruction
 	PreparseOpen bool
-	Balance      uint64
 	Owned        bool
 	Data         any
+	Balance      uint64
 }
 
 func newAccountLifetime(slot uint64, ixIdx uint32) accountLifetime {
@@ -162,7 +166,7 @@ func (ctx *solanaContext) receiveSol(address string, amount uint64) {
 	ctx.accounts[address] = lifetimes
 }
 
-func (ctx *solanaContext) initOwned(address string, data any) {
+func (ctx *solanaContext) init(address string, owned bool, data any) {
 	lifetimes, ok := ctx.accounts[address]
 	if !ok || len(lifetimes) == 0 {
 		err := newErrAccountMissing(ctx, address)
@@ -178,7 +182,7 @@ func (ctx *solanaContext) initOwned(address string, data any) {
 	}
 
 	acc.Data = data
-	acc.Owned = true
+	acc.Owned = owned
 	ctx.accounts[address] = lifetimes
 }
 
@@ -208,11 +212,19 @@ func (ctx *solanaContext) close(closedAddress, receiverAddress string) {
 	ctx.receiveSol(receiverAddress, closedBalance)
 }
 
-func (ctx *solanaContext) findOwned(
+// 0 -> not owned, 1 -> owned, 2 -> whatever
+func (ctx *solanaContext) find(
 	slot uint64,
 	ixIdx uint32,
 	address string,
+	owned uint8,
 ) *accountLifetime {
+	isValid := func(lt *accountLifetime, o uint8) bool {
+		return o == 2 ||
+			(o == 1 && lt.Owned) ||
+			(o == 0 && !lt.Owned)
+	}
+
 	lifetimes, ok := ctx.accounts[address]
 	if !ok || len(lifetimes) == 0 {
 		return nil
@@ -220,12 +232,20 @@ func (ctx *solanaContext) findOwned(
 
 	for i := 0; i < len(lifetimes); i += 1 {
 		lt := &lifetimes[i]
-		if lt.open(slot, ixIdx) && lt.Owned {
+		if lt.open(slot, ixIdx) && isValid(lt, owned) {
 			return lt
 		}
 	}
 
 	return nil
+}
+
+func (ctx *solanaContext) findOwned(
+	slot uint64,
+	ixIdx uint32,
+	address string,
+) *accountLifetime {
+	return ctx.find(slot, ixIdx, address, 1)
 }
 
 func (ctx *solanaContext) initEvent(event *db.Event) {
@@ -247,6 +267,19 @@ func solDecimalsMust(ctx *solanaContext, mint string) uint8 {
 	return decimals
 }
 
+func solPreprocessIx(ctx *solanaContext, ix *db.SolanaInstruction) {
+	switch ix.ProgramAddress {
+	case SOL_SYSTEM_PROGRAM_ADDRESS:
+		solPreprocessSystemIx(ctx, ix)
+	case SOL_TOKEN_PROGRAM_ADDRESS:
+		solPreprocessTokenIx(ctx, ix)
+	case SOL_ASSOCIATED_TOKEN_PROGRAM_ADDRESS:
+		solPreprocessAssociatedTokenIx(ctx, ix)
+	case SOL_SQUADS_V4_PROGRAM_ADDRESS:
+		solPreprocessSquadsV4Ix(ctx, ix)
+	}
+}
+
 func solPreprocessTx(
 	errors parserErrors,
 	solanaAccounts map[string][]accountLifetime,
@@ -266,16 +299,119 @@ func solPreprocessTx(
 
 	for ixIdx, ix := range txData.Instructions {
 		ctx.ixIdx = uint32(ixIdx)
+		solPreprocessIx(&ctx, ix)
+	}
 
-		switch ix.ProgramAddress {
-		case SOL_SYSTEM_PROGRAM_ADDRESS:
-			solPreprocessSystemIx(&ctx, ix)
-		case SOL_TOKEN_PROGRAM_ADDRESS:
-			solPreprocessTokenIx(&ctx, ix)
-		case SOL_ASSOCIATED_TOKEN_PROGRAM_ADDRESS:
-			solPreprocessAssociatedTokenIx(&ctx, ix)
+	// TODO: Validate balances
+}
+
+func solNewTransferNative(
+	ctx *solanaContext,
+	from, to string,
+	amount uint64,
+) (d db.EventData, t db.EventType, ok bool) {
+	fromInternal := ctx.walletOwned(from)
+	toInternal := ctx.walletOwned(to)
+
+	if !fromInternal && !toInternal {
+		return
+	}
+
+	ok = true
+	switch {
+	case fromInternal && toInternal:
+		t = db.EventTypeTransferInternal
+		d = &db.EventTransferInternal{
+			FromAccount: from,
+			ToAccount:   to,
+			Token:       SOL_MINT_ADDRESS,
+			Amount:      newDecimalFromRawAmount(amount, 9),
+		}
+	case fromInternal:
+		t = db.EventTypeTransfer
+		d = &db.EventTransfer{
+			Direction: db.EventTransferOutgoing,
+			Account:   from,
+			Token:     SOL_MINT_ADDRESS,
+			Amount:    newDecimalFromRawAmount(amount, 9),
+		}
+	case toInternal:
+		t = db.EventTypeTransfer
+		d = &db.EventTransfer{
+			Direction: db.EventTransferIncoming,
+			Account:   to,
+			Token:     SOL_MINT_ADDRESS,
+			Amount:    newDecimalFromRawAmount(amount, 9),
 		}
 	}
+
+	return
+}
+
+type solInnerIxIterator struct {
+	innerIxs []*db.SolanaInnerInstruction
+	pos      int
+}
+
+func (iter *solInnerIxIterator) hasNext() bool {
+	return len(iter.innerIxs) > iter.pos
+}
+
+func (iter *solInnerIxIterator) next() *db.SolanaInnerInstruction {
+	ix := iter.innerIxs[iter.pos]
+	iter.pos += 1
+	return ix
+}
+
+// NOTE: implemented based on
+// https://github.com/solana-foundation/anchor/blob/master/lang/syn/src/codegen/accounts/constraints.rs#L1036
+func solProcessAnchorInitProgram(
+	ctx *solanaContext,
+	innerIxs *solInnerIxIterator,
+) (d db.EventData, t db.EventType, ok bool, err error) {
+	if !innerIxs.hasNext() {
+		err = errors.New("invalid anchor init ix: missing inner ixs")
+		return
+	}
+
+	firstIx := innerIxs.next()
+	if firstIx.ProgramAddress != SOL_SYSTEM_PROGRAM_ADDRESS {
+		err = fmt.Errorf(
+			"ivnalid anchor init ix: program address mismatch: %s",
+			firstIx.ProgramAddress,
+		)
+		return
+	}
+
+	ixType, _, ok := solSystemIxFromData(firstIx.Data)
+	if !ok {
+		err = fmt.Errorf("invalid anchor init ix: %#v", *firstIx)
+		return
+	}
+
+	switch ixType {
+	case solSystemIxCreate:
+	case solSystemIxTransfer:
+		// NOTE: skip over allocate and assign
+		innerIxs.next()
+		if !innerIxs.hasNext() {
+			err = errors.New("invalid anchor init ix")
+			return
+		}
+		innerIxs.next()
+	default:
+		assert.True(false, "invalid anchor init ix: %d", ixType)
+	}
+
+	from, to, amount, ok := solParseSystemIxSolTransfer(
+		ixType,
+		firstIx.Accounts,
+		firstIx.Data,
+	)
+	assert.True(ok, "invalid anchor init ix")
+
+	d, t, ok = solNewTransferNative(ctx, from, to, amount)
+	return
 }
 
 func solProcessIx(
@@ -288,5 +424,7 @@ func solProcessIx(
 		solProcessSystemIx(ctx, ix, events)
 	case SOL_TOKEN_PROGRAM_ADDRESS:
 		solProcessTokenIx(ctx, ix, events)
+	case SOL_SQUADS_V4_PROGRAM_ADDRESS:
+		solProcessSquadsV4Ix(ctx, ix, events)
 	}
 }
