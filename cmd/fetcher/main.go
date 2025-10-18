@@ -24,24 +24,6 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-func setWallet(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	userAccountId int32,
-	walletAddress string,
-	network db.Network,
-) (walletId int32, latestTxId pgtype.Text, err error) {
-	const query = "select wallet_id, wallet_latest_tx_id from set_wallet($1, $2, $3)"
-	row := pool.QueryRow(ctx, query, userAccountId, walletAddress, network)
-
-	scanErr := row.Scan(&walletId, &latestTxId)
-	if scanErr != nil {
-		err = fmt.Errorf("unable to scan wallet: %w", scanErr)
-	}
-
-	return
-}
-
 func enqueueInsertTx(
 	batch *pgx.Batch,
 	txId string,
@@ -86,21 +68,28 @@ func setUserTransactions(
 	return nil
 }
 
-func setLatestWalletTxId(
+func setWalletData(
 	ctx context.Context,
 	pool *pgxpool.Pool,
 	walletId int32,
-	latestTxId string,
+	data any,
 ) error {
 	const query = `
-		update wallet set
-			latest_tx_id = $1
-		where id = $2
+		update 
+			wallet 
+		set
+			data = data || $1::jsonb
+		where
+			id = $2
 	`
-	_, err := pool.Exec(ctx, query, latestTxId, walletId)
-	if err != nil {
+
+	d, err := json.Marshal(data)
+	assert.NoErr(err, "")
+
+	if _, err = pool.Exec(ctx, query, d, walletId); err != nil {
 		return fmt.Errorf("unable to set latest wallet tx id: %w", err)
 	}
+
 	return nil
 }
 
@@ -341,7 +330,7 @@ func fetchSolanaAccount(
 			relatedAccountAddress.String,
 		)
 	} else {
-		err = setLatestWalletTxId(ctx, pool, walletId, newLastestTxId)
+		err = setWalletData(ctx, pool, walletId, db.SolanaWalletData{newLastestTxId})
 		logger.Info(
 			"Set latest txId \"%s\" for wallet %s",
 			newLastestTxId,
@@ -590,6 +579,7 @@ func fetchEvmWallet(
 	walletId int32,
 	walletAddress string,
 	network db.Network,
+	walletData *db.EvmWalletData,
 ) {
 	chainId, nativeDecimals := 0, 0
 
@@ -601,7 +591,7 @@ func fetchEvmWallet(
 	}
 
 	const endBlock = uint64(math.MaxInt64)
-	startBlock := uint64(0)
+	startBlock := walletData.TxsLatestBlockNumber
 
 	feePaid := func(gasUsed, gasPrice uint64) decimal.Decimal {
 		g := decimal.NewFromBigInt(
@@ -618,9 +608,9 @@ func fetchEvmWallet(
 		err       bool
 	}
 	fetchedTxs := make(map[string]*evmTx)
+	newWalletData := db.EvmWalletData{}
 
 	for {
-
 		txs, err := client.GetWalletNormalTransactions(
 			chainId,
 			walletAddress,
@@ -628,6 +618,15 @@ func fetchEvmWallet(
 			endBlock,
 		)
 		assert.NoErr(err, "unable to fetch evm txs")
+
+		if startBlock == walletData.TxsLatestBlockNumber && walletData.TxsLatestHash != "" {
+			for i, tx := range txs {
+				if tx.Hash == walletData.TxsLatestHash {
+					txs = txs[i+1:]
+					break
+				}
+			}
+		}
 
 		if len(txs) == 0 {
 			break
@@ -682,6 +681,8 @@ func fetchEvmWallet(
 
 			if i == len(txs)-1 {
 				startBlock = uint64(tx.BlockNumber) + 1
+				newWalletData.TxsLatestHash = tx.Hash
+				newWalletData.TxsLatestBlockNumber = uint64(tx.BlockNumber)
 			}
 		}
 	}
@@ -749,7 +750,7 @@ func fetchEvmWallet(
 	topicsOperators := [6]evm.TopicOperator{}
 	topicsOperators[3] = evm.TopicAnd
 
-	startBlock = 0
+	startBlock = walletData.EventsLatestBlockNumber
 
 	for {
 		events, err := client.GetEventLogsByTopics(
@@ -760,6 +761,17 @@ func fetchEvmWallet(
 			topicsOperators,
 		)
 		assert.NoErr(err, "")
+
+		if startBlock == walletData.EventsLatestBlockNumber && walletData.EventsLatestHash != "" {
+			// NOTE: go from back because multiple events can have same tx hash
+			for i := len(events) - 1; i >= 0; i-- {
+				e := events[i]
+				if e.Hash == walletData.EventsLatestHash {
+					events = events[i+1:]
+					break
+				}
+			}
+		}
 
 		if len(events) == 0 {
 			break
@@ -780,6 +792,8 @@ func fetchEvmWallet(
 
 			if i == len(events)-1 {
 				startBlock = uint64(event.BlockNumber) + 1
+				newWalletData.EventsLatestHash = event.Hash
+				newWalletData.EventsLatestBlockNumber = uint64(event.BlockNumber)
 			}
 		}
 	}
@@ -787,7 +801,7 @@ func fetchEvmWallet(
 	/////////////////
 	// Fetch internal txs
 	logger.Info("Fetching internal txs")
-	startBlock = 0
+	startBlock = walletData.InternalTxsLatestBlockNumber
 
 	// TODO: This method is wallet specific, afaik this method only returns
 	// internal txs where either from or to is == walletAddress ignoring all
@@ -807,6 +821,17 @@ func fetchEvmWallet(
 			endBlock,
 		)
 		assert.NoErr(err, "")
+
+		if startBlock == walletData.InternalTxsLatestBlockNumber && walletData.InternalTxsLatestHash != "" {
+			// NOTE: go from back because multiple can belong to same hash
+			for i := len(internalTxs) - 1; i >= 0; i -= 1 {
+				t := internalTxs[i]
+				if t.Hash == walletData.InternalTxsLatestHash {
+					internalTxs = internalTxs[i+1:]
+					break
+				}
+			}
+		}
 
 		if len(internalTxs) == 0 {
 			break
@@ -848,6 +873,8 @@ func fetchEvmWallet(
 
 			if i == len(internalTxs)-1 {
 				startBlock = uint64(internalTx.BlockNumber) + 1
+				newWalletData.InternalTxsLatestHash = internalTx.Hash
+				newWalletData.InternalTxsLatestBlockNumber = uint64(internalTx.BlockNumber)
 			}
 		}
 	}
@@ -879,6 +906,7 @@ func fetchEvmWallet(
 	err = br.Close()
 	assert.NoErr(err, "unable to insert txs")
 
+	// TODO: should be a tx with the wallet data and some for solana
 	err = setUserTransactions(
 		ctx,
 		pool,
@@ -889,7 +917,13 @@ func fetchEvmWallet(
 	)
 	assert.NoErr(err, "")
 
-	// TODO: set checkpoints - probably last block number and tx hash
+	err = setWalletData(
+		ctx,
+		pool,
+		walletId,
+		newWalletData,
+	)
+	assert.NoErr(err, "")
 
 	// TODO: later can validate balances at the end of the block with
 	// eth_getBalance
@@ -913,15 +947,31 @@ func Fetch(
 
 	logger.Info("Starting fetch for user: %d", userAccountId)
 
-	walletId, latestTxId, err := setWallet(ctx, pool, userAccountId, walletAddress, n)
-	assert.NoErr(err, "")
-	logger.Info(
-		"Wallet: %s %s (fresh: %t walletId: %d latestTxId: \"%s\")",
-		walletAddress, n, fresh, walletId, latestTxId.String,
+	walletId, walletData, err := db.SetWallet(
+		ctx,
+		pool,
+		userAccountId,
+		walletAddress,
+		n,
 	)
+	assert.NoErr(err, "")
+
+	// logger.Info(
+	// 	"Wallet: %s %s (fresh: %t walletId: %d latestTxId: \"%s\")",
+	// 	walletAddress, n, fresh, walletId, latestTxId.String,
+	// )
 
 	switch n {
 	case db.NetworkSolana:
+		wd, ok := walletData.(*db.SolanaWalletData)
+		assert.True(ok, "")
+
+		latestTxId := pgtype.Text{}
+		if wd.LatestTxId != "" {
+			latestTxId.Valid = true
+			latestTxId.String = wd.LatestTxId
+		}
+
 		fetchSolanaWallet(
 			ctx,
 			pool,
@@ -933,6 +983,9 @@ func Fetch(
 			fresh,
 		)
 	case db.NetworkArbitrum:
+		wd, ok := walletData.(*db.EvmWalletData)
+		assert.True(ok, "")
+
 		fetchEvmWallet(
 			ctx,
 			pool,
@@ -941,6 +994,7 @@ func Fetch(
 			walletId,
 			walletAddress,
 			n,
+			wd,
 		)
 	}
 }

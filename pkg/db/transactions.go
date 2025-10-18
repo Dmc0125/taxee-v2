@@ -63,6 +63,60 @@ func NewNetwork(n string) (valid Network, ok bool) {
 	return
 }
 
+type SolanaWalletData struct {
+	LatestTxId string `json:"latestTxId"`
+}
+
+type EvmWalletData struct {
+	TxsLatestHash                string `json:"txsLatestHash,omitempty"`
+	TxsLatestBlockNumber         uint64 `json:"txsLatestBlockNumber,omitempty"`
+	EventsLatestHash             string `json:"eventsLatestHash,omitempty"`
+	EventsLatestBlockNumber      uint64 `json:"eventsLatestBlockNumber,omitempty"`
+	InternalTxsLatestHash        string `json:"internalTxsLatestHash,omitempty"`
+	InternalTxsLatestBlockNumber uint64 `json:"internalTxsLatestBlockNumber,omitempty"`
+}
+
+func SetWallet(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	userAccountId int32,
+	walletAddress string,
+	network Network,
+) (int32, any, error) {
+	const q = `
+		select
+			wallet_id, wallet_data
+		from
+			set_wallet($1, $2, $3)
+	`
+	row := pool.QueryRow(ctx, q, userAccountId, walletAddress, network)
+
+	var walletId int32
+	var walletData []byte
+	if err := row.Scan(&walletId, &walletData); err != nil {
+		return 0, nil, fmt.Errorf("unable to scan wallet: %w", err)
+	}
+
+	var data any
+
+	switch network {
+	case NetworkSolana:
+		var d SolanaWalletData
+		if err := json.Unmarshal(walletData, &d); err != nil {
+			return 0, nil, fmt.Errorf("unable to unmarshal solana wallet data: %w", err)
+		}
+		data = &d
+	case NetworkArbitrum:
+		var d EvmWalletData
+		if err := json.Unmarshal(walletData, &d); err != nil {
+			return 0, nil, fmt.Errorf("unable to unmarshal evm wallet data: %w", err)
+		}
+		data = &d
+	}
+
+	return walletId, data, nil
+}
+
 type WalletRow struct {
 	Id                  int32
 	Address             string

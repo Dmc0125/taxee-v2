@@ -28,7 +28,7 @@ create table wallet (
     tx_count integer default 0,
     -- count of txs related to this wallet and it's related accounts
     total_tx_count integer default 0,
-    latest_tx_id varchar
+    data jsonb not null
 );
 
 create function set_wallet(
@@ -37,7 +37,7 @@ create function set_wallet(
     p_network network
 ) returns table(
     wallet_id integer,
-    wallet_latest_tx_id varchar
+    wallet_data jsonb
 )
 language plpgsql
 as $$
@@ -46,7 +46,7 @@ declare
     new_wallet_id integer;
 begin
     select
-        w.id, w.latest_tx_id
+        w.id, w.data
     into
         wallet_record
     from
@@ -57,12 +57,12 @@ begin
         w.user_account_id = p_user_account_id;
 
     if found then
-        return query select wallet_record.id, wallet_record.latest_tx_id;
+        return query select wallet_record.id, wallet_record.data;
     else
         insert into wallet (
-            address, network, user_account_id
+            address, network, user_account_id, data
         ) values (
-            p_address, p_network, p_user_account_id
+            p_address, p_network, p_user_account_id, '{}'::jsonb
         ) returning wallet.id into new_wallet_id;
 
         insert into stats (
@@ -72,7 +72,7 @@ begin
         ) do update set
             wallets_count = stats.wallets_count + 1;
 
-        return query select new_wallet_id, null::varchar;
+        return query select new_wallet_id, '{}'::jsonb;
     end if;
 end;
 $$;
