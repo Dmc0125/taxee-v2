@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 )
 
 func InsertUserAccount(ctx context.Context, pool *pgxpool.Pool, name string) (int32, error) {
@@ -40,16 +41,21 @@ func GetUserAccount(ctx context.Context, pool *pgxpool.Pool, id int32) (*GetUser
 	return res, nil
 }
 
+// TODO: store as int or whatever, string is not needed
 type Network string
 
 const (
-	NetworkSolana Network = "solana"
+	NetworkSolana   Network = "solana"
+	NetworkEthereum Network = "ethereum"
+	NetworkArbitrum Network = "arbitrum"
 )
 
 func NewNetwork(n string) (valid Network, ok bool) {
 	ok = true
 	switch n {
 	case "solana":
+		valid = Network(n)
+	case "arbitrum":
 		valid = Network(n)
 	default:
 		ok = false
@@ -143,11 +149,38 @@ type SolanaNativeBalance rpcsolana.NativeBalance
 
 type SolanaTransactionData struct {
 	Slot           uint64                          `json:"slot"`
+	Fee            decimal.Decimal                 `json:"fee"`
 	Instructions   []*SolanaInstruction            `json:"ixs"`
 	NativeBalances map[string]*SolanaNativeBalance `json:"nativeBalances"`
 	TokenBalances  map[string]*SolanaTokenBalances `json:"tokenBalances"`
 	TokenDecimals  map[string]uint8                `json:"tokenDecimals"`
 	BlockIndex     int32                           `json:"blockIndex"`
+}
+
+type EvmTransactionEvent struct {
+	Address string        `json:"address"`
+	Topics  [4]Uint8Array `json:"topics"`
+	Data    Uint8Array    `json:"data"`
+}
+
+type EvmInternalTx struct {
+	From            string          `json:"from"`
+	To              string          `json:"to"`
+	Value           decimal.Decimal `json:"value"`
+	ContractAddress string          `json:"contractAddress"`
+	Input           Uint8Array      `json:"input"`
+}
+
+type EvmTransactionData struct {
+	Block       uint64                 `json:"block"`
+	TxIdx       int32                  `json:"txIdx"`
+	Input       Uint8Array             `json:"input"`
+	Fee         decimal.Decimal        `json:"fee"`
+	Value       decimal.Decimal        `json:"value"`
+	From        string                 `json:"from"`
+	To          string                 `json:"to"`
+	Events      []*EvmTransactionEvent `json:"events"`
+	InternalTxs []*EvmInternalTx       `json:"intenalTxs"`
 }
 
 type TransactionRow struct {

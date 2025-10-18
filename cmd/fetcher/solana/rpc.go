@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"slices"
 	"sync"
 	"sync/atomic"
+	"taxee/pkg/assert"
 	"time"
 )
+
+const reqTimeout = 200
 
 type ResponseError struct {
 	Code    int
@@ -53,7 +57,10 @@ type Rpc struct {
 	mx           *sync.Mutex
 }
 
-func NewRpc(url string) *Rpc {
+func NewRpc() *Rpc {
+	url := os.Getenv("SOLANA_RPC_URL")
+	assert.True(url != "", "missing SOLANA_RPC_URL")
+
 	return &Rpc{
 		url: url,
 		mx:  &sync.Mutex{},
@@ -90,7 +97,7 @@ func (rpc *Rpc) sendRequest(reqData any, resData any) error {
 	}
 	defer res.Body.Close()
 
-	rpc.nextReqMinTs = time.UnixMilli(time.Now().UnixMilli() + 200)
+	rpc.nextReqMinTs = time.UnixMilli(time.Now().UnixMilli() + reqTimeout)
 	rpc.mx.Unlock()
 
 	resBody, err := io.ReadAll(res.Body)

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"taxee/cmd/fetcher"
+	"taxee/cmd/fetcher/evm"
 	"taxee/cmd/fetcher/solana"
 	"taxee/cmd/parser"
 	"taxee/pkg/assert"
@@ -38,12 +39,12 @@ func main() {
 
 		decoded, err := hex.DecodeString(cliArgs[2])
 		assert.NoErr(err, "invalid hex")
-		
+
 		sb := strings.Builder{}
 		sb.WriteString("[]uint8{")
 		for i, b := range decoded {
 			sb.WriteString(fmt.Sprintf("%d", b))
-			if i != len(decoded) -1 {
+			if i != len(decoded)-1 {
 				sb.WriteRune(',')
 			}
 		}
@@ -122,8 +123,8 @@ func main() {
 
 		walletAddress, network := cliArgs[2], cliArgs[3]
 
-		solanaRpcUrl := os.Getenv("SOLANA_RPC_URL")
-		rpc := solana.NewRpc(solanaRpcUrl)
+		solanaRpc := solana.NewRpc()
+		etherscanClient := evm.NewClient()
 
 		fresh := false
 		if len(cliArgs) > 4 && cliArgs[4] == "fresh" {
@@ -136,7 +137,8 @@ func main() {
 			userAccountId,
 			walletAddress,
 			network,
-			rpc,
+			solanaRpc,
+			etherscanClient,
 			fresh,
 		)
 	case "parse":

@@ -1,6 +1,6 @@
 begin;
 
-create type network as enum ('solana');
+create type network as enum ('solana', 'arbitrum');
 
 create table stats (
     user_account_id integer not null,
@@ -89,7 +89,6 @@ create table tx (
     id varchar primary key,
     network network not null,
     err bool not null,
-    fee bigint not null,
     signer varchar(64) not null,
     fee_payer varchar(64) not null,
     timestamp timestamptz not null,
@@ -210,6 +209,8 @@ begin
 end;
 $$;
 
+-- TODO: this should probably be split into 2 different methods based on if
+-- related_account_address is null or not
 create procedure set_user_transactions(
     p_user_account_id integer,
     p_tx_ids varchar[],
