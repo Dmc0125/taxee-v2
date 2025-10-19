@@ -1,65 +1,75 @@
 package evm
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
-	"sync"
 	"taxee/pkg/assert"
-	"time"
+	"taxee/pkg/db"
+	requesttimer "taxee/pkg/request_timer"
 )
 
-const apiUrl = "https://api.etherscan.io/v2/api"
-
-type Client struct {
-	apiKey string
-
-	etherscanTimeout   int64
-	etherscanMx        *sync.Mutex
-	etherscanLastReqTs time.Time
+type requestTimer interface {
+	Lock()
+	Free()
 }
 
-func NewClient() *Client {
-	apiKey := os.Getenv("ETHERSCAN_API_KEY")
-	assert.True(len(apiKey) > 0, "missing ETHERSCAN_API_KEY")
+const etherscanApiUrl = "https://api.etherscan.io/v2/api"
+
+type Client struct {
+	etherscanApiKey string
+	etherscanTimer  *requesttimer.DefaultTimer
+
+	alchemyApiKey string
+	alchemyTimer  requestTimer
+}
+
+func NewClient(alchemyTimer requestTimer) *Client {
+	etherscanApiKey := os.Getenv("ETHERSCAN_API_KEY")
+	assert.True(len(etherscanApiKey) > 0, "missing ETHERSCAN_API_KEY")
+
+	alchemyApiKey := os.Getenv("ALCHEMY_API_KEY")
+	assert.True(len(alchemyApiKey) > 0, "missing ALCHEMY_API_KEY")
 
 	return &Client{
-		apiKey: apiKey,
+		etherscanApiKey: etherscanApiKey,
+		etherscanTimer:  requesttimer.NewDefault(200),
 
-		etherscanTimeout: 200,
-		etherscanMx:      &sync.Mutex{},
+		alchemyApiKey: alchemyApiKey,
+		alchemyTimer:  alchemyTimer,
 	}
 }
 
-type etherscanResponse[T any] struct {
-	Status  string `json:"status"`
-	Message string `json:"message"`
-	Result  T      `json:"result"`
+func ChainIdAndNativeDecimals(network db.Network) (chainId, decimals int) {
+	switch network {
+	case db.NetworkArbitrum:
+		chainId = 42161
+		decimals = 18
+	default:
+		assert.True(false, "invalid EVM network: %s", network)
+	}
+
+	return
 }
 
 func (client *Client) sendRequest(
 	request *http.Request,
 	data any,
-	timeout int64,
+	timer requestTimer,
 ) error {
-	client.etherscanMx.Lock()
-	if diff := (client.etherscanLastReqTs.UnixMilli() + timeout) - time.Now().UnixMilli(); diff > 0 {
-		time.Sleep(time.Duration(diff * int64(time.Millisecond)))
-	}
+	timer.Lock()
 
 	res, err := http.DefaultClient.Do(request)
 	if err != nil {
 		return fmt.Errorf("unable to execute request: %w", err)
 	}
 
-	client.etherscanLastReqTs = time.Now()
-	client.etherscanMx.Unlock()
-
+	timer.Free()
 	defer res.Body.Close()
 
 	dataBytes, err := io.ReadAll(res.Body)
@@ -74,72 +84,13 @@ func (client *Client) sendRequest(
 	return nil
 }
 
-type StringUint64 uint64
+////////////////
+// ETHERSCAN methods
 
-func (dst *StringUint64) UnmarshalJSON(src []byte) error {
-	s := string(src[1 : len(src)-1])
-	res, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return fmt.Errorf("unable to parse string as uint64: %s %w", s, err)
-	}
-	*dst = StringUint64(res)
-	return nil
-}
-
-type StringUint32 uint32
-
-func (dst *StringUint32) UnmarshalJSON(src []byte) error {
-	s := string(src[1 : len(src)-1])
-	res, err := strconv.ParseInt(s, 10, 32)
-	if err != nil {
-		return fmt.Errorf("unable to parse string as uint32: %s %w", s, err)
-	}
-	*dst = StringUint32(res)
-	return nil
-}
-
-type StringTime time.Time
-
-func (dst *StringTime) UnmarshalJSON(src []byte) error {
-	s := string(src[1 : len(src)-1])
-	res, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return fmt.Errorf("unable to parse string as int64: %s %w", s, err)
-	}
-	*dst = StringTime(time.Unix(res, 0))
-	return nil
-}
-
-type StringErr bool
-
-func (dst *StringErr) UnmarshalJSON(src []byte) error {
-	s := string(src[1 : len(src)-1])
-	*dst = s != "0"
-	return nil
-}
-
-type HexBytes []byte
-
-func (dst *HexBytes) UnmarshalJSON(src []byte) error {
-	s := string(src[1 : len(src)-1])
-	if s == "0x" || len(s) == 0 {
-		return nil
-	}
-
-	s = s[2:]
-	if len(s)%2 == 1 {
-		s = string(append(
-			[]byte{'0'},
-			s...,
-		))
-	}
-
-	bytes, err := hex.DecodeString(s)
-	if err != nil {
-		return fmt.Errorf("invalid bytes: %s %w", s, err)
-	}
-	*dst = bytes
-	return nil
+type etherscanResponse[T any] struct {
+	Status  string `json:"status"`
+	Message string `json:"message"`
+	Result  T      `json:"result"`
 }
 
 type EtherscanTransaction struct {
@@ -165,18 +116,18 @@ func (client *Client) GetWalletNormalTransactions(
 ) ([]*EtherscanTransaction, error) {
 	url := fmt.Sprintf(
 		"%s?chainId=%d&module=account&action=txlist&address=%s&startBlock=%d&endBlock=%d&sort=asc&apiKey=%s",
-		apiUrl,
+		etherscanApiUrl,
 		chainId,
 		walletAddress,
 		startBlock,
 		endBlock,
-		client.apiKey,
+		client.etherscanApiKey,
 	)
 	req, err := http.NewRequest("GET", url, nil)
 	assert.NoErr(err, "")
 
 	var data etherscanResponse[[]*EtherscanTransaction]
-	err = client.sendRequest(req, &data, client.etherscanTimeout)
+	err = client.sendRequest(req, &data, client.etherscanTimer)
 	return data.Result, err
 }
 
@@ -186,54 +137,6 @@ const (
 	TopicAnd TopicOperator = "and"
 	TopicOr  TopicOperator = "or"
 )
-
-type HexUint64 uint64
-
-func (dst *HexUint64) UnmarshalJSON(src []byte) error {
-	s := string(src[1 : len(src)-1])
-	if s == "0x" {
-		return nil
-	}
-
-	res, err := strconv.ParseInt(s, 0, 64)
-	if err != nil {
-		return fmt.Errorf("unable to convert string to uint64: %s %w", s, err)
-	}
-	*dst = HexUint64(res)
-	return nil
-}
-
-type HexUint32 uint32
-
-func (dst *HexUint32) UnmarshalJSON(src []byte) error {
-	s := string(src[1 : len(src)-1])
-	if s == "0x" {
-		return nil
-	}
-
-	res, err := strconv.ParseInt(s, 0, 32)
-	if err != nil {
-		return fmt.Errorf("unable to convert string to uint32: %s %w", s, err)
-	}
-	*dst = HexUint32(res)
-	return nil
-}
-
-type HexTime time.Time
-
-func (dst *HexTime) UnmarshalJSON(src []byte) error {
-	s := string(src[1 : len(src)-1])
-	if s == "0x" {
-		return nil
-	}
-
-	res, err := strconv.ParseInt(s, 0, 64)
-	if err != nil {
-		return fmt.Errorf("unable to convert string to int64: %s %w", s, err)
-	}
-	*dst = HexTime(time.Unix(res, 0))
-	return nil
-}
 
 type EtherscanEvent struct {
 	Address     string      `json:"address"`
@@ -297,22 +200,22 @@ func (client *Client) GetEventLogsByTopics(
 
 	url := fmt.Sprintf(
 		"%s?chainid=%d&module=logs&action=getLogs&fromBlock=%d&toBlock=%d&apiKey=%s%s",
-		apiUrl,
+		etherscanApiUrl,
 		chainId,
 		startBlock,
 		endBlock,
-		client.apiKey,
+		client.etherscanApiKey,
 		topicsQuery.String(),
 	)
 	req, err := http.NewRequest("GET", url, nil)
 	assert.NoErr(err, "")
 
 	var data etherscanResponse[[]*EtherscanEvent]
-	err = client.sendRequest(req, &data, client.etherscanTimeout)
+	err = client.sendRequest(req, &data, client.etherscanTimer)
 	return data.Result, err
 }
 
-type EtherscanInternalTransaction struct {
+type EtherscanInternalTxByAddress struct {
 	BlockNumber     StringUint64 `json:"blockNumber"`
 	Hash            string       `json:"hash"`
 	From            string       `json:"from"`
@@ -327,27 +230,97 @@ func (client *Client) GetInternalTransactionsByAddress(
 	chainId int,
 	address string,
 	startBlock, endBlock uint64,
-) ([]*EtherscanInternalTransaction, error) {
+) ([]*EtherscanInternalTxByAddress, error) {
 	url := fmt.Sprintf(
 		"%s?chainid=%d&module=account&action=txlistinternal&address=%s&startBlock=%d&endBlock=%d&apiKey=%s",
-		apiUrl,
+		etherscanApiUrl,
 		chainId,
 		address,
 		startBlock,
 		endBlock,
-		client.apiKey,
+		client.etherscanApiKey,
 	)
 	req, err := http.NewRequest("GET", url, nil)
 	assert.NoErr(err, "")
 
-	var data etherscanResponse[[]*EtherscanInternalTransaction]
-	err = client.sendRequest(req, &data, client.etherscanTimeout)
+	var data etherscanResponse[[]*EtherscanInternalTxByAddress]
+	err = client.sendRequest(req, &data, client.etherscanTimer)
 	return data.Result, err
 }
+
+type EtherscanInternalTxByHash struct {
+	BlockNumber     StringUint64 `json:"blockNumber"`
+	Timestamp       StringTime   `json:"timeStamp"`
+	From            string       `json:"from"`
+	To              string       `json:"to"`
+	Value           StringUint64 `json:"value"`
+	ContractAddress string       `json:"contractAddress"`
+	Input           HexBytes     `json:"input"`
+}
+
+func (client *Client) GetInternalTransactionsByHash(
+	chainId int,
+	hash string,
+) ([]*EtherscanInternalTxByHash, error) {
+	url := fmt.Sprintf(
+		"%s?chainid=%d&module=account&action=txlistinternal&txhash=%s&apikey=%s",
+		etherscanApiUrl,
+		chainId,
+		hash,
+		client.etherscanApiKey,
+	)
+	req, err := http.NewRequest("GET", url, nil)
+	assert.NoErr(err, "")
+
+	var data etherscanResponse[[]*EtherscanInternalTxByHash]
+	err = client.sendRequest(req, &data, client.etherscanTimer)
+	return data.Result, err
+}
+
+///////////////////
+// RPC methods
 
 type RpcResponse[T any] struct {
 	Id     int `json:"id"`
 	Result T   `json:"result"`
+}
+
+func (client *Client) newAlchemyUrl(network db.Network) string {
+	var alchemyNetwork string
+	switch network {
+	case db.NetworkArbitrum:
+		alchemyNetwork = "arb-mainnet"
+	default:
+		assert.True(false, "invalid EVM network: %s", network)
+	}
+
+	url := fmt.Sprintf(
+		"https://%s.g.alchemy.com/v2/%s",
+		alchemyNetwork,
+		client.alchemyApiKey,
+	)
+
+	return url
+}
+
+type rpcRequest struct {
+	Jsonrpc string `json:"jsonrpc"`
+	Method  string `json:"method"`
+	Params  any    `json:"params"`
+	Id      int    `json:"id"`
+}
+
+func (client *Client) newRpcRequest(
+	method string,
+	params any,
+) *rpcRequest {
+	r := rpcRequest{
+		Jsonrpc: "2.0",
+		Method:  method,
+		Params:  params,
+		Id:      1,
+	}
+	return &r
 }
 
 type RpcTransaction struct {
@@ -364,21 +337,25 @@ type RpcTransaction struct {
 }
 
 func (client *Client) GetTransactionByHash(
-	chainId int,
+	network db.Network,
 	hash string,
 ) (*RpcTransaction, error) {
-	url := fmt.Sprintf(
-		"%s?chainid=%d&module=proxy&action=eth_getTransactionByHash&txhash=%s&apiKey=%s",
-		apiUrl,
-		chainId,
-		hash,
-		client.apiKey,
+	rpcReq := client.newRpcRequest(
+		"eth_getTransactionByHash",
+		[]string{hash},
 	)
-	req, err := http.NewRequest("GET", url, nil)
+	body, err := json.Marshal(rpcReq)
+	assert.NoErr(err, "")
+
+	req, err := http.NewRequest(
+		"POST",
+		client.newAlchemyUrl(network),
+		bytes.NewBuffer(body),
+	)
 	assert.NoErr(err, "")
 
 	var data RpcResponse[*RpcTransaction]
-	err = client.sendRequest(req, &data, client.etherscanTimeout)
+	err = client.sendRequest(req, &data, client.alchemyTimer)
 	return data.Result, err
 }
 
@@ -408,20 +385,34 @@ type RpcTransactionReceipt struct {
 }
 
 func (client *Client) GetTransactionReceipt(
-	chainId int,
+	network db.Network,
 	hash string,
 ) (*RpcTransactionReceipt, error) {
-	url := fmt.Sprintf(
-		"%s?chainid=%d&module=proxy&action=eth_getTransactionReceipt&txhash=%s&apiKey=%s",
-		apiUrl,
-		chainId,
-		hash,
-		client.apiKey,
+	// url := fmt.Sprintf(
+	// 	"%s?chainid=%d&module=proxy&action=eth_getTransactionReceipt&txhash=%s&apiKey=%s",
+	// 	etherscanApiUrl,
+	// 	chainId,
+	// 	hash,
+	// 	client.etherscanApiKey,
+	// )
+	// req, err := http.NewRequest("GET", url, nil)
+	// assert.NoErr(err, "")
+
+	rpcReq := client.newRpcRequest(
+		"eth_getTransactionReceipt",
+		[]string{hash},
 	)
-	req, err := http.NewRequest("GET", url, nil)
+	body, err := json.Marshal(rpcReq)
+	assert.NoErr(err, "")
+
+	req, err := http.NewRequest(
+		"POST",
+		client.newAlchemyUrl(network),
+		bytes.NewBuffer(body),
+	)
 	assert.NoErr(err, "")
 
 	var data RpcResponse[*RpcTransactionReceipt]
-	err = client.sendRequest(req, &data, client.etherscanTimeout)
+	err = client.sendRequest(req, &data, client.alchemyTimer)
 	return data.Result, err
 }

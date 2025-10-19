@@ -212,6 +212,8 @@ func Parse(
 				solanaCtx.ixIdx = uint32(ixIdx)
 				solProcessIx(&events, &solanaCtx, ix)
 			}
+		case *db.EvmTransactionData:
+
 		}
 	}
 

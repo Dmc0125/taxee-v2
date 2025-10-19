@@ -581,14 +581,9 @@ func fetchEvmWallet(
 	network db.Network,
 	walletData *db.EvmWalletData,
 ) {
-	chainId, nativeDecimals := 0, 0
-
-	switch network {
-	case db.NetworkArbitrum:
-		chainId, nativeDecimals = 42161, 18
-	default:
-		assert.True(false, "invalid network: %s", network)
-	}
+	// TODO:  !!!!!!!!! IMPORTANT !!!!!!!!!!
+	// fetch the events and internal txs in batches instead of sequentially!!!!!
+	chainId, nativeDecimals := evm.ChainIdAndNativeDecimals(network)
 
 	const endBlock = uint64(math.MaxInt64)
 	startBlock := walletData.TxsLatestBlockNumber
@@ -655,7 +650,7 @@ func fetchEvmWallet(
 				Input: db.Uint8Array(tx.Input),
 			}
 
-			receipt, err := client.GetTransactionReceipt(chainId, tx.Hash)
+			receipt, err := client.GetTransactionReceipt(network, tx.Hash)
 			assert.NoErr(err, "unable to get transaction receipt")
 
 			for _, log := range receipt.Logs {
@@ -669,6 +664,29 @@ func fetchEvmWallet(
 						Address: log.Address,
 						Topics:  topics,
 						Data:    db.Uint8Array(log.Data),
+					},
+				)
+			}
+
+			internalTxs, err := client.GetInternalTransactionsByHash(
+				chainId,
+				tx.Hash,
+			)
+			assert.NoErr(err, "")
+
+			for _, itx := range internalTxs {
+				value := decimal.NewFromBigInt(
+					new(big.Int).SetUint64(uint64(itx.Value)),
+					-int32(nativeDecimals),
+				)
+				data.InternalTxs = append(
+					data.InternalTxs,
+					&db.EvmInternalTx{
+						From:            itx.From,
+						To:              itx.To,
+						Value:           value,
+						ContractAddress: itx.ContractAddress,
+						Input:           db.Uint8Array(itx.Input),
 					},
 				)
 			}
@@ -689,12 +707,12 @@ func fetchEvmWallet(
 
 	logger.Info("Fetched %d txs", len(fetchedTxs))
 
-	getTxWithEvents := func(
+	getTxMetadata := func(
 		hash string,
 	) (*db.EvmTransactionData, bool) {
-		tx, err := client.GetTransactionByHash(chainId, hash)
+		tx, err := client.GetTransactionByHash(network, hash)
 		assert.NoErr(err, "unable to get transaction by hash")
-		receipt, err := client.GetTransactionReceipt(chainId, hash)
+		receipt, err := client.GetTransactionReceipt(network, hash)
 		assert.NoErr(err, "unable to get transaction receipt")
 
 		fee := feePaid(uint64(receipt.GasUsed), uint64(tx.GasPrice))
@@ -725,6 +743,29 @@ func fetchEvmWallet(
 					Address: log.Address,
 					Topics:  topics,
 					Data:    db.Uint8Array(log.Data),
+				},
+			)
+		}
+
+		internalTxs, err := client.GetInternalTransactionsByHash(
+			chainId,
+			tx.Hash,
+		)
+		assert.NoErr(err, "")
+
+		for _, itx := range internalTxs {
+			value := decimal.NewFromBigInt(
+				new(big.Int).SetUint64(uint64(itx.Value)),
+				-int32(nativeDecimals),
+			)
+			data.InternalTxs = append(
+				data.InternalTxs,
+				&db.EvmInternalTx{
+					From:            itx.From,
+					To:              itx.To,
+					Value:           value,
+					ContractAddress: itx.ContractAddress,
+					Input:           db.Uint8Array(itx.Input),
 				},
 			)
 		}
@@ -782,7 +823,7 @@ func fetchEvmWallet(
 
 			if !ok {
 				logger.Info("Found incoming ERC-20 transfer: %s", event.Hash)
-				txData, isErr := getTxWithEvents(event.Hash)
+				txData, isErr := getTxMetadata(event.Hash)
 				fetchedTxs[event.Hash] = &evmTx{
 					err:       isErr,
 					timestamp: time.Time(event.Timestamp),
@@ -799,19 +840,10 @@ func fetchEvmWallet(
 	}
 
 	/////////////////
-	// Fetch internal txs
+	// Fetch internal txs which reference walletAddress, if internal tx is found
+	// in a tx which does not reference walletAddress, fetch that tx
 	logger.Info("Fetching internal txs")
 	startBlock = walletData.InternalTxsLatestBlockNumber
-
-	// TODO: This method is wallet specific, afaik this method only returns
-	// internal txs where either from or to is == walletAddress ignoring all
-	// the other internal Txs
-	//
-	// not sure how big of a problem this is
-	//
-	// either append the internal txs somehow if the tx already exists in db
-	// or fetch internal txs based on tx hash - this should fetch all the internal
-	// transfers
 
 	for {
 		internalTxs, err := client.GetInternalTransactionsByAddress(
@@ -843,33 +875,17 @@ func fetchEvmWallet(
 		)
 
 		for i, internalTx := range internalTxs {
-			tx, ok := fetchedTxs[internalTx.Hash]
-
-			value := decimal.NewFromBigInt(
-				new(big.Int).SetUint64(uint64(internalTx.Value)),
-				-int32(nativeDecimals),
-			)
+			_, ok := fetchedTxs[internalTx.Hash]
 
 			if !ok {
-				data, isErr := getTxWithEvents(internalTx.Hash)
-				tx = &evmTx{
+				logger.Info("Found internal tx")
+				data, isErr := getTxMetadata(internalTx.Hash)
+				fetchedTxs[internalTx.Hash] = &evmTx{
 					err:       isErr,
 					timestamp: time.Time(internalTx.Timestamp),
 					data:      data,
 				}
-				fetchedTxs[internalTx.Hash] = tx
 			}
-
-			tx.data.InternalTxs = append(
-				tx.data.InternalTxs,
-				&db.EvmInternalTx{
-					From:            internalTx.From,
-					To:              internalTx.To,
-					Value:           value,
-					ContractAddress: internalTx.ContractAddress,
-					Input:           db.Uint8Array(internalTx.Input),
-				},
-			)
 
 			if i == len(internalTxs)-1 {
 				startBlock = uint64(internalTx.BlockNumber) + 1

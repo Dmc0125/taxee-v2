@@ -8,13 +8,14 @@ import (
 	"net/http"
 	"os"
 	"slices"
-	"sync"
 	"sync/atomic"
 	"taxee/pkg/assert"
-	"time"
 )
 
-const reqTimeout = 200
+type requestTimer interface {
+	Lock()
+	Free()
+}
 
 type ResponseError struct {
 	Code    int
@@ -51,19 +52,18 @@ const (
 )
 
 type Rpc struct {
-	reqId        atomic.Uint64
-	url          string
-	nextReqMinTs time.Time
-	mx           *sync.Mutex
+	reqId atomic.Uint64
+	url   string
+	timer requestTimer
 }
 
-func NewRpc() *Rpc {
+func NewRpc(timer requestTimer) *Rpc {
 	url := os.Getenv("SOLANA_RPC_URL")
 	assert.True(url != "", "missing SOLANA_RPC_URL")
 
 	return &Rpc{
-		url: url,
-		mx:  &sync.Mutex{},
+		url:   url,
+		timer: timer,
 	}
 }
 
@@ -84,12 +84,7 @@ func (rpc *Rpc) sendRequest(reqData any, resData any) error {
 		return fmt.Errorf("unable to marshal body: %s", err)
 	}
 
-	rpc.mx.Lock()
-	ts := time.Now()
-	if ts.UnixMilli() < rpc.nextReqMinTs.UnixMilli() {
-		remainder := rpc.nextReqMinTs.Sub(ts)
-		time.Sleep(remainder)
-	}
+	rpc.timer.Lock()
 
 	res, err := http.Post(rpc.url, "application/json", bytes.NewReader(reqBody))
 	if err != nil {
@@ -97,8 +92,7 @@ func (rpc *Rpc) sendRequest(reqData any, resData any) error {
 	}
 	defer res.Body.Close()
 
-	rpc.nextReqMinTs = time.UnixMilli(time.Now().UnixMilli() + reqTimeout)
-	rpc.mx.Unlock()
+	rpc.timer.Free()
 
 	resBody, err := io.ReadAll(res.Body)
 	if err != nil {

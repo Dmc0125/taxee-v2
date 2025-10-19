@@ -16,6 +16,7 @@ import (
 	"taxee/pkg/coingecko"
 	"taxee/pkg/db"
 	"taxee/pkg/dotenv"
+	requesttimer "taxee/pkg/request_timer"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -123,8 +124,10 @@ func main() {
 
 		walletAddress, network := cliArgs[2], cliArgs[3]
 
-		solanaRpc := solana.NewRpc()
-		etherscanClient := evm.NewClient()
+		alchemyReqTimer := requesttimer.NewDefault(100)
+
+		solanaRpc := solana.NewRpc(alchemyReqTimer)
+		etherscanClient := evm.NewClient(alchemyReqTimer)
 
 		fresh := false
 		if len(cliArgs) > 4 && cliArgs[4] == "fresh" {

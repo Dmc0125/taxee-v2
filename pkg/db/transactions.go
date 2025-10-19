@@ -284,6 +284,12 @@ func GetTransactions(
 				return nil, fmt.Errorf("unable to unmarshal transaction data: %w", err)
 			}
 			tx.Data = &data
+		case NetworkArbitrum:
+			var data EvmTransactionData
+			if err = json.Unmarshal(dataBytes, &data); err != nil {
+				return nil, fmt.Errorf("unable to unmarshal evm transaction data: %w", err)
+			}
+			tx.Data = &data
 		}
 
 		res = append(res, &tx)
