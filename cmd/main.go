@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -18,9 +19,30 @@ import (
 	"taxee/pkg/dotenv"
 	requesttimer "taxee/pkg/request_timer"
 
+	"golang.org/x/crypto/sha3"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
+
+func goSliceString(s []byte, size int) string {
+	sb := strings.Builder{}
+	sb.WriteRune('[')
+	if size != -1 {
+		sb.WriteString(fmt.Sprintf("%d", size))
+	}
+	sb.WriteString("]uint8{")
+
+	for i, b := range s {
+		sb.WriteString(fmt.Sprintf("%d", b))
+		if i != len(s)-1 {
+			sb.WriteRune(',')
+		}
+	}
+	sb.WriteRune('}')
+
+	return sb.String()
+}
 
 func main() {
 	appEnv := os.Getenv("APP_ENV")
@@ -35,23 +57,30 @@ func main() {
 	assert.NoErr(err, "")
 
 	switch cliArgs[1] {
-	case "parse-disc":
+	case "keccak":
+		assert.True(len(cliArgs) > 2, "Missing method")
+
+		method := cliArgs[2]
+		fmt.Println(method)
+		hasher := sha3.NewLegacyKeccak256()
+		hasher.Write([]byte(method))
+		hash := hasher.Sum(nil)[:4]
+
+		fmt.Println(goSliceString(hash, 4))
+
+		h := hex.EncodeToString(hash)
+		fmt.Printf("0x%s\n", h)
+
+		fmt.Printf("LE: %d\n", binary.LittleEndian.Uint32(hash))
+		fmt.Printf("BE: %d\n", binary.BigEndian.Uint32(hash))
+
+	case "parse-hex":
 		assert.True(len(cliArgs) > 2, "Missing hex discriminator")
 
 		decoded, err := hex.DecodeString(cliArgs[2])
 		assert.NoErr(err, "invalid hex")
 
-		sb := strings.Builder{}
-		sb.WriteString("[]uint8{")
-		for i, b := range decoded {
-			sb.WriteString(fmt.Sprintf("%d", b))
-			if i != len(decoded)-1 {
-				sb.WriteRune(',')
-			}
-		}
-		sb.WriteRune('}')
-
-		fmt.Println(sb.String())
+		fmt.Println(goSliceString(decoded, -1))
 	case "migrate":
 		assert.True(len(cliArgs) > 2, "Need to specify migration path")
 		migrationPath := cliArgs[2]
@@ -148,7 +177,11 @@ func main() {
 		assert.True(appEnv != "prod", "this command must not be run in production env")
 
 		coingecko.Init()
-		parser.Parse(context.Background(), pool, 1, true)
+
+		alchemyReqTimer := requesttimer.NewDefault(100)
+		etherscanClient := evm.NewClient(alchemyReqTimer)
+
+		parser.Parse(context.Background(), pool, etherscanClient, 1, true)
 	case "parse-server":
 		// long running server
 	}

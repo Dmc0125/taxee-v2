@@ -48,14 +48,14 @@ const (
 	NetworkSolana   Network = "solana"
 	NetworkEthereum Network = "ethereum"
 	NetworkArbitrum Network = "arbitrum"
+	NetworkBsc      Network = "bsc"
+	NetworkAvaxC    Network = "avaxc"
 )
 
 func NewNetwork(n string) (valid Network, ok bool) {
 	ok = true
 	switch n {
-	case "solana":
-		valid = Network(n)
-	case "arbitrum":
+	case "solana", "arbitrum", "bsc", "avaxc", "ethereum":
 		valid = Network(n)
 	default:
 		ok = false
@@ -106,7 +106,7 @@ func SetWallet(
 			return 0, nil, fmt.Errorf("unable to unmarshal solana wallet data: %w", err)
 		}
 		data = &d
-	case NetworkArbitrum:
+	case NetworkArbitrum, NetworkBsc, NetworkAvaxC, NetworkEthereum:
 		var d EvmWalletData
 		if err := json.Unmarshal(walletData, &d); err != nil {
 			return 0, nil, fmt.Errorf("unable to unmarshal evm wallet data: %w", err)
@@ -118,16 +118,15 @@ func SetWallet(
 }
 
 type WalletRow struct {
-	Id                  int32
-	Address             string
-	Network             Network
-	LatestTransactionId string
+	Id      int32
+	Address string
+	Network Network
 }
 
 func GetWallets(ctx context.Context, pool *pgxpool.Pool, userAccountId int32) ([]*WalletRow, error) {
 	query := `
 		select
-			id, address, network, latest_tx_id 
+			id, address, network
 		from
 			wallet
 		where
@@ -142,7 +141,7 @@ func GetWallets(ctx context.Context, pool *pgxpool.Pool, userAccountId int32) ([
 
 	for rows.Next() {
 		var w WalletRow
-		err := rows.Scan(&w.Id, &w.Address, &w.Network, &w.LatestTransactionId)
+		err := rows.Scan(&w.Id, &w.Address, &w.Network)
 		if err != nil {
 			return nil, fmt.Errorf("unable to scan wallet: %w", err)
 		}
@@ -257,7 +256,8 @@ func GetTransactions(
 			tx
 		join
 			tx_ref ref on
-				ref.tx_id = tx.id and ref.user_account_id = $1
+				ref.tx_id = tx.id and 
+				ref.user_account_id = $1 
 		order by
 			(tx.data->>'slot')::bigint asc,
 			(tx.data->>'blockIndex')::integer asc
@@ -284,7 +284,7 @@ func GetTransactions(
 				return nil, fmt.Errorf("unable to unmarshal transaction data: %w", err)
 			}
 			tx.Data = &data
-		case NetworkArbitrum:
+		case NetworkArbitrum, NetworkAvaxC, NetworkBsc, NetworkEthereum:
 			var data EvmTransactionData
 			if err = json.Unmarshal(dataBytes, &data); err != nil {
 				return nil, fmt.Errorf("unable to unmarshal evm transaction data: %w", err)

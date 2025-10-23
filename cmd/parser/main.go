@@ -10,6 +10,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"sync"
+	"taxee/cmd/fetcher/evm"
 	"taxee/pkg/assert"
 	"taxee/pkg/coingecko"
 	"taxee/pkg/db"
@@ -73,6 +74,7 @@ func devDeleteParsed(
 func Parse(
 	ctx context.Context,
 	pool *pgxpool.Pool,
+	evmClient *evm.Client,
 	userAccountId int32,
 	fresh bool,
 ) {
@@ -98,11 +100,24 @@ func Parse(
 	assert.NoErr(err, "")
 
 	solanaWallets := make([]string, 0)
+	evmContexts := make(map[db.Network]*evmContext)
 
 	for _, w := range wallets {
 		switch w.Network {
 		case db.NetworkSolana:
 			solanaWallets = append(solanaWallets, w.Address)
+		case db.NetworkArbitrum, db.NetworkAvaxC, db.NetworkBsc, db.NetworkEthereum:
+			// TODO: maybe initialize separately
+			ctx, ok := evmContexts[w.Network]
+			if !ok {
+				ctx = &evmContext{
+					contracts: make(map[string][]evmContractImplementation),
+					network:   w.Network,
+				}
+			}
+
+			ctx.wallets = append(ctx.wallets, w.Address)
+			evmContexts[w.Network] = ctx
 		}
 	}
 
@@ -117,6 +132,7 @@ func Parse(
 	// preprocess txs
 	errs := make(parserErrors)
 	solanaAccounts := make(map[string][]accountLifetime)
+	evmAddresses := make(map[db.Network]map[string][]uint64)
 
 	for _, tx := range txs {
 		if tx.Err {
@@ -132,7 +148,33 @@ func Parse(
 				tx.Id,
 				txData,
 			)
+		case *db.EvmTransactionData:
+			addresses, ok := evmAddresses[tx.Network]
+			if !ok {
+				addresses = make(map[string][]uint64)
+			}
+
+			addresses[txData.To] = append(addresses[txData.To], txData.Block)
+
+			for _, itx := range txData.InternalTxs {
+				addresses[itx.To] = append(addresses[itx.To], txData.Block)
+			}
+
+			evmAddresses[tx.Network] = addresses
 		}
+	}
+
+	for network, addresses := range evmAddresses {
+		// TODO: just create the context ?
+		ctx, ok := evmContexts[network]
+		assert.True(ok, "missing evm context for: %s", network)
+
+		evmIdentifyContracts(
+			evmClient,
+			network,
+			addresses,
+			ctx,
+		)
 	}
 
 	var batch pgx.Batch
@@ -213,7 +255,13 @@ func Parse(
 				solProcessIx(&events, &solanaCtx, ix)
 			}
 		case *db.EvmTransactionData:
+			ctx, ok := evmContexts[tx.Network]
+			assert.True(ok, "missing evm context for: %s", tx.Network)
 
+			ctx.timestamp = tx.Timestamp
+			ctx.txId = tx.Id
+
+			evmProcessTx(ctx, &events, txData)
 		}
 	}
 

@@ -588,12 +588,12 @@ func fetchEvmWallet(
 	const endBlock = uint64(math.MaxInt64)
 	startBlock := walletData.TxsLatestBlockNumber
 
-	feePaid := func(gasUsed, gasPrice uint64) decimal.Decimal {
+	feePaid := func(gasUsed, gasPrice *big.Int) decimal.Decimal {
 		g := decimal.NewFromBigInt(
-			new(big.Int).SetUint64(gasUsed),
+			gasUsed,
 			-int32(nativeDecimals),
 		)
-		gp := decimal.NewFromUint64(gasPrice)
+		gp := decimal.NewFromBigInt(gasPrice, 0)
 		return g.Mul(gp)
 	}
 
@@ -634,9 +634,10 @@ func fetchEvmWallet(
 
 		for i, tx := range txs {
 			logger.Info("Processing tx %d / %d", i+1, len(txs))
-			fee := feePaid(uint64(tx.GasUsed), uint64(tx.GasPrice))
+
+			fee := feePaid((*big.Int)(tx.GasUsed), (*big.Int)(tx.GasPrice))
 			value := decimal.NewFromBigInt(
-				new(big.Int).SetUint64(uint64(tx.Value)),
+				(*big.Int)(tx.Value),
 				-int32(nativeDecimals),
 			)
 
@@ -676,7 +677,7 @@ func fetchEvmWallet(
 
 			for _, itx := range internalTxs {
 				value := decimal.NewFromBigInt(
-					new(big.Int).SetUint64(uint64(itx.Value)),
+					(*big.Int)(itx.Value),
 					-int32(nativeDecimals),
 				)
 				data.InternalTxs = append(
@@ -715,9 +716,9 @@ func fetchEvmWallet(
 		receipt, err := client.GetTransactionReceipt(network, hash)
 		assert.NoErr(err, "unable to get transaction receipt")
 
-		fee := feePaid(uint64(receipt.GasUsed), uint64(tx.GasPrice))
+		fee := feePaid((*big.Int)(receipt.GasUsed), (*big.Int)(tx.GasPrice))
 		value := decimal.NewFromBigInt(
-			new(big.Int).SetUint64(uint64(tx.Value)),
+			(*big.Int)(tx.Value),
 			-int32(nativeDecimals),
 		)
 
@@ -755,7 +756,7 @@ func fetchEvmWallet(
 
 		for _, itx := range internalTxs {
 			value := decimal.NewFromBigInt(
-				new(big.Int).SetUint64(uint64(itx.Value)),
+				(*big.Int)(itx.Value),
 				-int32(nativeDecimals),
 			)
 			data.InternalTxs = append(
@@ -998,7 +999,7 @@ func Fetch(
 			latestTxId,
 			fresh,
 		)
-	case db.NetworkArbitrum:
+	case db.NetworkArbitrum, db.NetworkAvaxC, db.NetworkBsc, db.NetworkEthereum:
 		wd, ok := walletData.(*db.EvmWalletData)
 		assert.True(ok, "")
 

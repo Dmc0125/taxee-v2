@@ -49,6 +49,18 @@ func ChainIdAndNativeDecimals(network db.Network) (chainId, decimals int) {
 	switch network {
 	case db.NetworkArbitrum:
 		chainId = 42161
+	case db.NetworkEthereum:
+		chainId = 1
+	case db.NetworkAvaxC:
+		chainId = 43114
+	case db.NetworkBsc:
+		chainId = 56
+	default:
+		assert.True(false, "invalid EVM network: %s", network)
+	}
+
+	switch network {
+	case db.NetworkArbitrum, db.NetworkEthereum, db.NetworkBsc, db.NetworkAvaxC:
 		decimals = 18
 	default:
 		assert.True(false, "invalid EVM network: %s", network)
@@ -94,19 +106,19 @@ type etherscanResponse[T any] struct {
 }
 
 type EtherscanTransaction struct {
-	BlockNumber StringUint64 `json:"blockNumber"`
-	Timestamp   StringTime   `json:"timeStamp"`
-	Hash        string       `json:"hash"`
-	TxIdx       StringUint32 `json:"transactionIndex"`
-	From        string       `json:"from"`
-	To          string       `json:"to"`
-	Value       StringUint64 `json:"value"`
-	Gas         StringUint64 `json:"gas"`
-	GasPrice    StringUint64 `json:"gasPrice"`
-	GasUsed     StringUint64 `json:"gasUsed"`
-	Err         StringErr    `json:"isError"`
-	Input       HexBytes     `json:"input"`
-	Contract    string       `json:"contractAddress"`
+	BlockNumber StringUint64  `json:"blockNumber"`
+	Timestamp   StringTime    `json:"timeStamp"`
+	Hash        string        `json:"hash"`
+	TxIdx       StringUint32  `json:"transactionIndex"`
+	From        string        `json:"from"`
+	To          string        `json:"to"`
+	Value       *StringBigInt `json:"value"`
+	Gas         *StringBigInt `json:"gas"`
+	GasPrice    *StringBigInt `json:"gasPrice"`
+	GasUsed     *StringBigInt `json:"gasUsed"`
+	Err         StringErr     `json:"isError"`
+	Input       HexBytes      `json:"input"`
+	Contract    string        `json:"contractAddress"`
 }
 
 func (client *Client) GetWalletNormalTransactions(
@@ -216,14 +228,14 @@ func (client *Client) GetEventLogsByTopics(
 }
 
 type EtherscanInternalTxByAddress struct {
-	BlockNumber     StringUint64 `json:"blockNumber"`
-	Hash            string       `json:"hash"`
-	From            string       `json:"from"`
-	To              string       `json:"to"`
-	Value           StringUint64 `json:"value"`
-	ContractAddress string       `json:"contractAddress"`
-	Input           HexBytes     `json:"input"`
-	Timestamp       StringTime   `json:"timeStamp"`
+	BlockNumber     StringUint64  `json:"blockNumber"`
+	Hash            string        `json:"hash"`
+	From            string        `json:"from"`
+	To              string        `json:"to"`
+	Value           *StringBigInt `json:"value"`
+	ContractAddress string        `json:"contractAddress"`
+	Input           HexBytes      `json:"input"`
+	Timestamp       StringTime    `json:"timeStamp"`
 }
 
 func (client *Client) GetInternalTransactionsByAddress(
@@ -249,13 +261,13 @@ func (client *Client) GetInternalTransactionsByAddress(
 }
 
 type EtherscanInternalTxByHash struct {
-	BlockNumber     StringUint64 `json:"blockNumber"`
-	Timestamp       StringTime   `json:"timeStamp"`
-	From            string       `json:"from"`
-	To              string       `json:"to"`
-	Value           StringUint64 `json:"value"`
-	ContractAddress string       `json:"contractAddress"`
-	Input           HexBytes     `json:"input"`
+	BlockNumber     StringUint64  `json:"blockNumber"`
+	Timestamp       StringTime    `json:"timeStamp"`
+	From            string        `json:"from"`
+	To              string        `json:"to"`
+	Value           *StringBigInt `json:"value"`
+	ContractAddress string        `json:"contractAddress"`
+	Input           HexBytes      `json:"input"`
 }
 
 func (client *Client) GetInternalTransactionsByHash(
@@ -280,9 +292,16 @@ func (client *Client) GetInternalTransactionsByHash(
 ///////////////////
 // RPC methods
 
+type RpcError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    any    `json:"data"`
+}
+
 type RpcResponse[T any] struct {
-	Id     int `json:"id"`
-	Result T   `json:"result"`
+	Id     int       `json:"id"`
+	Result T         `json:"result"`
+	Error  *RpcError `json:"error"`
 }
 
 func (client *Client) newAlchemyUrl(network db.Network) string {
@@ -290,6 +309,12 @@ func (client *Client) newAlchemyUrl(network db.Network) string {
 	switch network {
 	case db.NetworkArbitrum:
 		alchemyNetwork = "arb-mainnet"
+	case db.NetworkAvaxC:
+		alchemyNetwork = "avax-mainnet"
+	case db.NetworkBsc:
+		alchemyNetwork = "bnb-mainnet"
+	case db.NetworkEthereum:
+		alchemyNetwork = "eth-mainnet"
 	default:
 		assert.True(false, "invalid EVM network: %s", network)
 	}
@@ -303,46 +328,48 @@ func (client *Client) newAlchemyUrl(network db.Network) string {
 	return url
 }
 
-type rpcRequest struct {
+type RpcRequest struct {
 	Jsonrpc string `json:"jsonrpc"`
 	Method  string `json:"method"`
 	Params  any    `json:"params"`
 	Id      int    `json:"id"`
 }
 
-func (client *Client) newRpcRequest(
+func (client *Client) NewRpcRequest(
 	method string,
 	params any,
-) *rpcRequest {
-	r := rpcRequest{
+	id int,
+) *RpcRequest {
+	r := RpcRequest{
 		Jsonrpc: "2.0",
 		Method:  method,
 		Params:  params,
-		Id:      1,
+		Id:      id,
 	}
 	return &r
 }
 
 type RpcTransaction struct {
-	Hash        string    `json:"hash"`
-	BlockHash   string    `json:"blockHash"`
-	BlockNumber HexUint64 `json:"blockNumber"`
-	TxIdx       HexUint32 `json:"transactionIndex"`
-	From        string    `json:"from"`
-	To          string    `json:"to"`
-	Value       HexUint64 `json:"value"`
-	Input       HexBytes  `json:"input"`
-	Gas         HexUint64 `json:"gas"`
-	GasPrice    HexUint64 `json:"gasPrice"`
+	Hash        string     `json:"hash"`
+	BlockHash   string     `json:"blockHash"`
+	BlockNumber HexUint64  `json:"blockNumber"`
+	TxIdx       HexUint32  `json:"transactionIndex"`
+	From        string     `json:"from"`
+	To          string     `json:"to"`
+	Value       *HexBigInt `json:"value"`
+	Input       HexBytes   `json:"input"`
+	Gas         *HexBigInt `json:"gas"`
+	GasPrice    *HexBigInt `json:"gasPrice"`
 }
 
 func (client *Client) GetTransactionByHash(
 	network db.Network,
 	hash string,
 ) (*RpcTransaction, error) {
-	rpcReq := client.newRpcRequest(
+	rpcReq := client.NewRpcRequest(
 		"eth_getTransactionByHash",
 		[]string{hash},
+		1,
 	)
 	body, err := json.Marshal(rpcReq)
 	assert.NoErr(err, "")
@@ -379,7 +406,7 @@ type RpcTransactionReceipt struct {
 	Hash        string                    `json:"transactionHash"`
 	BlockHash   string                    `json:"blockHash"`
 	BlockNumber HexUint64                 `json:"blockNumber"`
-	GasUsed     HexUint64                 `json:"gasUsed"`
+	GasUsed     *HexBigInt                `json:"gasUsed"`
 	Err         ReceiptErr                `json:"status"`
 	Logs        []*RpcTransactionEventLog `json:"logs"`
 }
@@ -398,9 +425,10 @@ func (client *Client) GetTransactionReceipt(
 	// req, err := http.NewRequest("GET", url, nil)
 	// assert.NoErr(err, "")
 
-	rpcReq := client.newRpcRequest(
+	rpcReq := client.NewRpcRequest(
 		"eth_getTransactionReceipt",
 		[]string{hash},
+		1,
 	)
 	body, err := json.Marshal(rpcReq)
 	assert.NoErr(err, "")
@@ -415,4 +443,65 @@ func (client *Client) GetTransactionReceipt(
 	var data RpcResponse[*RpcTransactionReceipt]
 	err = client.sendRequest(req, &data, client.alchemyTimer)
 	return data.Result, err
+}
+
+func (client *Client) GetCode(network db.Network, address string) (string, error) {
+	rpcReq := client.NewRpcRequest(
+		"eth_getCode",
+		[]string{address, "latest"},
+		1,
+	)
+	body, err := json.Marshal(rpcReq)
+	assert.NoErr(err, "")
+
+	req, err := http.NewRequest(
+		"POST",
+		client.newAlchemyUrl(network),
+		bytes.NewBuffer(body),
+	)
+	var data RpcResponse[string]
+	err = client.sendRequest(req, &data, client.alchemyTimer)
+	return data.Result, err
+}
+
+type BatchResult[T any] struct {
+	Data  T
+	Error *RpcError
+}
+
+func (client *Client) Batch(
+	network db.Network,
+	requests []*RpcRequest,
+) ([]*BatchResult[any], error) {
+	body, err := json.Marshal(requests)
+	assert.NoErr(err, "")
+
+	req, err := http.NewRequest(
+		"POST",
+		client.newAlchemyUrl(network),
+		bytes.NewBuffer(body),
+	)
+	assert.NoErr(err, "")
+
+	var data []RpcResponse[any]
+	err = client.sendRequest(req, &data, client.alchemyTimer)
+	if err != nil {
+		return nil, err
+	}
+
+	res := make([]*BatchResult[any], len(data))
+	for i, d := range data {
+		if d.Error != nil {
+			res[i] = &BatchResult[any]{
+				Error: d.Error,
+			}
+		} else {
+			res[i] = &BatchResult[any]{
+				Data: d.Result,
+			}
+		}
+	}
+
+	return res, nil
+
 }

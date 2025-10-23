@@ -3,6 +3,7 @@ package evm
 import (
 	"encoding/hex"
 	"fmt"
+	"math/big"
 	"strconv"
 	"time"
 )
@@ -120,5 +121,42 @@ func (dst *HexTime) UnmarshalJSON(src []byte) error {
 		return fmt.Errorf("unable to convert string to int64: %s %w", s, err)
 	}
 	*dst = HexTime(time.Unix(res, 0))
+	return nil
+}
+
+type StringBigInt big.Int
+
+func (dst *StringBigInt) UnmarshalJSON(src []byte) error {
+	unquoted := src[1 : len(src)-1]
+	bi, ok := new(big.Int).SetString(string(unquoted), 10)
+	if !ok {
+		return fmt.Errorf("invalid number: %s", string(unquoted))
+	}
+
+	*dst = StringBigInt(*bi)
+	return nil
+}
+
+type HexBigInt big.Int
+
+func (dst *HexBigInt) UnmarshalJSON(src []byte) error {
+	unquoted := src[1 : len(src)-1]
+	// remove 0x
+	unquoted = unquoted[2:]
+
+	if len(unquoted) == 0 {
+		return nil
+	}
+
+	if len(unquoted)%2 != 0 {
+		unquoted = append([]byte{'0'}, unquoted...)
+	}
+
+	bi, ok := new(big.Int).SetString(string(unquoted), 16)
+	if !ok {
+		return fmt.Errorf("invalid hex number: %s", unquoted)
+	}
+
+	*dst = HexBigInt(*bi)
 	return nil
 }

@@ -1,6 +1,12 @@
 begin;
 
-create type network as enum ('solana', 'arbitrum');
+create type network as enum (
+    'solana', 
+    'arbitrum',
+    'bsc',
+    'avaxc',
+    'ethereum'
+);
 
 create table stats (
     user_account_id integer not null,
