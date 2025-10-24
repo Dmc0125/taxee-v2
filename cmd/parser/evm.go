@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"maps"
@@ -64,9 +65,40 @@ func queryBatchUntilAllSuccessful(
 
 func evmIdentifyNonProxyContract(bytecode []byte) []uint32 {
 	implementations := make([]uint32, 0)
+	contractsIds := make(map[uint32]uint32)
 
-	if evmIdentifyErc20Contract(bytecode) {
-		implementations = append(implementations, evmErc20Id)
+	// NOTE: dispatch methods should be in the bytecode as these instructions:
+	// 1. PUSH4 ix = 0x63
+	// 2.<6. = method selector
+	// 6. EQ ix = 0x14
+	for i := 0; i < len(bytecode)-5; i += 1 {
+		b := bytecode[i]
+
+		// NOTE: PUSH4 ix
+		if b == 0x63 {
+			selector := binary.BigEndian.Uint32(bytecode[i+1 : i+5])
+			i += 5
+			eqIx := bytecode[i]
+
+			if eqIx != 20 {
+				continue
+			}
+
+			// TODO: maybe use single lookup
+
+			if _, ok := evmErc20Selectors[selector]; ok {
+				contractsIds[evmErc20ContractId] ^= selector
+			}
+			if _, ok := evm1inchSelectors[selector]; ok {
+				contractsIds[evm1inchV4ContractId] ^= selector
+			}
+		}
+	}
+
+	for expectedContractId, parsedContractId := range contractsIds {
+		if expectedContractId == parsedContractId {
+			implementations = append(implementations, expectedContractId)
+		}
 	}
 
 	return implementations
@@ -103,8 +135,8 @@ func evmIdentifyContracts(
 	// NOTE: This needs to be fetched
 	proxyContractsMemorySlots := make(map[contractId][32]byte)
 	logicContractsAddresses := make([]string, 0)
-
 	proxiesToLogicContractsAddresses := make(map[contractId]string)
+	// erc20TokensDecimals := make(map[string]uint8)
 
 	for i, bytecodeResult := range bytecodesResult {
 		assert.True(bytecodeResult.Error == nil, "")
@@ -160,7 +192,11 @@ func evmIdentifyContracts(
 		blocks := addressesWithBlocksMap[contractAddress]
 
 		for _, b := range blocks {
-			implementations := evmIdentifyNonProxyContract(bytecode)
+			implementations := evmIdentifyNonProxyContract(
+				bytecode,
+				// contractAddress,
+				// erc20TokensDecimals,
+			)
 			evmAppendContractImplementation(
 				context,
 				contractAddress,
@@ -258,8 +294,11 @@ func evmIdentifyContracts(
 
 	for proxyContractId, logicContractAddress := range proxiesToLogicContractsAddresses {
 		logicContractBytecode := bytecodes[logicContractAddress]
-		implementations := evmIdentifyNonProxyContract(logicContractBytecode)
-
+		implementations := evmIdentifyNonProxyContract(
+			logicContractBytecode,
+			// proxyContractId.address,
+			// erc20TokensDecimals,
+		)
 		evmAppendContractImplementation(
 			context,
 			proxyContractId.address,
@@ -267,6 +306,22 @@ func evmIdentifyContracts(
 			implementations,
 		)
 	}
+
+	////////////////
+	// fetch decimals for erc20 tokens
+
+	// erc20Tokens := slices.Collect(maps.Keys(erc20TokensDecimals))
+	// requests = make([]*evm.RpcRequest, len(erc20Tokens))
+	//
+	// for i, token := range erc20Tokens {
+	// 	const decimalsSelector = "0x313ce567"
+	// 	requests[i] = client.NewRpcRequest(
+	// 		"eth_call",
+	// 		[]string{},
+	// 		i,
+	// 	)
+	// 	_ = token
+	// }
 }
 
 type evmContractImplementation struct {
@@ -355,7 +410,7 @@ func evmProcessTx(
 		return
 	}
 
-	if slices.Contains(contract.impl, evmErc20Id) {
+	if slices.Contains(contract.impl, evmErc20ContractId) {
 		// erc20 tx
 		evmProcessErc20Tx(context, events, txData)
 	}

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -57,6 +60,77 @@ func main() {
 	assert.NoErr(err, "")
 
 	switch cliArgs[1] {
+	case "abi-extract-methods":
+		assert.True(len(cliArgs) > 2, "Missing contract name")
+		contractName := cliArgs[2]
+
+		const capacity = 10 * 1024 * 1024
+		reader := bufio.NewReaderSize(os.Stdin, capacity)
+		abiBytes, err := reader.ReadBytes('\n')
+		assert.True(err == nil || errors.Is(err, io.EOF), "unable to read ABI")
+
+		type abiInput struct {
+			InternalType string
+			Name         string
+			Type         string
+		}
+
+		type abiComponent struct {
+			Inputs []abiInput
+			Name   string
+			Type   string
+		}
+
+		var data []abiComponent
+		err = json.Unmarshal(abiBytes, &data)
+		assert.NoErr(err, "")
+
+		signatures := make(map[string]string)
+		contractId := uint32(0)
+
+		for _, comp := range data {
+			if comp.Type != "function" {
+				continue
+			}
+
+			signature := strings.Builder{}
+			signature.WriteString(comp.Name)
+			signature.WriteRune('(')
+
+			for i, inp := range comp.Inputs {
+				signature.WriteString(inp.Type)
+				signature.WriteRune(' ')
+				signature.WriteString(inp.Name)
+				if i < len(comp.Inputs)-1 {
+					signature.WriteRune(',')
+				}
+			}
+
+			signature.WriteRune(')')
+
+			sigString := signature.String()
+
+			hasher := sha3.NewLegacyKeccak256()
+			hasher.Write([]byte(sigString))
+			hash := hasher.Sum(nil)[:4]
+
+			name := fmt.Sprintf(
+				"evm%s%s%s",
+				contractName, strings.ToUpper(string(comp.Name[0])), comp.Name[1:],
+			)
+			signatures[name] = fmt.Sprintf(
+				"0x%s",
+				hex.EncodeToString(hash),
+			)
+
+			contractId ^= binary.BigEndian.Uint32(hash)
+		}
+
+		for signature, hash := range signatures {
+			fmt.Printf("%s uint32 = %s\n", signature, hash)
+		}
+
+		fmt.Printf("evm%sContractId uint32 = 0x%x", contractName, contractId)
 	case "keccak":
 		assert.True(len(cliArgs) > 2, "Missing method")
 

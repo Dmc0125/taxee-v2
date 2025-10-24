@@ -155,7 +155,6 @@ func Parse(
 			}
 
 			addresses[txData.To] = append(addresses[txData.To], txData.Block)
-
 			for _, itx := range txData.InternalTxs {
 				addresses[itx.To] = append(addresses[itx.To], txData.Block)
 			}
@@ -169,6 +168,7 @@ func Parse(
 		ctx, ok := evmContexts[network]
 		assert.True(ok, "missing evm context for: %s", network)
 
+		fmt.Println(network, addresses)
 		evmIdentifyContracts(
 			evmClient,
 			network,

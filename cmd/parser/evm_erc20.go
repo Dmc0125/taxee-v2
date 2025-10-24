@@ -19,7 +19,7 @@ const (
 	evmErc20Approve      uint32 = 0x095ea7b3
 	evmErc20TransferFrom uint32 = 0x23b872dd
 
-	evmErc20Id uint32 = evmErc20TotalSupply ^
+	evmErc20ContractId uint32 = evmErc20TotalSupply ^
 		evmErc20BalanceOf ^
 		evmErc20Transfer ^
 		evmErc20Allowance ^
@@ -27,55 +27,13 @@ const (
 		evmErc20TransferFrom
 )
 
-func evmIdentifyErc20Contract(bytecode []uint8) bool {
-	var selectors [6]uint8
-
-	for i := 0; i < len(bytecode); i += 1 {
-		b := bytecode[i]
-
-		// NOTE: PUSH4 ix
-		if b == 0x63 {
-			selector := binary.BigEndian.Uint32(bytecode[i+1 : i+5])
-			eqIx := bytecode[i+5]
-			i += 6
-			if i >= len(bytecode) {
-				return false
-			}
-			// NOTE: the instruction following the selector should be EQ (0x14)
-			if eqIx != 20 {
-				continue
-			}
-
-			switch selector {
-			case evmErc20TotalSupply:
-				// totalSupply()
-				selectors[0] += 1
-			case evmErc20BalanceOf:
-				// balanceOf(address)
-				selectors[1] += 1
-			case evmErc20Transfer:
-				// transfer(address,uint256)
-				selectors[2] += 1
-			case evmErc20Allowance:
-				// allowance(address,address)
-				selectors[3] += 1
-			case evmErc20Approve:
-				// approve(address,uint256)
-				selectors[4] += 1
-			case evmErc20TransferFrom:
-				// transferFrom(address,address,uint256)
-				selectors[5] += 1
-			}
-		}
-	}
-
-	for _, m := range selectors {
-		if m != 1 {
-			return false
-		}
-	}
-
-	return true
+var evmErc20Selectors = map[uint32]bool{
+	evmErc20TotalSupply:  true,
+	evmErc20BalanceOf:    true,
+	evmErc20Transfer:     true,
+	evmErc20Allowance:    true,
+	evmErc20Approve:      true,
+	evmErc20TransferFrom: true,
 }
 
 func evmAddressFrom32Bytes(data []byte) string {
@@ -89,7 +47,6 @@ func evmAddressFrom32Bytes(data []byte) string {
 
 func evmAmountFrom32Bytes(data []byte) decimal.Decimal {
 	assert.True(len(data) == 32, "invalid data len")
-	// TODO: endianness?
 	amount := new(big.Int).SetBytes(data)
 	return decimal.NewFromBigInt(amount, 0)
 }
@@ -99,18 +56,20 @@ func evmProcessErc20Tx(
 	events *[]*db.Event,
 	tx *db.EvmTransactionData,
 ) {
-	method := binary.BigEndian.Uint32(tx.Input[:4])
+	selector := binary.BigEndian.Uint32(tx.Input[:4])
 	data := tx.Input[4:]
 
-	var from, to string
+	var from, to, method string
 	var amount decimal.Decimal
 
-	switch method {
+	switch selector {
 	case evmErc20Transfer:
+		method = "transfer"
 		from = tx.From
 		to = evmAddressFrom32Bytes(data[:32])
 		amount = evmAmountFrom32Bytes(data[32:])
 	case evmErc20TransferFrom:
+		method = "transfer_from"
 		from = evmAddressFrom32Bytes(data[:32])
 		to = evmAddressFrom32Bytes(data[32:64])
 		amount = evmAmountFrom32Bytes(data[64:])
@@ -122,7 +81,7 @@ func evmProcessErc20Tx(
 
 	event := newEvmEvent(ctx)
 	event.UiAppName = "erc20"
-	event.UiMethodName = "transfer"
+	event.UiMethodName = method
 
 	switch {
 	case fromInternal && toInternal:
