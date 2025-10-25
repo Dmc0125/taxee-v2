@@ -41,7 +41,7 @@ create table coingecko_token (
     coingecko_id varchar not null,
     foreign key (coingecko_id) references coingecko_token_data (coingecko_id) on delete cascade,
     address varchar not null,
-    network network not null,
+    network smallint not null,
     primary key (address, network)
 );
 
@@ -64,7 +64,7 @@ create type event_type as enum (
 create table event (
     user_account_id integer not null,
     tx_id varchar not null,
-    network network not null,
+    network smallint not null,
     ix_idx integer,
     idx integer not null,
     timestamp timestamptz not null,

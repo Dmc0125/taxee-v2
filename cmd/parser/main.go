@@ -2,9 +2,11 @@ package parser
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"net/http"
 	_ "net/http/pprof"
@@ -69,6 +71,53 @@ func devDeleteParsed(
 		return fmt.Errorf("unable to call dev_delete_parsed: %w", err)
 	}
 	return nil
+}
+
+func tokenFromNetwork(network db.Network, token string) string {
+	var prefix [2]byte
+	binary.LittleEndian.PutUint16(prefix[:], uint16(network))
+	return fmt.Sprintf("%s:%s", string(prefix[:]), token)
+}
+
+func tokenCoingecko(coingeckoSymbol string) string {
+	var prefix [2]byte
+	binary.LittleEndian.PutUint16(prefix[:], math.MaxUint16)
+	return fmt.Sprintf("%s:%s", string(prefix[:]), coingeckoSymbol)
+}
+
+func setEventTransfer(
+	event *db.Event,
+	from, to string,
+	fromInternal, toInternal bool,
+	amount decimal.Decimal,
+	token string,
+) {
+	switch {
+	case fromInternal && toInternal:
+		event.Type = db.EventTypeTransferInternal
+		event.Data = &db.EventTransferInternal{
+			FromAccount: from,
+			ToAccount:   to,
+			Token:       token,
+			Amount:      amount,
+		}
+	case fromInternal:
+		event.Type = db.EventTypeTransfer
+		event.Data = &db.EventTransfer{
+			Direction: db.EventTransferOutgoing,
+			Account:   from,
+			Token:     token,
+			Amount:    amount,
+		}
+	case toInternal:
+		event.Type = db.EventTypeTransfer
+		event.Data = &db.EventTransfer{
+			Direction: db.EventTransferIncoming,
+			Account:   to,
+			Token:     token,
+			Amount:    amount,
+		}
+	}
 }
 
 func Parse(
@@ -166,9 +215,8 @@ func Parse(
 	for network, addresses := range evmAddresses {
 		// TODO: just create the context ?
 		ctx, ok := evmContexts[network]
-		assert.True(ok, "missing evm context for: %s", network)
+		assert.True(ok, "missing evm context for: %s", network.String())
 
-		fmt.Println(network, addresses)
 		evmIdentifyContracts(
 			evmClient,
 			network,
@@ -256,7 +304,7 @@ func Parse(
 			}
 		case *db.EvmTransactionData:
 			ctx, ok := evmContexts[tx.Network]
-			assert.True(ok, "missing evm context for: %s", tx.Network)
+			assert.True(ok, "missing evm context for: %s", tx.Network.String())
 
 			ctx.timestamp = tx.Timestamp
 			ctx.txId = tx.Id
@@ -264,6 +312,30 @@ func Parse(
 			evmProcessTx(ctx, &events, txData)
 		}
 	}
+
+	// NOTE:
+	// token format
+	//
+	// prefix:token
+	// prefix -> 10 characters long
+	// <network/source>:<address/name>
+	//
+	// solana:        solana____:EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+	// arbitrum:      arbitrum__:0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8
+	// ethereum:      ethereum__:0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8
+	// native tokens: coingecko_:ethereum
+	// binance:       binance___:ethereum
+	//
+	//
+	//
+	//
+
+	///////////////
+	// fetch evm decimals
+
+	///////////////
+	// fetch prices
+	assert.True(false, "")
 
 	queryPricesBatch := pgx.Batch{}
 	type tokenPriceToFetch struct {

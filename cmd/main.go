@@ -47,6 +47,75 @@ func goSliceString(s []byte, size int) string {
 	return sb.String()
 }
 
+type abiInput struct {
+	InternalType string
+	Name         string
+	Type         string
+	Components   []abiInput
+}
+
+type abiComponent struct {
+	Inputs []abiInput
+	Name   string
+	Type   string
+}
+
+func abiProcessInputs(inputs []abiInput) string {
+	s := strings.Builder{}
+
+	for i, input := range inputs {
+		if input.Components != nil && len(input.Components) > 0 {
+			s.WriteRune('(')
+			s.WriteString(abiProcessInputs(input.Components))
+			s.WriteRune(')')
+		} else {
+			s.WriteString(input.Type)
+		}
+
+		if i < len(inputs)-1 {
+			s.WriteRune(',')
+		}
+	}
+
+	return s.String()
+}
+
+func abiProcessMethods(
+	abi []abiComponent,
+) (signatures map[string]string, selectors map[string]uint32, contractId uint32) {
+	signatures = make(map[string]string)
+	selectors = make(map[string]uint32)
+
+	for _, component := range abi {
+		if component.Type != "function" {
+			continue
+		}
+
+		signature := strings.Builder{}
+		signature.WriteString(component.Name)
+		signature.WriteRune('(')
+		signature.WriteString(abiProcessInputs(component.Inputs))
+		signature.WriteRune(')')
+		signatureStr := signature.String()
+
+		funcName := fmt.Sprintf(
+			"%s%s",
+			strings.ToUpper(string(component.Name[0])),
+			component.Name[1:],
+		)
+
+		hasher := sha3.NewLegacyKeccak256()
+		hasher.Write([]byte(signatureStr))
+		selector := binary.BigEndian.Uint32(hasher.Sum(nil)[:4])
+
+		signatures[funcName] = signatureStr
+		selectors[funcName] = selector
+		contractId ^= selector
+	}
+
+	return
+}
+
 func main() {
 	appEnv := os.Getenv("APP_ENV")
 	if appEnv != "prod" {
@@ -69,65 +138,24 @@ func main() {
 		abiBytes, err := reader.ReadBytes('\n')
 		assert.True(err == nil || errors.Is(err, io.EOF), "unable to read ABI")
 
-		type abiInput struct {
-			InternalType string
-			Name         string
-			Type         string
-		}
-
-		type abiComponent struct {
-			Inputs []abiInput
-			Name   string
-			Type   string
-		}
-
 		var data []abiComponent
 		err = json.Unmarshal(abiBytes, &data)
 		assert.NoErr(err, "")
 
-		signatures := make(map[string]string)
-		contractId := uint32(0)
+		signatures, selectors, contractId := abiProcessMethods(data)
 
-		for _, comp := range data {
-			if comp.Type != "function" {
-				continue
-			}
+		for funcName, signature := range signatures {
+			selector := selectors[funcName]
 
-			signature := strings.Builder{}
-			signature.WriteString(comp.Name)
-			signature.WriteRune('(')
-
-			for i, inp := range comp.Inputs {
-				signature.WriteString(inp.Type)
-				signature.WriteRune(' ')
-				signature.WriteString(inp.Name)
-				if i < len(comp.Inputs)-1 {
-					signature.WriteRune(',')
-				}
-			}
-
-			signature.WriteRune(')')
-
-			sigString := signature.String()
-
-			hasher := sha3.NewLegacyKeccak256()
-			hasher.Write([]byte(sigString))
-			hash := hasher.Sum(nil)[:4]
-
-			name := fmt.Sprintf(
-				"evm%s%s%s",
-				contractName, strings.ToUpper(string(comp.Name[0])), comp.Name[1:],
-			)
-			signatures[name] = fmt.Sprintf(
-				"0x%s",
-				hex.EncodeToString(hash),
-			)
-
-			contractId ^= binary.BigEndian.Uint32(hash)
-		}
-
-		for signature, hash := range signatures {
-			fmt.Printf("%s uint32 = %s\n", signature, hash)
+			varDef := strings.Builder{}
+			varDef.WriteString("evm")
+			varDef.WriteString(contractName)
+			varDef.WriteString(funcName)
+			varDef.WriteString(" uint32 = 0x")
+			varDef.WriteString(fmt.Sprintf("%x", selector))
+			varDef.WriteString(" // ")
+			varDef.WriteString(signature)
+			fmt.Println(varDef.String())
 		}
 
 		fmt.Printf("evm%sContractId uint32 = 0x%x", contractName, contractId)

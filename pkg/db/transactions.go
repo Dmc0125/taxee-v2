@@ -41,26 +41,48 @@ func GetUserAccount(ctx context.Context, pool *pgxpool.Pool, id int32) (*GetUser
 	return res, nil
 }
 
-// TODO: store as int or whatever, string is not needed
-type Network string
+type Network uint16
 
 const (
-	NetworkSolana   Network = "solana"
-	NetworkEthereum Network = "ethereum"
-	NetworkArbitrum Network = "arbitrum"
-	NetworkBsc      Network = "bsc"
-	NetworkAvaxC    Network = "avaxc"
+	NetworkSolana Network = iota
+	NetworkEthereum
+	NetworkArbitrum
+	NetworkBsc
+	NetworkAvaxC
 )
 
 func NewNetwork(n string) (valid Network, ok bool) {
-	ok = true
 	switch n {
-	case "solana", "arbitrum", "bsc", "avaxc", "ethereum":
-		valid = Network(n)
+	case "solana":
+		return NetworkSolana, true
+	case "arbitrum":
+		return NetworkArbitrum, true
+	case "bsc":
+		return NetworkBsc, true
+	case "avaxc":
+		return NetworkAvaxC, true
+	case "ethereum":
+		return NetworkEthereum, true
 	default:
-		ok = false
+		return 0, false
 	}
-	return
+}
+
+func (nw *Network) String() string {
+	switch *nw {
+	case NetworkSolana:
+		return "solana"
+	case NetworkArbitrum:
+		return "arbitrum"
+	case NetworkBsc:
+		return "bsc"
+	case NetworkAvaxC:
+		return "avaxc"
+	case NetworkEthereum:
+		return "ethereum"
+	default:
+		return ""
+	}
 }
 
 type SolanaWalletData struct {
@@ -256,8 +278,8 @@ func GetTransactions(
 			tx
 		join
 			tx_ref ref on
-				ref.tx_id = tx.id and 
-				ref.user_account_id = $1 
+				ref.tx_id = tx.id and
+				ref.user_account_id = $1
 		order by
 			(tx.data->>'slot')::bigint asc,
 			(tx.data->>'blockIndex')::integer asc

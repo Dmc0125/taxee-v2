@@ -79,38 +79,21 @@ func evmProcessErc20Tx(
 
 	fromInternal, toInternal := evmWalletOwned(ctx, from), evmWalletOwned(ctx, to)
 
-	event := newEvmEvent(ctx)
+	if !fromInternal && !toInternal {
+		return
+	}
+
+	event := evmNewEvent(ctx)
 	event.UiAppName = "erc20"
 	event.UiMethodName = method
 
-	switch {
-	case fromInternal && toInternal:
-		event.Type = db.EventTypeTransferInternal
-		event.Data = &db.EventTransferInternal{
-			FromAccount: from,
-			ToAccount:   to,
-			Token:       tx.To,
-			Amount:      amount,
-		}
-	case fromInternal:
-		event.Type = db.EventTypeTransfer
-		event.Data = &db.EventTransfer{
-			Direction: db.EventTransferOutgoing,
-			Account:   from,
-			Token:     tx.To,
-			Amount:    amount,
-		}
-	case toInternal:
-		event.Type = db.EventTypeTransfer
-		event.Data = &db.EventTransfer{
-			Direction: db.EventTransferIncoming,
-			Account:   to,
-			Token:     tx.To,
-			Amount:    amount,
-		}
-	default:
-		return
-	}
+	setEventTransfer(
+		event,
+		from, to,
+		fromInternal, toInternal,
+		amount,
+		tokenFromNetwork(ctx.network, tx.To),
+	)
 
 	*events = append(*events, event)
 }

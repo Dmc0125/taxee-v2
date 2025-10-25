@@ -1,27 +1,27 @@
 package parser
 
 const (
-	evm1inchV4LIMIT_ORDER_RFQ_TYPEHASH  uint32 = 0x06bf53d0
-	evm1inchV4FillOrderRFQ              uint32 = 0xa5b7c8d4
-	evm1inchV4FillOrderRFQToWithPermit  uint32 = 0x6444c2fc
-	evm1inchV4Destroy                   uint32 = 0x83197ef0
-	evm1inchV4FillOrderRFQTo            uint32 = 0x219408f0
-	evm1inchV4InvalidatorForOrderRFQ    uint32 = 0x8298b8e7
-	evm1inchV4UnoswapWithPermit         uint32 = 0xdb35c845
-	evm1inchV4DOMAIN_SEPARATOR          uint32 = 0x3644e515
-	evm1inchV4Owner                     uint32 = 0x8da5cb5b
-	evm1inchV4RescueFunds               uint32 = 0xa05c944e
-	evm1inchV4Swap                      uint32 = 0x3b962f8a
-	evm1inchV4UniswapV3Swap             uint32 = 0x30514862
-	evm1inchV4UniswapV3SwapCallback     uint32 = 0xda80644f
-	evm1inchV4CancelOrderRFQ            uint32 = 0xfdd062b8
-	evm1inchV4RenounceOwnership         uint32 = 0x715018a6
-	evm1inchV4TransferOwnership         uint32 = 0x6d08b64f
-	evm1inchV4UniswapV3SwapTo           uint32 = 0xd1850379
-	evm1inchV4UniswapV3SwapToWithPermit uint32 = 0xb542dfc3
-	evm1inchV4Unoswap                   uint32 = 0x81851f09
+	evm1inchV4FillOrderRFQTo            uint32 = 0xbaba5855 // fillOrderRFQTo((uint256,address,address,address,address,uint256,uint256),bytes,uint256,uint256,address)
+	evm1inchV4RenounceOwnership         uint32 = 0x715018a6 // renounceOwnership()
+	evm1inchV4RescueFunds               uint32 = 0x78e3214f // rescueFunds(address,uint256)
+	evm1inchV4Swap                      uint32 = 0x7c025200 // swap(address,(address,address,address,address,uint256,uint256,uint256,bytes),bytes)
+	evm1inchV4UniswapV3Swap             uint32 = 0xe449022e // uniswapV3Swap(uint256,uint256,uint256[])
+	evm1inchV4UniswapV3SwapCallback     uint32 = 0xfa461e33 // uniswapV3SwapCallback(int256,int256,bytes)
+	evm1inchV4FillOrderRFQ              uint32 = 0xd0a3b665 // fillOrderRFQ((uint256,address,address,address,address,uint256,uint256),bytes,uint256,uint256)
+	evm1inchV4FillOrderRFQToWithPermit  uint32 = 0x4cc4a27b // fillOrderRFQToWithPermit((uint256,address,address,address,address,uint256,uint256),bytes,uint256,uint256,address,bytes)
+	evm1inchV4InvalidatorForOrderRFQ    uint32 = 0x56f16124 // invalidatorForOrderRFQ(address,uint256)
+	evm1inchV4Owner                     uint32 = 0x8da5cb5b // owner()
+	evm1inchV4TransferOwnership         uint32 = 0xf2fde38b // transferOwnership(address)
+	evm1inchV4DOMAIN_SEPARATOR          uint32 = 0x3644e515 // DOMAIN_SEPARATOR()
+	evm1inchV4Destroy                   uint32 = 0x83197ef0 // destroy()
+	evm1inchV4Unoswap                   uint32 = 0x2e95b6c8 // unoswap(address,uint256,uint256,bytes32[])
+	evm1inchV4LIMIT_ORDER_RFQ_TYPEHASH  uint32 = 0x6bf53d0  // LIMIT_ORDER_RFQ_TYPEHASH()
+	evm1inchV4CancelOrderRFQ            uint32 = 0x825caba1 // cancelOrderRFQ(uint256)
+	evm1inchV4UniswapV3SwapTo           uint32 = 0xbc80f1a8 // uniswapV3SwapTo(address,uint256,uint256,uint256[])
+	evm1inchV4UniswapV3SwapToWithPermit uint32 = 0x2521b930 // uniswapV3SwapToWithPermit(address,address,uint256,uint256,uint256[],bytes)
+	evm1inchV4UnoswapWithPermit         uint32 = 0xa1251d75 // unoswapWithPermit(address,uint256,uint256,bytes32[],bytes)
 
-	evm1inchV4ContractId uint32 = 0xf25ce91f
+	evm1inchV4ContractId uint32 = 0x4365f2fa
 )
 
 var evm1inchSelectors = map[uint32]bool{

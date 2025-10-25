@@ -66,6 +66,7 @@ func queryBatchUntilAllSuccessful(
 func evmIdentifyNonProxyContract(bytecode []byte) []uint32 {
 	implementations := make([]uint32, 0)
 	contractsIds := make(map[uint32]uint32)
+	selectors := make([]uint32, 0)
 
 	// NOTE: dispatch methods should be in the bytecode as these instructions:
 	// 1. PUSH4 ix = 0x63
@@ -77,12 +78,16 @@ func evmIdentifyNonProxyContract(bytecode []byte) []uint32 {
 		// NOTE: PUSH4 ix
 		if b == 0x63 {
 			selector := binary.BigEndian.Uint32(bytecode[i+1 : i+5])
-			i += 5
-			eqIx := bytecode[i]
+			eqIx := bytecode[i+5]
 
 			if eqIx != 20 {
 				continue
 			}
+
+			// NOTE: since we are not parsing all the EVM instruction, we skip
+			// only if we successfully find the method dispatcher, otherwise
+			// there can be false positives
+			i += 5
 
 			// TODO: maybe use single lookup
 
@@ -90,6 +95,7 @@ func evmIdentifyNonProxyContract(bytecode []byte) []uint32 {
 				contractsIds[evmErc20ContractId] ^= selector
 			}
 			if _, ok := evm1inchSelectors[selector]; ok {
+				selectors = append(selectors, selector)
 				contractsIds[evm1inchV4ContractId] ^= selector
 			}
 		}
@@ -194,8 +200,6 @@ func evmIdentifyContracts(
 		for _, b := range blocks {
 			implementations := evmIdentifyNonProxyContract(
 				bytecode,
-				// contractAddress,
-				// erc20TokensDecimals,
 			)
 			evmAppendContractImplementation(
 				context,
@@ -296,8 +300,6 @@ func evmIdentifyContracts(
 		logicContractBytecode := bytecodes[logicContractAddress]
 		implementations := evmIdentifyNonProxyContract(
 			logicContractBytecode,
-			// proxyContractId.address,
-			// erc20TokensDecimals,
 		)
 		evmAppendContractImplementation(
 			context,
@@ -390,7 +392,7 @@ func evmWalletOwned(ctx *evmContext, address string) bool {
 	return false
 }
 
-func newEvmEvent(ctx *evmContext) *db.Event {
+func evmNewEvent(ctx *evmContext) *db.Event {
 	return &db.Event{
 		Timestamp: ctx.timestamp,
 		Network:   ctx.network,
@@ -399,19 +401,42 @@ func newEvmEvent(ctx *evmContext) *db.Event {
 }
 
 func evmProcessTx(
-	context *evmContext,
+	ctx *evmContext,
 	events *[]*db.Event,
 	txData *db.EvmTransactionData,
 ) {
-	contract, ok := evmFindContract(context, txData.To, txData.Block)
+	contract, ok := evmFindContract(ctx, txData.To, txData.Block)
 
 	if !ok {
-		// native transfer
+		fromInternal := evmWalletOwned(ctx, txData.From)
+		toInternal := evmWalletOwned(ctx, txData.To)
+
+		if !fromInternal && !toInternal {
+			return
+		}
+
+		event := evmNewEvent(ctx)
+		event.UiAppName = "native"
+		event.UiMethodName = "transfer"
+
+		setEventTransfer(
+			event,
+			txData.From, txData.To,
+			fromInternal, toInternal,
+			txData.Value,
+			tokenCoingecko("ethereum"),
+		)
+
+		*events = append(*events, event)
 		return
 	}
 
 	if slices.Contains(contract.impl, evmErc20ContractId) {
 		// erc20 tx
-		evmProcessErc20Tx(context, events, txData)
+		evmProcessErc20Tx(ctx, events, txData)
+	}
+
+	if slices.Contains(contract.impl, evm1inchV4ContractId) {
+		fmt.Println(ctx.txId)
 	}
 }
