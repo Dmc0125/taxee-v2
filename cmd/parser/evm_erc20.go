@@ -92,7 +92,8 @@ func evmProcessErc20Tx(
 		from, to,
 		fromInternal, toInternal,
 		amount,
-		tokenFromNetwork(ctx.network, tx.To),
+		tx.To,
+		uint16(ctx.network),
 	)
 
 	*events = append(*events, event)

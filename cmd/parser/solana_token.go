@@ -158,6 +158,7 @@ func solTokenProcessTransfer(
 			ToAccount:   to,
 			Token:       fromAccountData.Mint,
 			Amount:      newDecimalFromRawAmount(amount, decimals),
+			TokenSource: uint16(db.NetworkSolana),
 		}
 		return
 	}
@@ -181,10 +182,11 @@ func solTokenProcessTransfer(
 	ok = true
 	t = db.EventTypeTransfer
 	d = &db.EventTransfer{
-		Direction: direction,
-		Account:   tokenAccount,
-		Token:     tokenAccountData.Mint,
-		Amount:    newDecimalFromRawAmount(amount, decimals),
+		Direction:   direction,
+		Account:     tokenAccount,
+		Token:       tokenAccountData.Mint,
+		Amount:      newDecimalFromRawAmount(amount, decimals),
+		TokenSource: uint16(db.NetworkSolana),
 	}
 
 	return
@@ -215,15 +217,13 @@ func solProcessTokenIx(
 			return
 		}
 
-		event := db.Event{
-			UiAppName:    app,
-			UiMethodName: method,
-			Type:         eventType,
-			Data:         eventData,
-		}
-		ctx.initEvent(&event)
+		event := solNewEvent(ctx)
+		event.UiAppName = app
+		event.UiMethodName = method
+		event.Data = eventData
+		event.Type = eventType
 
-		*events = append(*events, &event)
+		*events = append(*events, event)
 	case solTokenIxTransfer:
 		amount := binary.LittleEndian.Uint64(ix.Data[1:])
 		if amount == 0 {
@@ -236,15 +236,13 @@ func solProcessTokenIx(
 			return
 		}
 
-		event := db.Event{
-			UiAppName:    app,
-			UiMethodName: method,
-			Type:         eventType,
-			Data:         eventData,
-		}
-		ctx.initEvent(&event)
+		event := solNewEvent(ctx)
+		event.UiAppName = app
+		event.UiMethodName = method
+		event.Data = eventData
+		event.Type = eventType
 
-		*events = append(*events, &event)
+		*events = append(*events, event)
 	case solTokenIxClose:
 	case solTokenIxMint, solTokenIxMintChecked:
 		mint, receiver := ix.Accounts[0], ix.Accounts[1]
@@ -265,19 +263,18 @@ func solProcessTokenIx(
 		}
 
 		decimals := solDecimalsMust(ctx, accountData.Mint)
-		event := db.Event{
-			UiAppName:    app,
-			UiMethodName: method,
-			Type:         db.EventTypeMint,
-			Data: &db.EventTransfer{
-				Account: receiver,
-				Token:   accountData.Mint,
-				Amount:  newDecimalFromRawAmount(amount, decimals),
-			},
+		event := solNewEvent(ctx)
+		event.UiAppName = app
+		event.UiMethodName = method
+		event.Type = db.EventTypeMint
+		event.Data = &db.EventTransfer{
+			Account:     receiver,
+			Token:       accountData.Mint,
+			Amount:      newDecimalFromRawAmount(amount, decimals),
+			TokenSource: uint16(db.NetworkSolana),
 		}
-		ctx.initEvent(&event)
 
-		*events = append(*events, &event)
+		*events = append(*events, event)
 	case solTokenIxBurn, solTokenIxBurnChecked:
 		sender, mint := ix.Accounts[0], ix.Accounts[1]
 		amount := binary.LittleEndian.Uint64(ix.Data[1:])
@@ -297,19 +294,18 @@ func solProcessTokenIx(
 		}
 
 		decimals := solDecimalsMust(ctx, accountData.Mint)
-		event := db.Event{
-			UiAppName:    app,
-			UiMethodName: method,
-			Type:         db.EventTypeBurn,
-			Data: &db.EventTransfer{
-				Account: sender,
-				Token:   accountData.Mint,
-				Amount:  newDecimalFromRawAmount(amount, decimals),
-			},
+		event := solNewEvent(ctx)
+		event.UiAppName = app
+		event.UiMethodName = method
+		event.Type = db.EventTypeBurn
+		event.Data = &db.EventTransfer{
+			Account:     sender,
+			Token:       accountData.Mint,
+			Amount:      newDecimalFromRawAmount(amount, decimals),
+			TokenSource: uint16(db.NetworkSolana),
 		}
-		ctx.initEvent(&event)
 
-		*events = append(*events, &event)
+		*events = append(*events, event)
 	default:
 
 		return

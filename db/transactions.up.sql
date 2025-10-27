@@ -11,13 +11,21 @@ create table stats (
     wallets_count integer default 0
 );
 
+create type network as enum (
+    'solana',
+    'arbitrum',
+    'bsc',
+    'avaxc',
+    'ethereum'
+);
+
 create table wallet (
     id serial primary key,
     user_account_id integer not null,
     foreign key (user_account_id) references user_account (id) on delete cascade,
 
     address varchar(64) not null,
-    network smallint not null,
+    network network not null,
     name varchar,
 
     unique (user_account_id, address, network),
@@ -32,7 +40,7 @@ create table wallet (
 create function set_wallet(
     p_user_account_id integer,
     p_address varchar(64),
-    p_network smallint 
+    p_network network 
 ) returns table(
     wallet_id integer,
     wallet_data jsonb
@@ -85,7 +93,7 @@ create table solana_related_account (
 
 create table tx (
     id varchar primary key,
-    network smallint not null,
+    network network not null,
     err bool not null,
     signer varchar(64) not null,
     fee_payer varchar(64) not null,

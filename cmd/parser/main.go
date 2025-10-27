@@ -2,7 +2,6 @@ package parser
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +10,8 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"slices"
+	"strconv"
 	"sync"
 	"taxee/cmd/fetcher/evm"
 	"taxee/pkg/assert"
@@ -26,12 +27,53 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+const tokenSourceCoingecko uint16 = math.MaxUint16
+
 func newDecimalFromRawAmount(amount uint64, decimals uint8) decimal.Decimal {
 	d := decimal.NewFromBigInt(
 		new(big.Int).SetUint64(amount),
 		-int32(decimals),
 	)
 	return d
+}
+
+func setEventTransfer(
+	event *db.Event,
+	from, to string,
+	fromInternal, toInternal bool,
+	amount decimal.Decimal,
+	token string,
+	tokenSource uint16,
+) {
+	switch {
+	case fromInternal && toInternal:
+		event.Type = db.EventTypeTransferInternal
+		event.Data = &db.EventTransferInternal{
+			FromAccount: from,
+			ToAccount:   to,
+			Token:       token,
+			Amount:      amount,
+			TokenSource: tokenSource,
+		}
+	case fromInternal:
+		event.Type = db.EventTypeTransfer
+		event.Data = &db.EventTransfer{
+			Direction:   db.EventTransferOutgoing,
+			Account:     from,
+			Token:       token,
+			Amount:      amount,
+			TokenSource: tokenSource,
+		}
+	case toInternal:
+		event.Type = db.EventTypeTransfer
+		event.Data = &db.EventTransfer{
+			Direction:   db.EventTransferIncoming,
+			Account:     to,
+			Token:       token,
+			Amount:      amount,
+			TokenSource: tokenSource,
+		}
+	}
 }
 
 type parserError interface {
@@ -71,53 +113,6 @@ func devDeleteParsed(
 		return fmt.Errorf("unable to call dev_delete_parsed: %w", err)
 	}
 	return nil
-}
-
-func tokenFromNetwork(network db.Network, token string) string {
-	var prefix [2]byte
-	binary.LittleEndian.PutUint16(prefix[:], uint16(network))
-	return fmt.Sprintf("%s:%s", string(prefix[:]), token)
-}
-
-func tokenCoingecko(coingeckoSymbol string) string {
-	var prefix [2]byte
-	binary.LittleEndian.PutUint16(prefix[:], math.MaxUint16)
-	return fmt.Sprintf("%s:%s", string(prefix[:]), coingeckoSymbol)
-}
-
-func setEventTransfer(
-	event *db.Event,
-	from, to string,
-	fromInternal, toInternal bool,
-	amount decimal.Decimal,
-	token string,
-) {
-	switch {
-	case fromInternal && toInternal:
-		event.Type = db.EventTypeTransferInternal
-		event.Data = &db.EventTransferInternal{
-			FromAccount: from,
-			ToAccount:   to,
-			Token:       token,
-			Amount:      amount,
-		}
-	case fromInternal:
-		event.Type = db.EventTypeTransfer
-		event.Data = &db.EventTransfer{
-			Direction: db.EventTransferOutgoing,
-			Account:   from,
-			Token:     token,
-			Amount:    amount,
-		}
-	case toInternal:
-		event.Type = db.EventTypeTransfer
-		event.Data = &db.EventTransfer{
-			Direction: db.EventTransferIncoming,
-			Account:   to,
-			Token:     token,
-			Amount:    amount,
-		}
-	}
 }
 
 func Parse(
@@ -162,6 +157,7 @@ func Parse(
 				ctx = &evmContext{
 					contracts: make(map[string][]evmContractImplementation),
 					network:   w.Network,
+					decimals:  make(map[string]uint8),
 				}
 			}
 
@@ -313,29 +309,76 @@ func Parse(
 		}
 	}
 
-	// NOTE:
-	// token format
-	//
-	// prefix:token
-	// prefix -> 10 characters long
-	// <network/source>:<address/name>
-	//
-	// solana:        solana____:EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
-	// arbitrum:      arbitrum__:0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8
-	// ethereum:      ethereum__:0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8
-	// native tokens: coingecko_:ethereum
-	// binance:       binance___:ethereum
-	//
-	//
-	//
-	//
-
 	///////////////
 	// fetch evm decimals
+	tokensByNetwork := make(map[db.Network][]string)
+
+	for _, event := range events {
+		var token string
+		var tokenSource uint16
+
+		switch data := event.Data.(type) {
+		case *db.EventTransferInternal:
+			token = data.Token
+			tokenSource = data.TokenSource
+		case *db.EventTransfer:
+			token = data.Token
+			tokenSource = data.TokenSource
+		default:
+			assert.True(false, "unknown event data: %T %#v", data, *event)
+			continue
+		}
+
+		if tokenSource != tokenSourceCoingecko &&
+			tokenSource > uint16(db.NetworkEvmStart) {
+
+			tokens := tokensByNetwork[db.Network(tokenSource)]
+			if len(tokens) == 0 || !slices.Contains(tokens, token) {
+				tokens = append(tokens, token)
+				tokensByNetwork[db.Network(tokenSource)] = tokens
+			}
+		}
+	}
+
+	for network, tokens := range tokensByNetwork {
+		requests := make([]*evm.RpcRequest, len(tokens))
+		for i, token := range tokens {
+			params := struct {
+				To    string `json:"to"`
+				Input string `json:"input"`
+			}{
+				To: token,
+				// decimals() selector
+				Input: "0x313ce567",
+			}
+			requests[i] = evmClient.NewRpcRequest(
+				"eth_call",
+				[]any{params, "latest"},
+				i,
+			)
+		}
+
+		results := queryBatchUntilAllSuccessful(evmClient, network, requests)
+		ctx := evmContexts[network]
+
+		for i, result := range results {
+			valueEncoded, ok := result.Data.(string)
+			assert.True(ok, "invalid value type: %T", result.Data)
+
+			token := tokens[i]
+
+			if valueEncoded == "0x" {
+				ctx.decimals[token] = 0
+			} else {
+				decimals, err := strconv.ParseInt(valueEncoded, 0, 8)
+				assert.NoErr(err, "unable to parse decimals")
+				ctx.decimals[token] = uint8(decimals)
+			}
+		}
+	}
 
 	///////////////
-	// fetch prices
-	assert.True(false, "")
+	// set evm decimals and fetch prices
 
 	queryPricesBatch := pgx.Batch{}
 	type tokenPriceToFetch struct {
@@ -347,12 +390,15 @@ func Parse(
 
 	for eventIdx, event := range events {
 		var token string
+		var tokenSource uint16
 
 		switch data := event.Data.(type) {
 		case *db.EventTransferInternal:
 			token = data.Token
+			tokenSource = data.TokenSource
 		case *db.EventTransfer:
 			token = data.Token
+			tokenSource = data.TokenSource
 		default:
 			assert.True(false, "unknown event data: %T %#v", data, *event)
 			continue
@@ -364,38 +410,95 @@ func Parse(
 			0,
 		)
 
-		q := db.EnqueueGetPricepoint(
-			&queryPricesBatch,
-			event.Network,
-			token,
-			roundedTimestamp,
-		)
-		q.QueryRow(func(row pgx.Row) error {
-			price, coingeckoId, ok, err := db.QueueScanPricepoint(row)
-			// TODO: coingecko may not have the information about the token
-			if errors.Is(err, pgx.ErrNoRows) {
-				// TODO: Error
-				// NOTE: coingecko does not have the token data
+		if tokenSource == tokenSourceCoingecko {
+			q := queryPricesBatch.Queue(
+				db.GetPricepointByCoingeckoId,
+				token,
+				roundedTimestamp,
+			)
+			q.QueryRow(func(row pgx.Row) error {
+				var cid, priceStr string
+				err := row.Scan(&cid, &priceStr)
+				if errors.Is(err, pgx.ErrNoRows) {
+					// NOTE: Coingecko does not have the token data
+					return nil
+				} else {
+					assert.NoErr(
+						err,
+						fmt.Sprintf("unable to scan pricepoint: %s", token),
+					)
+				}
+
+				if priceStr == "" {
+					tokenPricesToFetch = append(
+						tokenPricesToFetch,
+						tokenPriceToFetch{
+							coingeckoId: token,
+							timestamp:   roundedTimestamp.Unix(),
+							eventIdx:    eventIdx,
+						},
+					)
+				} else {
+					logger.Info("Found coingecko pricepoint in db: %s %s", token, roundedTimestamp)
+					pricepoint, err := decimal.NewFromString(priceStr)
+					assert.NoErr(err, fmt.Sprintf("invalid price: %s", priceStr))
+
+					event.Data.SetPrice(pricepoint)
+				}
+
 				return nil
-			} else {
-				assert.NoErr(err, fmt.Sprintf("unable to scan pricepoint: %s", token))
+			})
+		} else {
+			if tokenSource > uint16(db.NetworkEvmStart) {
+				tokenNetwork := db.Network(tokenSource)
+				evmCtx, ok := evmContexts[tokenNetwork]
+				assert.True(ok, "missing evm context for %s", tokenNetwork.String())
+
+				decimals, ok := evmCtx.decimals[token]
+				assert.True(
+					ok,
+					"missing decimals for evm %s token: %s",
+					tokenNetwork.String(), token,
+				)
+
+				event.Data.SetAmountDecimals(decimals)
 			}
 
-			if ok {
-				logger.Info("Found pricepoint in db: %s %s", coingeckoId, roundedTimestamp)
-				event.Data.SetPrice(price)
-			} else {
-				tokenPricesToFetch = append(
-					tokenPricesToFetch,
-					tokenPriceToFetch{
-						coingeckoId,
-						roundedTimestamp.Unix(),
-						eventIdx,
-					},
-				)
-			}
-			return nil
-		})
+			q := queryPricesBatch.Queue(
+				db.GetPricepointByNetworkAndTokenAddress,
+				roundedTimestamp,
+				event.Network,
+				token,
+			)
+			q.QueryRow(func(row pgx.Row) error {
+				var coingeckoId, priceStr string
+				err := row.Scan(&coingeckoId, &priceStr)
+				if errors.Is(err, pgx.ErrNoRows) {
+					// TODO: Error
+					// NOTE: coingecko does not have the token data
+					return nil
+				} else {
+					assert.NoErr(err, fmt.Sprintf("unable to scan pricepoint: %s", token))
+				}
+
+				if priceStr != "" {
+					price, err := decimal.NewFromString(priceStr)
+					assert.NoErr(err, fmt.Sprintf("invalid price: %s", priceStr))
+					logger.Info("Found pricepoint in db: %s %s", coingeckoId, roundedTimestamp)
+					event.Data.SetPrice(price)
+				} else {
+					tokenPricesToFetch = append(
+						tokenPricesToFetch,
+						tokenPriceToFetch{
+							coingeckoId,
+							roundedTimestamp.Unix(),
+							eventIdx,
+						},
+					)
+				}
+				return nil
+			})
+		}
 	}
 
 	br = pool.SendBatch(ctx, &queryPricesBatch)
@@ -440,10 +543,10 @@ func Parse(
 				err := br.Close()
 				assert.NoErr(err, "unable to insert coingecko prices")
 
-			}
-			if p := coingeckoPrices[0]; p.Timestamp.Equal(ts) {
-				logger.Info("Fetched pricepoint from coingecko: %s %s", token.coingeckoId, ts)
-				price, ok = p.Close, true
+				if p := coingeckoPrices[0]; p.Timestamp.Equal(ts) {
+					logger.Info("Fetched pricepoint from coingecko: %s %s", token.coingeckoId, ts)
+					price, ok = p.Close, true
+				}
 			}
 		} else {
 			logger.Info("Found pricepoint in coingecko prices: %s %s", token.coingeckoId, ts)

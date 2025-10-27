@@ -3,7 +3,6 @@ package db
 import (
 	"encoding/json"
 	"fmt"
-	"taxee/pkg/assert"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -58,51 +57,79 @@ func EnqueueInsertPricepoint(
 	return batch.Queue(q, price, timestamp, coingeckoId)
 }
 
-func EnqueueGetPricepoint(
-	batch *pgx.Batch,
-	network Network,
-	address string,
-	timestamp time.Time,
-) *pgx.QueuedQuery {
-	const qGetPricepoint = `
-		select
-			ct.coingecko_id,
-			(
-				case
-					when pp.coingecko_id is not null then pp.price
-					else ''
-				end
-			) as price
-		from
-			coingecko_token ct
-		left join
-			pricepoint pp on
-				pp.coingecko_id = ct.coingecko_id and pp.timestamp = $1
-		where
-			ct.network = $2 and ct.address = $3
-	`
-	return batch.Queue(qGetPricepoint, timestamp, network, address)
-}
+// GetPricepointByNetworkAndTokenAddress
+//
+//	select
+//		ct.coingecko_id,
+//		(
+//			case
+//				when pp.coingecko_id is not null then pp.price
+//				else ''
+//			end
+//		) as price
+//	from
+//		coingecko_token ct
+//	left join
+//		pricepoint pp on
+//			pp.coingecko_id = ct.coingecko_id and pp.timestamp = $1
+//	where
+//		ct.network = $2 and ct.address = $3
+const GetPricepointByNetworkAndTokenAddress string = `
+	select
+		ct.coingecko_id,
+		(
+			case
+				when pp.coingecko_id is not null then pp.price
+				else ''
+			end
+		) as price
+	from
+		coingecko_token ct
+	left join
+		pricepoint pp on
+			pp.coingecko_id = ct.coingecko_id and pp.timestamp = $1
+	where
+		ct.network = $2 and ct.address = $3
+`
 
-func QueueScanPricepoint(
-	row pgx.Row,
-) (price decimal.Decimal, coingeckoId string, ok bool, err error) {
-	var p string
-	if err = row.Scan(&coingeckoId, &p); err != nil {
-		err = fmt.Errorf("unable to get pricepoint: %w", err)
-		return
-	}
-	if p == "" {
-		return
-	}
-	ok = true
-	price, err = decimal.NewFromString(p)
-	assert.NoErr(err, fmt.Sprintf("invalid price: %s", p))
-	return
-}
+// GetPricepointByCoingeckoId
+//
+// 	select 
+// 		ct.coingecko_id,
+// 		(
+// 			case
+// 				when pp.coingecko_id is not null then pp.price
+// 				else ''
+// 			end
+// 		) as price
+// 	from 
+// 		coingecko_token_data ct
+// 	left join
+// 		pricepoint pp on
+// 			pp.coingecko_id = $1 and pp.timestamp = $2
+// 	where
+// 		ct.coingecko_id = $1
+const GetPricepointByCoingeckoId string = `
+	select 
+		ct.coingecko_id,
+		(
+			case
+				when pp.coingecko_id is not null then pp.price
+				else ''
+			end
+		) as price
+	from 
+		coingecko_token_data ct
+	left join
+		pricepoint pp on
+			pp.coingecko_id = $1 and pp.timestamp = $2
+	where
+		ct.coingecko_id = $1
+`
 
 type EventData interface {
 	SetPrice(decimal.Decimal)
+	SetAmountDecimals(decimals uint8)
 }
 
 type EventTransferInternal struct {
@@ -110,14 +137,24 @@ type EventTransferInternal struct {
 	ToAccount   string          `json:"toAccount"`
 	Token       string          `json:"token"`
 	Amount      decimal.Decimal `json:"amount"`
+	TokenSource uint16          `json:"-"`
 	Price       decimal.Decimal `json:"price"`
 	Value       decimal.Decimal `json:"value"`
 	Profit      decimal.Decimal `json:"profit"`
 }
 
+var _ EventData = (*EventTransferInternal)(nil)
+
 func (internal *EventTransferInternal) SetPrice(price decimal.Decimal) {
 	internal.Price = price
 	internal.Value = price.Mul(internal.Amount)
+}
+
+func (t *EventTransferInternal) SetAmountDecimals(decimals uint8) {
+	t.Amount = decimal.NewFromBigInt(
+		t.Amount.BigInt(),
+		-int32(decimals),
+	)
 }
 
 type EventTransferDirection uint8
@@ -128,18 +165,28 @@ const (
 )
 
 type EventTransfer struct {
-	Direction EventTransferDirection `json:"direction"`
-	Account   string                 `json:"account"`
-	Token     string                 `json:"token"`
-	Amount    decimal.Decimal        `json:"amount"`
-	Price     decimal.Decimal        `json:"price"`
-	Value     decimal.Decimal        `json:"value"`
-	Profit    decimal.Decimal        `json:"profit"`
+	Direction   EventTransferDirection `json:"direction"`
+	Account     string                 `json:"account"`
+	Token       string                 `json:"token"`
+	Amount      decimal.Decimal        `json:"amount"`
+	TokenSource uint16                 `json:"-"`
+	Price       decimal.Decimal        `json:"price"`
+	Value       decimal.Decimal        `json:"value"`
+	Profit      decimal.Decimal        `json:"profit"`
 }
+
+var _ EventData = (*EventTransfer)(nil)
 
 func (transfer *EventTransfer) SetPrice(price decimal.Decimal) {
 	transfer.Price = price
 	transfer.Value = price.Mul(transfer.Amount)
+}
+
+func (t *EventTransfer) SetAmountDecimals(decimals uint8) {
+	t.Amount = decimal.NewFromBigInt(
+		t.Amount.BigInt(),
+		-int32(decimals),
+	)
 }
 
 type EventType string

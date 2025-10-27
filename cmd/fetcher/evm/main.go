@@ -56,14 +56,14 @@ func ChainIdAndNativeDecimals(network db.Network) (chainId, decimals int) {
 	case db.NetworkBsc:
 		chainId = 56
 	default:
-		assert.True(false, "invalid EVM network: %s", network)
+		assert.True(false, "invalid EVM network: %s", network.String())
 	}
 
 	switch network {
 	case db.NetworkArbitrum, db.NetworkEthereum, db.NetworkBsc, db.NetworkAvaxC:
 		decimals = 18
 	default:
-		assert.True(false, "invalid EVM network: %s", network)
+		assert.True(false, "invalid EVM network: %s", network.String())
 	}
 
 	return
@@ -316,7 +316,7 @@ func (client *Client) newAlchemyUrl(network db.Network) string {
 	case db.NetworkEthereum:
 		alchemyNetwork = "eth-mainnet"
 	default:
-		assert.True(false, "invalid EVM network: %s", network)
+		assert.True(false, "invalid EVM network: %s", network.String())
 	}
 
 	url := fmt.Sprintf(

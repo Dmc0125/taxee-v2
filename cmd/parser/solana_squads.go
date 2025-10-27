@@ -324,21 +324,16 @@ func solProcessSquadsV4Ix(
 	switch ixType {
 	case solSquadsV4VaultTransactionCreate:
 		innerIxs := solInnerIxIterator{innerIxs: ix.InnerInstructions}
-		eventData, eventType, ok, err := solProcessAnchorInitProgram(ctx, &innerIxs)
+		event, ok, err := solProcessAnchorInitAccount(ctx, &innerIxs)
 		assert.NoErr(err, fmt.Sprintf("unable to process ix: %s", ctx.txId))
 		if !ok {
 			return
 		}
 
-		event := db.Event{
-			UiAppName:    app,
-			UiMethodName: method,
-			Type:         eventType,
-			Data:         eventData,
-		}
-		ctx.initEvent(&event)
+		event.UiAppName = app
+		event.UiMethodName = method
 
-		*events = append(*events, &event)
+		*events = append(*events, event)
 	case solSquadsV4VaultTransactionExecute:
 		transaction := ix.Accounts[2]
 		transactionAccount := ctx.find(ctx.slot, ctx.ixIdx, transaction, 2)

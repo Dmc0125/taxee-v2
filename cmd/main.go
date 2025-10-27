@@ -225,16 +225,32 @@ func main() {
 			q.Exec(func(ct pgconn.CommandTag) error { return nil })
 
 			for platform, mint := range coin.Platforms {
+				var network db.Network
+
 				switch platform {
 				case "solana":
-					q := db.EnqueueInsertCoingeckoToken(
-						&batch,
-						coin.Id,
-						db.NetworkSolana,
-						mint,
-					)
-					q.Exec(func(_ pgconn.CommandTag) error { return nil })
+					network = db.NetworkSolana
+				case "arbitrum-one":
+					network = db.NetworkArbitrum
+				case "avalanche":
+					network = db.NetworkAvaxC
+				case "ethereum":
+					network = db.NetworkEthereum
+				case "binance-smart-chain":
+					network = db.NetworkBsc
+				case "cosmos", "osmosis":
+					continue
+				default:
+					continue
 				}
+
+				q := db.EnqueueInsertCoingeckoToken(
+					&batch,
+					coin.Id,
+					network,
+					mint,
+				)
+				q.Exec(func(_ pgconn.CommandTag) error { return nil })
 			}
 		}
 

@@ -107,38 +107,18 @@ func solProcessSystemIx(
 		return
 	}
 
-	event := db.Event{
-		UiAppName:    "system_program",
-		UiMethodName: method,
-	}
-	ctx.initEvent(&event)
+	event := solNewEvent(ctx)
+	event.UiAppName = "system_program"
+	event.UiMethodName = method
 
-	switch {
-	case fromInternal && toInternal:
-		event.Type = db.EventTypeTransferInternal
-		event.Data = &db.EventTransferInternal{
-			FromAccount: from,
-			ToAccount:   to,
-			Token:       SOL_MINT_ADDRESS,
-			Amount:      newDecimalFromRawAmount(amount, 9),
-		}
-	case fromInternal:
-		event.Type = db.EventTypeTransfer
-		event.Data = &db.EventTransfer{
-			Direction: db.EventTransferOutgoing,
-			Account:   from,
-			Token:     SOL_MINT_ADDRESS,
-			Amount:    newDecimalFromRawAmount(amount, 9),
-		}
-	case toInternal:
-		event.Type = db.EventTypeTransfer
-		event.Data = &db.EventTransfer{
-			Direction: db.EventTransferIncoming,
-			Account:   to,
-			Token:     SOL_MINT_ADDRESS,
-			Amount:    newDecimalFromRawAmount(amount, 9),
-		}
-	}
+	setEventTransfer(
+		event,
+		from, to,
+		fromInternal, toInternal,
+		newDecimalFromRawAmount(amount, 9),
+		SOL_MINT_ADDRESS,
+		uint16(db.NetworkSolana),
+	)
 
-	*events = append(*events, &event)
+	*events = append(*events, event)
 }

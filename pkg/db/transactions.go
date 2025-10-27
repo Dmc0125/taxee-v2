@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql/driver"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -45,6 +46,9 @@ type Network uint16
 
 const (
 	NetworkSolana Network = iota
+
+	// evm networks
+	NetworkEvmStart
 	NetworkEthereum
 	NetworkArbitrum
 	NetworkBsc
@@ -83,6 +87,32 @@ func (nw *Network) String() string {
 	default:
 		return ""
 	}
+}
+
+func (dst *Network) Scan(src any) error {
+	if src == nil {
+		return nil
+	}
+
+	n, ok := src.(string)
+	if !ok {
+		return fmt.Errorf("invalid network type: %T", src)
+	}
+
+	*dst, ok = NewNetwork(n)
+	if !ok {
+		return fmt.Errorf("invalid network: %s", n)
+	}
+
+	return nil
+}
+
+func (nw Network) Value() (driver.Value, error) {
+	v := nw.String()
+	if v == "" {
+		return nil, fmt.Errorf("invalid network: %d", nw)
+	}
+	return v, nil
 }
 
 type SolanaWalletData struct {

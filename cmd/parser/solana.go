@@ -248,11 +248,13 @@ func (ctx *solanaContext) findOwned(
 	return ctx.find(slot, ixIdx, address, 1)
 }
 
-func (ctx *solanaContext) initEvent(event *db.Event) {
-	event.Network = db.NetworkSolana
-	event.TxId = ctx.txId
-	event.IxIdx = int32(ctx.ixIdx)
-	event.Timestamp = ctx.timestamp
+func solNewEvent(ctx *solanaContext) *db.Event {
+	return &db.Event{
+		Timestamp: ctx.timestamp,
+		Network:   db.NetworkSolana,
+		TxId:      ctx.txId,
+		IxIdx:     int32(ctx.ixIdx),
+	}
 }
 
 func solAccountDataMust[T any](account *accountLifetime) *T {
@@ -305,49 +307,6 @@ func solPreprocessTx(
 	// TODO: Validate balances
 }
 
-func solNewTransferNative(
-	ctx *solanaContext,
-	from, to string,
-	amount uint64,
-) (d db.EventData, t db.EventType, ok bool) {
-	fromInternal := ctx.walletOwned(from)
-	toInternal := ctx.walletOwned(to)
-
-	if !fromInternal && !toInternal {
-		return
-	}
-
-	ok = true
-	switch {
-	case fromInternal && toInternal:
-		t = db.EventTypeTransferInternal
-		d = &db.EventTransferInternal{
-			FromAccount: from,
-			ToAccount:   to,
-			Token:       SOL_MINT_ADDRESS,
-			Amount:      newDecimalFromRawAmount(amount, 9),
-		}
-	case fromInternal:
-		t = db.EventTypeTransfer
-		d = &db.EventTransfer{
-			Direction: db.EventTransferOutgoing,
-			Account:   from,
-			Token:     SOL_MINT_ADDRESS,
-			Amount:    newDecimalFromRawAmount(amount, 9),
-		}
-	case toInternal:
-		t = db.EventTypeTransfer
-		d = &db.EventTransfer{
-			Direction: db.EventTransferIncoming,
-			Account:   to,
-			Token:     SOL_MINT_ADDRESS,
-			Amount:    newDecimalFromRawAmount(amount, 9),
-		}
-	}
-
-	return
-}
-
 type solInnerIxIterator struct {
 	innerIxs []*db.SolanaInnerInstruction
 	pos      int
@@ -365,10 +324,10 @@ func (iter *solInnerIxIterator) next() *db.SolanaInnerInstruction {
 
 // NOTE: implemented based on
 // https://github.com/solana-foundation/anchor/blob/master/lang/syn/src/codegen/accounts/constraints.rs#L1036
-func solProcessAnchorInitProgram(
+func solProcessAnchorInitAccount(
 	ctx *solanaContext,
 	innerIxs *solInnerIxIterator,
-) (d db.EventData, t db.EventType, ok bool, err error) {
+) (event *db.Event, ok bool, err error) {
 	if !innerIxs.hasNext() {
 		err = errors.New("invalid anchor init ix: missing inner ixs")
 		return
@@ -410,7 +369,20 @@ func solProcessAnchorInitProgram(
 	)
 	assert.True(ok, "invalid anchor init ix")
 
-	d, t, ok = solNewTransferNative(ctx, from, to, amount)
+	fromInternal, toInternal := ctx.walletOwned(from), ctx.walletOwned(to)
+	if !fromInternal && !toInternal {
+		return
+	}
+
+	event = solNewEvent(ctx)
+	setEventTransfer(
+		event,
+		from, to,
+		fromInternal, toInternal,
+		newDecimalFromRawAmount(amount, 9),
+		SOL_MINT_ADDRESS,
+		uint16(db.NetworkSolana),
+	)
 	return
 }
 

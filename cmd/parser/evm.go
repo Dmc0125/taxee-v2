@@ -19,48 +19,58 @@ func queryBatchUntilAllSuccessful(
 	network db.Network,
 	requests []*evm.RpcRequest,
 ) []*evm.BatchResult[any] {
-	successResult := make([]*evm.BatchResult[any], len(requests))
-	errs := make([]int, len(requests))
-	for i := range requests {
-		errs[i] = i
+	type queuedRequest struct {
+		idx    int
+		errors []*evm.RpcError
 	}
 
-	const maxRetries = 5
-	var result []*evm.BatchResult[any]
+	queue := make(map[int]*queuedRequest)
+	for i, req := range requests {
+		queue[i] = &queuedRequest{
+			idx: req.Id,
+		}
+	}
 
-	for range maxRetries {
-		r := make([]*evm.RpcRequest, len(errs))
-		for i, reqIdx := range errs {
-			r[i] = requests[reqIdx]
+	batchResult := make([]*evm.BatchResult[any], len(requests))
+
+	for try := 0; len(queue) > 0 && try < 5; try += 1 {
+		r, reqIdx := make([]*evm.RpcRequest, len(queue)), 0
+		for _, qr := range queue {
+			r[reqIdx] = requests[qr.idx]
+			reqIdx += 1
 		}
 
-		var err error
-		result, err = client.Batch(network, r)
+		result, err := client.Batch(network, r)
 		assert.NoErr(err, "unable to send batch")
 
 		for i, res := range result {
-			reqIdx := errs[i]
+			req := *r[i]
+			qr := queue[req.Id]
+
 			switch {
 			case res.Error == nil:
-				// sucess
-				successResult[reqIdx] = res
+				batchResult[qr.idx] = res
+				delete(queue, req.Id)
 			default:
-				// err
-				errs = append(errs, reqIdx)
+				qr.errors = append(qr.errors, res.Error)
 			}
 		}
-
-		errs = errs[len(result):]
-		if len(errs) == 0 {
-			break
-		}
-
-		result = result[:]
 	}
 
-	assert.True(len(errs) == 0, "unable to query batch")
+	if len(queue) != 0 {
+		for _, qr := range queue {
+			req := requests[qr.idx]
+			fmt.Printf("Method: %s\n", req.Method)
+			fmt.Printf("Params: %#v\n", req.Params)
+			for i, err := range qr.errors {
+				fmt.Printf("\t%d: Err: %#v\n", i, err)
+			}
+		}
+		fmt.Println()
+		assert.True(false, "unable to query batch")
+	}
 
-	return successResult
+	return batchResult
 }
 
 func evmIdentifyNonProxyContract(bytecode []byte) []uint32 {
@@ -308,22 +318,6 @@ func evmIdentifyContracts(
 			implementations,
 		)
 	}
-
-	////////////////
-	// fetch decimals for erc20 tokens
-
-	// erc20Tokens := slices.Collect(maps.Keys(erc20TokensDecimals))
-	// requests = make([]*evm.RpcRequest, len(erc20Tokens))
-	//
-	// for i, token := range erc20Tokens {
-	// 	const decimalsSelector = "0x313ce567"
-	// 	requests[i] = client.NewRpcRequest(
-	// 		"eth_call",
-	// 		[]string{},
-	// 		i,
-	// 	)
-	// 	_ = token
-	// }
 }
 
 type evmContractImplementation struct {
@@ -335,6 +329,7 @@ type evmContext struct {
 	contracts map[string][]evmContractImplementation
 	wallets   []string
 	network   db.Network
+	decimals  map[string]uint8
 
 	// different for each tx
 	timestamp time.Time
@@ -424,7 +419,8 @@ func evmProcessTx(
 			txData.From, txData.To,
 			fromInternal, toInternal,
 			txData.Value,
-			tokenCoingecko("ethereum"),
+			"ethereum",
+			tokenSourceCoingecko,
 		)
 
 		*events = append(*events, event)
@@ -437,6 +433,6 @@ func evmProcessTx(
 	}
 
 	if slices.Contains(contract.impl, evm1inchV4ContractId) {
-		fmt.Println(ctx.txId)
+		// fmt.Println(ctx.txId)
 	}
 }
