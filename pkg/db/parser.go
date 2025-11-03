@@ -1,61 +1,15 @@
 package db
 
 import (
+	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"taxee/pkg/assert"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
 )
-
-func EnqueueInsertCoingeckoTokenData(
-	batch *pgx.Batch,
-	coingeckoId, symbol, name string,
-) *pgx.QueuedQuery {
-	const q = `
-		insert into coingecko_token_data (
-			coingecko_id, symbol, name
-		) values (
-			$1, $2, $3
-		) on conflict (coingecko_id) do nothing
-	`
-	return batch.Queue(
-		q, coingeckoId, symbol, name,
-	)
-}
-
-func EnqueueInsertCoingeckoToken(
-	batch *pgx.Batch,
-	coingeckoId string,
-	network Network,
-	address string,
-) *pgx.QueuedQuery {
-	const q = `
-		insert into coingecko_token (
-			coingecko_id, network, address
-		) values (
-			$1, $2, $3
-		) on conflict (network, address) do nothing
-	`
-	return batch.Queue(q, coingeckoId, network, address)
-}
-
-func EnqueueInsertPricepoint(
-	batch *pgx.Batch,
-	price decimal.Decimal,
-	timestamp time.Time,
-	coingeckoId string,
-) *pgx.QueuedQuery {
-	const q = `
-		insert into pricepoint (
-			price, timestamp, coingecko_id
-		) values (
-			$1, $2, $3
-		) on conflict (timestamp, coingecko_id) do nothing
-	`
-	return batch.Queue(q, price, timestamp, coingeckoId)
-}
 
 // GetPricepointByNetworkAndTokenAddress
 //
@@ -94,21 +48,21 @@ const GetPricepointByNetworkAndTokenAddress string = `
 
 // GetPricepointByCoingeckoId
 //
-// 	select 
-// 		ct.coingecko_id,
-// 		(
-// 			case
-// 				when pp.coingecko_id is not null then pp.price
-// 				else ''
-// 			end
-// 		) as price
-// 	from 
-// 		coingecko_token_data ct
-// 	left join
-// 		pricepoint pp on
-// 			pp.coingecko_id = $1 and pp.timestamp = $2
-// 	where
-// 		ct.coingecko_id = $1
+//	select
+//		ct.coingecko_id,
+//		(
+//			case
+//				when pp.coingecko_id is not null then pp.price
+//				else ''
+//			end
+//		) as price
+//	from
+//		coingecko_token_data ct
+//	left join
+//		pricepoint pp on
+//			pp.coingecko_id = $1 and pp.timestamp = $2
+//	where
+//		ct.coingecko_id = $1
 const GetPricepointByCoingeckoId string = `
 	select 
 		ct.coingecko_id,
@@ -256,3 +210,143 @@ func EnqueueInsertEvent(
 		event.UiAppName, event.UiMethodName, event.Type, data,
 	), nil
 }
+
+type ErrOrigin string
+
+const (
+	ErrOriginPreprocess ErrOrigin = "preparse"
+	ErrOriginProcess    ErrOrigin = "parse"
+)
+
+type ParserErrorMissingAccount struct {
+	AccountAddress string `json:"accountAddress"`
+}
+
+func (e1 *ParserErrorMissingAccount) IsEq(other any) bool {
+	e2, ok := other.(*ParserErrorMissingAccount)
+	if !ok {
+		return false
+	}
+	return e1.AccountAddress == e2.AccountAddress
+}
+
+func (e1 *ParserErrorMissingAccount) Address() string {
+	return e1.AccountAddress
+}
+
+// NOTE: balance validation after preprocess / process
+type ParserErrorAccountBalanceMismatch struct {
+	AccountAddress string
+	Token          string
+	Expected       decimal.Decimal
+	Had            decimal.Decimal
+}
+
+func (e1 *ParserErrorAccountBalanceMismatch) IsEq(other any) bool {
+	e2, ok := other.(*ParserErrorAccountBalanceMismatch)
+	if !ok {
+		return false
+	}
+	return e1.AccountAddress == e2.AccountAddress &&
+		e1.Token == e2.Token &&
+		e1.Expected.Equal(e2.Expected) &&
+		e1.Had.Equal(e2.Had)
+}
+
+func (e1 *ParserErrorAccountBalanceMismatch) Address() string {
+	return e1.AccountAddress
+}
+
+type ParserErrorMissingPrice struct {
+	Token     string    `json:"token"`
+	Timestamp time.Time `json:"-"`
+}
+
+type ParserErrorInsufficientBalance struct {
+	AccountAddress string
+	Token          string
+	AmountMissing  decimal.Decimal
+}
+
+type ParserErrorType uint8
+
+const (
+	ParserErrorTypeMissingAccount ParserErrorType = iota
+	ParserErrorTypeAccountBalanceMismatch
+	ParserErrorTypeMissingPrice
+	ParserErrorTypeInsufficientBalance
+)
+
+func NewParserErrorTypeFromString(s string) (ParserErrorType, error) {
+	switch s {
+	case "missing_account":
+		return ParserErrorTypeMissingAccount, nil
+	case "account_balance_mismatch":
+		return ParserErrorTypeAccountBalanceMismatch, nil
+	case "missing_price":
+		return ParserErrorTypeMissingPrice, nil
+	case "insufficient_balance":
+		return ParserErrorTypeInsufficientBalance, nil
+	default:
+		return 0, fmt.Errorf("invalid parser error type: %s", s)
+	}
+}
+
+func (dst *ParserErrorType) Scan(src any) error {
+	if src == nil {
+		return nil
+	}
+
+	t, ok := src.(string)
+	if !ok {
+		return fmt.Errorf("invalid parser error type: %T", src)
+	}
+
+	var err error
+	*dst, err = NewParserErrorTypeFromString(t)
+
+	return err
+}
+
+func (e ParserErrorType) Value() (driver.Value, error) {
+	switch e {
+	case ParserErrorTypeMissingAccount:
+		return "missing_account", nil
+	case ParserErrorTypeAccountBalanceMismatch:
+		return "account_balance_mismatch", nil
+	case ParserErrorTypeMissingPrice:
+		return "missing_price", nil
+	case ParserErrorTypeInsufficientBalance:
+		return "insufficient_balance", nil
+	default:
+		assert.True(false, "invalid parser error type: %d", e)
+		return nil, nil
+	}
+}
+
+type ParserError struct {
+	TxId  string
+	IxIdx uint32
+
+	Type ParserErrorType
+	Data any
+}
+
+// InsertParserError
+//
+//	insert into
+//		parser_err (
+//			user_account_id, tx_id, ix_idx, origin, type, data
+//		)
+//	values (
+//		$1, $2, $3, $4, $5, $6
+//	)
+const InsertParserError string = `
+	insert into
+		parser_err (
+			user_account_id, tx_id, ix_idx, origin, type, data
+		)
+	values (
+		$1, $2, $3, $4, $5, $6
+	)
+`

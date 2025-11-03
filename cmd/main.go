@@ -25,7 +25,6 @@ import (
 	"golang.org/x/crypto/sha3"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func goSliceString(s []byte, size int) string {
@@ -208,54 +207,6 @@ func main() {
 		} else {
 			fmt.Println(string(output))
 		}
-	case "seed":
-		coingecko.Init()
-
-		coins, err := coingecko.GetCoins()
-		assert.NoErr(err, "unable to get coingecko coins")
-
-		batch := pgx.Batch{}
-		for _, coin := range coins {
-			q := db.EnqueueInsertCoingeckoTokenData(
-				&batch,
-				coin.Id,
-				coin.Symbol,
-				coin.Name,
-			)
-			q.Exec(func(ct pgconn.CommandTag) error { return nil })
-
-			for platform, mint := range coin.Platforms {
-				var network db.Network
-
-				switch platform {
-				case "solana":
-					network = db.NetworkSolana
-				case "arbitrum-one":
-					network = db.NetworkArbitrum
-				case "avalanche":
-					network = db.NetworkAvaxC
-				case "ethereum":
-					network = db.NetworkEthereum
-				case "binance-smart-chain":
-					network = db.NetworkBsc
-				case "cosmos", "osmosis":
-					continue
-				default:
-					continue
-				}
-
-				q := db.EnqueueInsertCoingeckoToken(
-					&batch,
-					coin.Id,
-					network,
-					mint,
-				)
-				q.Exec(func(_ pgconn.CommandTag) error { return nil })
-			}
-		}
-
-		br := pool.SendBatch(context.Background(), &batch)
-		assert.NoErr(br.Close(), "")
 	case "fetch":
 		// fetch txs
 		assert.True(appEnv != "prod", "this command must not be run in production env")

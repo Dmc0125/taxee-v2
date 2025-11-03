@@ -12,10 +12,10 @@ drop table coingecko_token;
 
 drop table coingecko_token_data;
 
-drop table err;
+drop table parser_err;
 
-drop type err_type;
+drop type parser_err_type;
 
-drop type err_origin;
+drop type parser_err_origin;
 
 commit;

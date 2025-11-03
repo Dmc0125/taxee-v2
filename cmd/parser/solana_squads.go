@@ -163,16 +163,9 @@ func solPreprocessSquadsV4Ix(ctx *solanaContext, ix *db.SolanaInstruction) {
 		var accountData solSquadsV4CompiledTxAccountData
 		accountData.initFromData(ix.Data)
 
-		// TODO: replace with some inner ix iterator
-		transferSolIx := ix.InnerInstructions[0]
-		ixType, _, ok := solSystemIxFromData(transferSolIx.Data)
-		assert.True(ok, "invalid anchor init")
-		_, to, amount, ok := solParseSystemIxSolTransfer(
-			ixType,
-			transferSolIx.Accounts,
-			transferSolIx.Data,
-		)
-		assert.True(ok, "invalid anchor init")
+		innerIxsIter := solInnerIxIterator{innerIxs: ix.InnerInstructions}
+		_, to, amount, err := solAnchorInitAccountValidate(&innerIxsIter)
+		assert.NoErr(err, "")
 
 		ctx.receiveSol(to, amount)
 		ctx.init(transaction, owned, &accountData)

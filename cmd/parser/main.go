@@ -21,8 +21,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 )
@@ -77,29 +75,68 @@ func setEventTransfer(
 }
 
 type parserError interface {
-	IsEq(parserError) bool
+	IsEq(any) bool
 	Address() string
 }
 
-type parserErrors map[string][]parserError
-
-func (errors parserErrors) appendErr(
-	err parserError,
+func appendErrUnique(
+	errors map[string][]*db.ParserError,
+	n *db.ParserError,
 ) {
-	addr := err.Address()
-	accountErrors := errors[addr]
+	nValid, ok := n.Data.(parserError)
+	assert.True(ok, "invalid error type: %T", n.Data)
+
+	address := nValid.Address()
+	accountErrors := errors[address]
 
 	switch {
-	case len(accountErrors) == 0:
-		accountErrors = append(accountErrors, err)
+	case accountErrors == nil || len(accountErrors) == 0:
+		errors[address] = append(errors[address], n)
 	default:
-		last := accountErrors[len(accountErrors)-1]
-		if !last.IsEq(err) {
-			accountErrors = append(accountErrors, err)
+		l := accountErrors[len(accountErrors)-1]
+
+		if !nValid.IsEq(l) {
+			errors[address] = append(errors[address], n)
+		}
+	}
+}
+
+func appendMissingPriceError(
+	errors *[]*db.ParserError,
+	txId string,
+	ixIdx uint32,
+	token string,
+	timestamp time.Time,
+) {
+	e2Data := db.ParserErrorMissingPrice{
+		Token:     token,
+		Timestamp: timestamp,
+	}
+	e2 := db.ParserError{
+		TxId:  txId,
+		IxIdx: ixIdx,
+		Type:  db.ParserErrorTypeMissingPrice,
+		Data:  &e2Data,
+	}
+
+	if len(*errors) == 0 {
+		*errors = append(*errors, &e2)
+		return
+	}
+
+	// NOTE: errors are appended chronologically by time, so check from last
+	for i := len(*errors) - 1; i >= 0; i -= 1 {
+		e1Data := (*errors)[i].Data.(*db.ParserErrorMissingPrice)
+
+		if e2Data.Timestamp != e1Data.Timestamp {
+			*errors = append(*errors, &e2)
+			return
+		}
+		if e2Data.Token == e1Data.Token {
+			return
 		}
 	}
 
-	errors[addr] = accountErrors
 }
 
 func devDeleteParsed(
@@ -113,6 +150,70 @@ func devDeleteParsed(
 		return fmt.Errorf("unable to call dev_delete_parsed: %w", err)
 	}
 	return nil
+}
+
+func fetchCoingeckoTokens(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+) {
+	coins, err := coingecko.GetCoins()
+	assert.NoErr(err, "unable to get coingecko coins")
+
+	batch := pgx.Batch{}
+
+	for _, coin := range coins {
+		const insertCoingeckoTokenData = `
+			insert into coingecko_token_data (
+				coingecko_id, symbol, name
+			) values (
+				$1, $2, $3
+			) on conflict (coingecko_id) do nothing
+		`
+		batch.Queue(
+			insertCoingeckoTokenData,
+			coin.Id,
+			coin.Symbol,
+			coin.Name,
+		)
+
+		for platform, mint := range coin.Platforms {
+			var network db.Network
+			switch platform {
+			case "solana":
+				network = db.NetworkSolana
+			case "arbitrum-one":
+				network = db.NetworkArbitrum
+			case "avalanche":
+				network = db.NetworkAvaxC
+			case "ethereum":
+				network = db.NetworkEthereum
+			case "binance-smart-chain":
+				network = db.NetworkBsc
+			case "cosmos", "osmosis":
+				continue
+			default:
+				continue
+			}
+
+			const insertCoingeckoToken = `
+				insert into coingecko_token (
+					coingecko_id, network, address
+				) values (
+					$1, $2, $3
+				) on conflict (network, address) do nothing
+			`
+			batch.Queue(
+				insertCoingeckoToken,
+				coin.Id,
+				network,
+				mint,
+			)
+		}
+	}
+
+	qr := pool.SendBatch(ctx, &batch)
+	err = qr.Close()
+	assert.NoErr(err, "unable to insert coingecko tokens")
 }
 
 func Parse(
@@ -135,34 +236,42 @@ func Parse(
 		}()
 	}
 
+	fetchCoingeckoTokens(ctx, pool)
+
 	if fresh {
 		err := devDeleteParsed(ctx, pool, userAccountId)
 		assert.NoErr(err, "")
 	}
 
+	/////////////////
+	// Init
+
+	solCtx := solanaContext{
+		accounts:         make(map[string][]accountLifetime),
+		preprocessErrors: make(map[string][]*db.ParserError),
+		processErrors:    make(map[string][]*db.ParserError),
+	}
+	evmContexts := make(map[db.Network]*evmContext)
+
+	for i := db.NetworkEvmStart + 1; i < db.NetworksCount; i += 1 {
+		evmContexts[i] = &evmContext{
+			contracts: make(map[string][]evmContractImplementation),
+			network:   i,
+			decimals:  make(map[string]uint8),
+		}
+	}
+
 	wallets, err := db.GetWallets(ctx, pool, userAccountId)
 	assert.NoErr(err, "")
 
-	solanaWallets := make([]string, 0)
-	evmContexts := make(map[db.Network]*evmContext)
-
 	for _, w := range wallets {
-		switch w.Network {
-		case db.NetworkSolana:
-			solanaWallets = append(solanaWallets, w.Address)
-		case db.NetworkArbitrum, db.NetworkAvaxC, db.NetworkBsc, db.NetworkEthereum:
-			// TODO: maybe initialize separately
+		switch {
+		case w.Network == db.NetworkSolana:
+			solCtx.wallets = append(solCtx.wallets, w.Address)
+		case w.Network > db.NetworkEvmStart:
 			ctx, ok := evmContexts[w.Network]
-			if !ok {
-				ctx = &evmContext{
-					contracts: make(map[string][]evmContractImplementation),
-					network:   w.Network,
-					decimals:  make(map[string]uint8),
-				}
-			}
-
+			assert.True(ok, "missing evm context %s", w.Network.String())
 			ctx.wallets = append(ctx.wallets, w.Address)
-			evmContexts[w.Network] = ctx
 		}
 	}
 
@@ -175,8 +284,7 @@ func Parse(
 
 	///////////////////
 	// preprocess txs
-	errs := make(parserErrors)
-	solanaAccounts := make(map[string][]accountLifetime)
+
 	evmAddresses := make(map[db.Network]map[string][]uint64)
 
 	for _, tx := range txs {
@@ -186,13 +294,11 @@ func Parse(
 
 		switch txData := tx.Data.(type) {
 		case *db.SolanaTransactionData:
-			solPreprocessTx(
-				errs,
-				solanaAccounts,
-				solanaWallets,
-				tx.Id,
-				txData,
-			)
+			solCtx.txId = tx.Id
+			solCtx.timestamp = tx.Timestamp
+			solCtx.slot = txData.Slot
+
+			solPreprocessTx(&solCtx, txData.Instructions)
 		case *db.EvmTransactionData:
 			addresses, ok := evmAddresses[tx.Network]
 			if !ok {
@@ -209,10 +315,8 @@ func Parse(
 	}
 
 	for network, addresses := range evmAddresses {
-		// TODO: just create the context ?
 		ctx, ok := evmContexts[network]
-		assert.True(ok, "missing evm context for: %s", network.String())
-
+		assert.True(ok, "missing evm context %s", network.String())
 		evmIdentifyContracts(
 			evmClient,
 			network,
@@ -221,56 +325,28 @@ func Parse(
 		)
 	}
 
-	var batch pgx.Batch
-	// NOTE: Errors are created sequentially based on txs, so they are
-	// always created in the correct order, so just keeping global
-	// position is fine
-	errPos := int32(0)
-	for _, errs := range errs {
-		for _, err := range errs {
-			txId, address, ixIdx := "", "", int32(0)
-			var (
-				kind db.ErrType
-				data []byte
-			)
+	///////////////////
+	// insert preprocess errors
+	insertErrorsBatch := pgx.Batch{}
+	for _, preprocessErrs := range solCtx.preprocessErrors {
+		for _, preprocessErr := range preprocessErrs {
+			dataSerialized, err := json.Marshal(preprocessErr.Data)
+			assert.NoErr(err, "unable to marshal preprocess error data")
 
-			switch e := err.(type) {
-			case *errAccountMissing:
-				txId, address = e.txId, e.address
-				ixIdx = int32(e.ixIdx)
-				kind = db.ErrTypeAccountMissing
-			case *errAccountBalanceMismatch:
-				txId, address = e.txId, e.address
-				ixIdx = int32(e.ixIdx)
-				kind = db.ErrTypeAccountBalanceMismatch
-
-				var mErr error
-				data, mErr = json.Marshal(db.ErrAccountBalanceMismatch{
-					Expected: e.expected,
-					Had:      e.had,
-				})
-				assert.NoErr(mErr, "unable to serialize ErrAccountBalanceMismatch")
-			}
-
-			q := db.EnqueueInsertErr(
-				&batch,
+			insertErrorsBatch.Queue(
+				db.InsertParserError,
 				userAccountId,
-				txId,
-				pgtype.Int4{Int32: ixIdx, Valid: true},
-				errPos,
+				preprocessErr.TxId,
+				preprocessErr.IxIdx,
 				db.ErrOriginPreprocess,
-				kind,
-				address,
-				data,
+				preprocessErr.Type,
+				dataSerialized,
 			)
-			q.Exec(func(_ pgconn.CommandTag) error { return nil })
-			errPos += 1
 		}
 	}
-
-	br := pool.SendBatch(ctx, &batch)
+	br := pool.SendBatch(ctx, &insertErrorsBatch)
 	err = br.Close()
-	assert.NoErr(err, "unable to insert errors")
+	assert.NoErr(err, "unable to insert preprocess errors")
 
 	///////////////////
 	// process txs
@@ -284,24 +360,18 @@ func Parse(
 
 		switch txData := tx.Data.(type) {
 		case *db.SolanaTransactionData:
-			solanaCtx := solanaContext{
-				wallets:        solanaWallets,
-				accounts:       solanaAccounts,
-				parserErrors:   errs,
-				txId:           tx.Id,
-				slot:           txData.Slot,
-				timestamp:      tx.Timestamp,
-				tokensDecimals: txData.TokenDecimals,
-			}
+			solCtx.txId = tx.Id
+			solCtx.timestamp = tx.Timestamp
+			solCtx.slot = txData.Slot
+			solCtx.tokensDecimals = txData.TokenDecimals
 
 			for ixIdx, ix := range txData.Instructions {
-				solanaCtx.ixIdx = uint32(ixIdx)
-				solProcessIx(&events, &solanaCtx, ix)
+				solCtx.ixIdx = uint32(ixIdx)
+				solProcessIx(&events, &solCtx, ix)
 			}
 		case *db.EvmTransactionData:
 			ctx, ok := evmContexts[tx.Network]
-			assert.True(ok, "missing evm context for: %s", tx.Network.String())
-
+			assert.True(ok, "missing evm context %s", tx.Network.String())
 			ctx.timestamp = tx.Timestamp
 			ctx.txId = tx.Id
 
@@ -329,9 +399,9 @@ func Parse(
 			continue
 		}
 
-		if tokenSource != tokenSourceCoingecko &&
-			tokenSource > uint16(db.NetworkEvmStart) {
-
+		isEvm := tokenSource != tokenSourceCoingecko &&
+			tokenSource > uint16(db.NetworkEvmStart)
+		if isEvm {
 			tokens := tokensByNetwork[db.Network(tokenSource)]
 			if len(tokens) == 0 || !slices.Contains(tokens, token) {
 				tokens = append(tokens, token)
@@ -359,7 +429,8 @@ func Parse(
 		}
 
 		results := queryBatchUntilAllSuccessful(evmClient, network, requests)
-		ctx := evmContexts[network]
+		ctx, ok := evmContexts[network]
+		assert.True(ok, "missing evm ctx %s", network.String())
 
 		for i, result := range results {
 			valueEncoded, ok := result.Data.(string)
@@ -387,6 +458,7 @@ func Parse(
 		eventIdx    int
 	}
 	tokenPricesToFetch := make([]tokenPriceToFetch, 0)
+	priceErrors := make([]*db.ParserError, 0)
 
 	for eventIdx, event := range events {
 		var token string
@@ -420,7 +492,13 @@ func Parse(
 				var cid, priceStr string
 				err := row.Scan(&cid, &priceStr)
 				if errors.Is(err, pgx.ErrNoRows) {
-					// NOTE: Coingecko does not have the token data
+					appendMissingPriceError(
+						&priceErrors,
+						event.TxId,
+						uint32(event.IxIdx),
+						token,
+						roundedTimestamp,
+					)
 					return nil
 				} else {
 					assert.NoErr(
@@ -450,15 +528,15 @@ func Parse(
 			})
 		} else {
 			if tokenSource > uint16(db.NetworkEvmStart) {
-				tokenNetwork := db.Network(tokenSource)
-				evmCtx, ok := evmContexts[tokenNetwork]
-				assert.True(ok, "missing evm context for %s", tokenNetwork.String())
+				n := db.Network(tokenSource)
+				evmCtx, ok := evmContexts[n]
+				assert.True(ok, "missing evm context %s", n.String())
 
 				decimals, ok := evmCtx.decimals[token]
 				assert.True(
 					ok,
-					"missing decimals for evm %s token: %s",
-					tokenNetwork.String(), token,
+					"missing decimals for evm %d token: %s",
+					tokenSource, token,
 				)
 
 				event.Data.SetAmountDecimals(decimals)
@@ -474,8 +552,13 @@ func Parse(
 				var coingeckoId, priceStr string
 				err := row.Scan(&coingeckoId, &priceStr)
 				if errors.Is(err, pgx.ErrNoRows) {
-					// TODO: Error
-					// NOTE: coingecko does not have the token data
+					appendMissingPriceError(
+						&priceErrors,
+						event.TxId,
+						uint32(event.IxIdx),
+						token,
+						roundedTimestamp,
+					)
 					return nil
 				} else {
 					assert.NoErr(err, fmt.Sprintf("unable to scan pricepoint: %s", token))
@@ -528,13 +611,19 @@ func Parse(
 			if len(coingeckoPrices) > 0 {
 				insertPricesBatch := pgx.Batch{}
 				for _, p := range coingeckoPrices {
-					q := db.EnqueueInsertPricepoint(
-						&insertPricesBatch,
+					const insertPricepoint = `
+						insert into pricepoint (
+							price, timestamp, coingecko_id
+						) values (
+							$1, $2, $3
+						) on conflict (timestamp, coingecko_id) do nothing
+					`
+					insertPricesBatch.Queue(
+						insertPricepoint,
 						p.Close,
 						p.Timestamp,
 						token.coingeckoId,
 					)
-					q.Exec(func(ct pgconn.CommandTag) error { return nil })
 
 					id := coingeckoTokenPriceId{token.coingeckoId, p.Timestamp.Unix()}
 					coingeckoTokensPrices[id] = p.Close
@@ -547,6 +636,15 @@ func Parse(
 					logger.Info("Fetched pricepoint from coingecko: %s %s", token.coingeckoId, ts)
 					price, ok = p.Close, true
 				}
+			} else {
+				event := events[token.eventIdx]
+				appendMissingPriceError(
+					&priceErrors,
+					event.TxId,
+					uint32(event.IxIdx),
+					token.coingeckoId,
+					ts,
+				)
 			}
 		} else {
 			logger.Info("Found pricepoint in coingecko prices: %s %s", token.coingeckoId, ts)
@@ -555,6 +653,28 @@ func Parse(
 		event := events[token.eventIdx]
 		event.Data.SetPrice(price)
 	}
+
+	insertErrorsBatch = pgx.Batch{}
+	for _, priceError := range priceErrors {
+		dataSerialized, err := json.Marshal(priceError.Data)
+		assert.NoErr(err, "unable to marshal data")
+		insertErrorsBatch.Queue(
+			db.InsertParserError,
+			userAccountId,
+			priceError.TxId,
+			priceError.IxIdx,
+			db.ErrOriginProcess,
+			priceError.Type,
+			dataSerialized,
+		)
+	}
+
+	br = pool.SendBatch(ctx, &insertErrorsBatch)
+	err = br.Close()
+	assert.NoErr(err, "unable to insert price errors")
+
+	///////////////
+	// process events
 
 	inv := inventory{
 		accounts: make(map[inventoryAccountId][]*inventoryAccount),

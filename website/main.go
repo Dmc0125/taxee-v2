@@ -84,6 +84,10 @@ func renderError(r http.ResponseWriter, statusCode int, msg string, args ...any)
 	r.Write(fmt.Appendf(nil, msg, args...))
 }
 
+func shorten(s string, start, end int) string {
+	return fmt.Sprintf("%s...%s", s[:start], s[len(s)-end:])
+}
+
 func main() {
 	appEnv := os.Getenv("APP_ENV")
 	prod := true
@@ -102,9 +106,7 @@ func main() {
 		"upper": func(s string) string {
 			return strings.ToUpper(s)
 		},
-		"shorten": func(s string, start, end int) string {
-			return fmt.Sprintf("%s...%s", s[:start], s[len(s)-end:])
-		},
+		"shorten": shorten,
 		"toTitle": func(s string) string {
 			const toLower = 32
 			t := strings.Builder{}

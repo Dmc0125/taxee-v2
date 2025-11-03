@@ -8,6 +8,8 @@ import (
 	"taxee/pkg/assert"
 	"taxee/pkg/db"
 	"time"
+
+	"github.com/shopspring/decimal"
 )
 
 type relatedAccounts interface {
@@ -29,65 +31,6 @@ func RelatedAccountsFromTx(
 			solSquadsV4IxRelatedAccounts(relatedAccounts, walletAddress, ix)
 		}
 	}
-}
-
-type errAccountMissing struct {
-	txId    string
-	ixIdx   uint32
-	address string
-}
-
-func newErrAccountMissing(ctx *solanaContext, address string) errAccountMissing {
-	return errAccountMissing{
-		txId:    ctx.txId,
-		ixIdx:   ctx.ixIdx,
-		address: address,
-	}
-}
-
-func (err1 *errAccountMissing) IsEq(err2 parserError) bool {
-	e2, ok := err2.(*errAccountMissing)
-	if !ok {
-		return false
-	}
-	return e2.address == err1.address
-}
-
-func (err *errAccountMissing) Address() string {
-	return err.address
-}
-
-type errAccountBalanceMismatch struct {
-	*errAccountMissing
-	expected uint64
-	had      uint64
-}
-
-func newErrAccountBalanceMismatch(
-	ctx *solanaContext,
-	address string,
-	expected, had uint64,
-) errAccountBalanceMismatch {
-	e := newErrAccountMissing(ctx, address)
-	return errAccountBalanceMismatch{
-		errAccountMissing: &e,
-		expected:          expected,
-		had:               had,
-	}
-}
-
-func (err1 *errAccountBalanceMismatch) IsEq(err2 parserError) bool {
-	e2, ok := err2.(*errAccountBalanceMismatch)
-	if !ok {
-		return false
-	}
-	return err1.address == e2.address &&
-		err1.expected == e2.expected &&
-		err1.had == e2.had
-}
-
-func (err *errAccountBalanceMismatch) Address() string {
-	return err.address
 }
 
 type accountLifetime struct {
@@ -126,8 +69,11 @@ func (acc *accountLifetime) open(slot uint64, ixIdx uint32) bool {
 type solanaContext struct {
 	wallets  []string
 	accounts map[string][]accountLifetime
-	parserErrors
 
+	preprocessErrors map[string][]*db.ParserError
+	processErrors    map[string][]*db.ParserError
+
+	// volatile for each tx/ix
 	txId           string
 	slot           uint64
 	timestamp      time.Time
@@ -166,18 +112,50 @@ func (ctx *solanaContext) receiveSol(address string, amount uint64) {
 	ctx.accounts[address] = lifetimes
 }
 
+func solNewErrMissingAccount(ctx *solanaContext, address string) *db.ParserError {
+	e := db.ParserError{
+		TxId:  ctx.txId,
+		IxIdx: ctx.ixIdx,
+		Type:  db.ParserErrorTypeMissingAccount,
+		Data: &db.ParserErrorMissingAccount{
+			AccountAddress: address,
+		},
+	}
+	return &e
+}
+
+func solNewErrAccountBalanceMismatch(
+	ctx *solanaContext,
+	address, token string,
+	expected, had decimal.Decimal,
+) *db.ParserError {
+	d := db.ParserErrorAccountBalanceMismatch{
+		AccountAddress: address,
+		Token:          token,
+		Expected:       expected,
+		Had:            had,
+	}
+
+	return &db.ParserError{
+		TxId:  ctx.txId,
+		IxIdx: ctx.ixIdx,
+		Type:  db.ParserErrorTypeAccountBalanceMismatch,
+		Data:  d,
+	}
+}
+
 func (ctx *solanaContext) init(address string, owned bool, data any) {
 	lifetimes, ok := ctx.accounts[address]
 	if !ok || len(lifetimes) == 0 {
-		err := newErrAccountMissing(ctx, address)
-		ctx.appendErr(&err)
+		err := solNewErrMissingAccount(ctx, address)
+		appendErrUnique(ctx.preprocessErrors, err)
 		return
 	}
 
 	acc := &lifetimes[len(lifetimes)-1]
 	if !acc.PreparseOpen {
-		err := newErrAccountBalanceMismatch(ctx, address, 0, 0)
-		ctx.appendErr(&err)
+		err := solNewErrMissingAccount(ctx, address)
+		appendErrUnique(ctx.preprocessErrors, err)
 		return
 	}
 
@@ -189,15 +167,15 @@ func (ctx *solanaContext) init(address string, owned bool, data any) {
 func (ctx *solanaContext) close(closedAddress, receiverAddress string) {
 	lifetimes, ok := ctx.accounts[closedAddress]
 	if !ok || len(lifetimes) == 0 {
-		err := newErrAccountMissing(ctx, closedAddress)
-		ctx.appendErr(&err)
+		err := solNewErrMissingAccount(ctx, closedAddress)
+		appendErrUnique(ctx.preprocessErrors, err)
 		return
 	}
 
 	acc := &lifetimes[len(lifetimes)-1]
 	if !acc.PreparseOpen {
-		err := newErrAccountBalanceMismatch(ctx, closedAddress, 0, 0)
-		ctx.appendErr(&err)
+		err := solNewErrMissingAccount(ctx, closedAddress)
+		appendErrUnique(ctx.preprocessErrors, err)
 		return
 	}
 
@@ -283,25 +261,12 @@ func solPreprocessIx(ctx *solanaContext, ix *db.SolanaInstruction) {
 }
 
 func solPreprocessTx(
-	errors parserErrors,
-	solanaAccounts map[string][]accountLifetime,
-	wallets []string,
-	txId string,
-	txData *db.SolanaTransactionData,
+	ctx *solanaContext,
+	ixs []*db.SolanaInstruction,
 ) {
-	ctx := solanaContext{
-		wallets:      wallets,
-		accounts:     solanaAccounts,
-		parserErrors: errors,
-
-		txId:           txId,
-		slot:           txData.Slot,
-		tokensDecimals: txData.TokenDecimals,
-	}
-
-	for ixIdx, ix := range txData.Instructions {
+	for ixIdx, ix := range ixs {
 		ctx.ixIdx = uint32(ixIdx)
-		solPreprocessIx(&ctx, ix)
+		solPreprocessIx(ctx, ix)
 	}
 
 	// TODO: Validate balances
@@ -324,10 +289,9 @@ func (iter *solInnerIxIterator) next() *db.SolanaInnerInstruction {
 
 // NOTE: implemented based on
 // https://github.com/solana-foundation/anchor/blob/master/lang/syn/src/codegen/accounts/constraints.rs#L1036
-func solProcessAnchorInitAccount(
-	ctx *solanaContext,
+func solAnchorInitAccountValidate(
 	innerIxs *solInnerIxIterator,
-) (event *db.Event, ok bool, err error) {
+) (from, to string, amount uint64, err error) {
 	if !innerIxs.hasNext() {
 		err = errors.New("invalid anchor init ix: missing inner ixs")
 		return
@@ -362,19 +326,33 @@ func solProcessAnchorInitAccount(
 		assert.True(false, "invalid anchor init ix: %d", ixType)
 	}
 
-	from, to, amount, ok := solParseSystemIxSolTransfer(
+	from, to, amount, ok = solParseSystemIxSolTransfer(
 		ixType,
 		firstIx.Accounts,
 		firstIx.Data,
 	)
 	assert.True(ok, "invalid anchor init ix")
 
-	fromInternal, toInternal := ctx.walletOwned(from), ctx.walletOwned(to)
-	if !fromInternal && !toInternal {
-		return
+	return
+}
+
+// NOTE: implemented based on
+// https://github.com/solana-foundation/anchor/blob/master/lang/syn/src/codegen/accounts/constraints.rs#L1036
+func solProcessAnchorInitAccount(
+	ctx *solanaContext,
+	innerIxs *solInnerIxIterator,
+) (*db.Event, bool, error) {
+	from, to, amount, err := solAnchorInitAccountValidate(innerIxs)
+	if err != nil {
+		return nil, false, err
 	}
 
-	event = solNewEvent(ctx)
+	fromInternal, toInternal := ctx.walletOwned(from), ctx.walletOwned(to)
+	if !fromInternal && !toInternal {
+		return nil, false, nil
+	}
+
+	event := solNewEvent(ctx)
 	setEventTransfer(
 		event,
 		from, to,
@@ -383,7 +361,8 @@ func solProcessAnchorInitAccount(
 		SOL_MINT_ADDRESS,
 		uint16(db.NetworkSolana),
 	)
-	return
+
+	return event, true, nil
 }
 
 func solProcessIx(

@@ -152,7 +152,6 @@ func evmIdentifyContracts(
 	proxyContractsMemorySlots := make(map[contractId][32]byte)
 	logicContractsAddresses := make([]string, 0)
 	proxiesToLogicContractsAddresses := make(map[contractId]string)
-	// erc20TokensDecimals := make(map[string]uint8)
 
 	for i, bytecodeResult := range bytecodesResult {
 		assert.True(bytecodeResult.Error == nil, "")
@@ -183,7 +182,6 @@ func evmIdentifyContracts(
 		}
 
 		if logicContractAddressBytes, ok := evmIdentifyEip1167ProxyContract(bytecode); ok {
-			// TODO: this can only be one, so set block to static value
 			logicContractAddress := fmt.Sprintf(
 				"0x%s",
 				hex.EncodeToString(logicContractAddressBytes[:]),

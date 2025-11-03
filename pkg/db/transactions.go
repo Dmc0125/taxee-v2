@@ -9,7 +9,6 @@ import (
 	rpcsolana "taxee/cmd/fetcher/solana"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
@@ -53,6 +52,8 @@ const (
 	NetworkArbitrum
 	NetworkBsc
 	NetworkAvaxC
+
+	NetworksCount
 )
 
 func NewNetwork(n string) (valid Network, ok bool) {
@@ -352,49 +353,4 @@ func GetTransactions(
 	}
 
 	return res, nil
-}
-
-type ErrOrigin string
-
-const (
-	ErrOriginPreprocess ErrOrigin = "preparse"
-	ErrOriginParse      ErrOrigin = "parse"
-)
-
-type ErrType string
-
-const (
-	ErrTypeAccountMissing         ErrType = "account_missing"
-	ErrTypeAccountBalanceMismatch ErrType = "account_balance_mismatch"
-)
-
-type ErrAccountBalanceMismatch struct {
-	Expected uint64 `json:"expected"`
-	Had      uint64 `json:"had"`
-}
-
-func EnqueueInsertErr(
-	batch *pgx.Batch,
-	userAccountId int32,
-	txId string,
-	ixIdx pgtype.Int4,
-	idx int32,
-	origin ErrOrigin,
-	kind ErrType,
-	address string,
-	data []byte,
-) *pgx.QueuedQuery {
-	const query = `
-		insert into err (
-			user_account_id, tx_id, ix_idx, idx, origin,
-			type, address, data
-		) values (
-			$1, $2, $3, $4, $5, $6, $7, $8
-		)
-	`
-	return batch.Queue(
-		query,
-		userAccountId, txId, ixIdx, idx, origin,
-		kind, address, data,
-	)
 }
