@@ -2,9 +2,11 @@ package parser
 
 import (
 	"encoding/binary"
+	"taxee/cmd/fetcher/solana"
 	"taxee/pkg/db"
 
 	"github.com/mr-tron/base58"
+	"github.com/shopspring/decimal"
 )
 
 const SOL_TOKEN_PROGRAM_ADDRESS = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
@@ -176,6 +178,9 @@ func solTokenProcessTransfer(
 		direction, tokenAccount = db.EventTransferIncoming, to
 	default:
 		return
+	case fromAccount != nil && toAccount != nil:
+	case fromAccount != nil:
+	case toAccount != nil:
 	}
 
 	decimals := solDecimalsMust(ctx, tokenAccountData.Mint)
@@ -187,6 +192,33 @@ func solTokenProcessTransfer(
 		Token:       tokenAccountData.Mint,
 		Amount:      newDecimalFromRawAmount(amount, decimals),
 		TokenSource: uint16(db.NetworkSolana),
+	}
+
+	return
+}
+
+func solParseTokenIxTokenTransfer(
+	ixType solTokenIx,
+	accounts []string,
+	data []byte,
+) (from, to string, amount uint64, ok bool) {
+	ok = true
+
+	switch ixType {
+	case solTokenIxMint, solTokenIxMintChecked:
+		to = accounts[1]
+		amount = binary.LittleEndian.Uint64(data[1:])
+	case solTokenIxBurn, solTokenIxBurnChecked:
+		from = accounts[0]
+		amount = binary.LittleEndian.Uint64(data[1:])
+	case solTokenIxTransferChecked:
+		from, to = accounts[0], accounts[2]
+		amount = binary.LittleEndian.Uint64(data[1:])
+	case solTokenIxTransfer:
+		from, to = accounts[0], accounts[1]
+		amount = binary.LittleEndian.Uint64(data[1:])
+	default:
+		ok = false
 	}
 
 	return

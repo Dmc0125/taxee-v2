@@ -19,6 +19,13 @@ import (
 // TODO:
 //
 // Pagination - first page, last page
+// Querying by
+// 	- time (default, event id)
+//  - tx id
+// 	- network
+// 	- time range
+// 	- event type
+// 	- profit, incoming, outgoing, amount
 // Image urls
 // Symbols seem to not be working correcly
 // Missing prices should display coingecko token names, symbols and id
