@@ -88,6 +88,44 @@ func shorten(s string, start, end int) string {
 	return fmt.Sprintf("%s...%s", s[:start], s[len(s)-end:])
 }
 
+func toTitle(s string) string {
+	if len(s) == 0 {
+		return s
+	}
+	const toLower = 32
+	t := strings.Builder{}
+
+	isLower := func(c byte) bool {
+		return (c >= 97 && c <= 122)
+	}
+
+	if isLower(s[0]) {
+		t.WriteByte(s[0] - toLower)
+	} else {
+		t.WriteByte(s[0])
+	}
+
+	isAlpha := func(c byte) bool {
+		return isLower(c) || 65 <= c && c <= 90
+	}
+
+	for i := 1; i < len(s); i += 1 {
+		prev := s[i-1]
+		c := s[i]
+
+		switch {
+		case c == 95:
+			t.WriteByte(32)
+		case !isAlpha(prev) && isLower(c):
+			t.WriteByte(c - toLower)
+		default:
+			t.WriteByte(c)
+		}
+	}
+
+	return t.String()
+}
+
 func main() {
 	appEnv := os.Getenv("APP_ENV")
 	prod := true
@@ -107,40 +145,7 @@ func main() {
 			return strings.ToUpper(s)
 		},
 		"shorten": shorten,
-		"toTitle": func(s string) string {
-			const toLower = 32
-			t := strings.Builder{}
-
-			isLower := func(c byte) bool {
-				return (c >= 97 && c <= 122)
-			}
-
-			if isLower(s[0]) {
-				t.WriteByte(s[0] - toLower)
-			} else {
-				t.WriteByte(s[0])
-			}
-
-			isAlpha := func(c byte) bool {
-				return isLower(c) || 65 <= c && c <= 90
-			}
-
-			for i := 1; i < len(s); i += 1 {
-				prev := s[i-1]
-				c := s[i]
-
-				switch {
-				case c == 95:
-					t.WriteByte(32)
-				case !isAlpha(prev) && isLower(c):
-					t.WriteByte(c - toLower)
-				default:
-					t.WriteByte(c)
-				}
-			}
-
-			return t.String()
-		},
+		"toTitle": toTitle,
 	}
 	var templates *template.Template = template.New("root").Funcs(templateFuncs)
 	loadTemplate(templates, pageLayoutComponent)

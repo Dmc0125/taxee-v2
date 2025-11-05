@@ -79,6 +79,8 @@ type solanaContext struct {
 	timestamp      time.Time
 	ixIdx          uint32
 	tokensDecimals map[string]uint8
+	nativeBalances map[string]*db.SolanaNativeBalance
+	tokenBalances  map[string]*db.SolanaTokenBalances
 }
 
 func (ctx *solanaContext) walletOwned(other string) bool {
@@ -133,7 +135,7 @@ func solNewErrAccountBalanceMismatch(
 		AccountAddress: address,
 		Token:          token,
 		Expected:       expected,
-		Had:            had,
+		Real:           had,
 	}
 
 	return &db.ParserError{
@@ -148,14 +150,14 @@ func (ctx *solanaContext) init(address string, owned bool, data any) {
 	lifetimes, ok := ctx.accounts[address]
 	if !ok || len(lifetimes) == 0 {
 		err := solNewErrMissingAccount(ctx, address)
-		appendErrUnique(ctx.preprocessErrors, err)
+		appendErrUnique(ctx.preprocessErrors, err, address)
 		return
 	}
 
 	acc := &lifetimes[len(lifetimes)-1]
 	if !acc.PreparseOpen {
 		err := solNewErrMissingAccount(ctx, address)
-		appendErrUnique(ctx.preprocessErrors, err)
+		appendErrUnique(ctx.preprocessErrors, err, address)
 		return
 	}
 
@@ -168,14 +170,14 @@ func (ctx *solanaContext) close(closedAddress, receiverAddress string) {
 	lifetimes, ok := ctx.accounts[closedAddress]
 	if !ok || len(lifetimes) == 0 {
 		err := solNewErrMissingAccount(ctx, closedAddress)
-		appendErrUnique(ctx.preprocessErrors, err)
+		appendErrUnique(ctx.preprocessErrors, err, closedAddress)
 		return
 	}
 
 	acc := &lifetimes[len(lifetimes)-1]
 	if !acc.PreparseOpen {
 		err := solNewErrMissingAccount(ctx, closedAddress)
-		appendErrUnique(ctx.preprocessErrors, err)
+		appendErrUnique(ctx.preprocessErrors, err, closedAddress)
 		return
 	}
 
@@ -235,6 +237,7 @@ func solNewEvent(ctx *solanaContext) *db.Event {
 	}
 }
 
+// TODO: instead of assert, create an error
 func solAccountDataMust[T any](account *accountLifetime) *T {
 	data, ok := account.Data.(*T)
 	assert.True(ok, "invalid account data: %T", account.Data)
@@ -269,7 +272,80 @@ func solPreprocessTx(
 		solPreprocessIx(ctx, ix)
 	}
 
-	// TODO: Validate balances
+	// NOTE: can only validate native balances, since we only keep track of those
+nativeBalancesLoop:
+	for address, nativeBalance := range ctx.nativeBalances {
+		accountLifetimes, accountExists := ctx.accounts[address]
+		tokens, isTokenAccount := ctx.tokenBalances[address]
+		if isTokenAccount && ctx.walletOwned(tokens.Owner) {
+			// NOTE: account has to exist if it is owned and it is opened
+			// token account
+			if !accountExists && nativeBalance.Post > 0 {
+				err := solNewErrMissingAccount(ctx, address)
+				appendErrUnique(ctx.preprocessErrors, err, address)
+				continue
+			}
+		}
+
+		// NOTE: accounts can be created/closed multiple times during single tx
+		// so it's only possible to validate the balance of the last one that
+		// is opened
+		for i := len(accountLifetimes) - 1; i >= 0; i -= 1 {
+			lt := accountLifetimes[i]
+			if lt.PreparseOpen && lt.Owned {
+				if nativeBalance.Post != lt.Balance {
+					expected := newDecimalFromRawAmount(nativeBalance.Post, 9)
+					had := newDecimalFromRawAmount(lt.Balance, 9)
+					err := solNewErrAccountBalanceMismatch(
+						ctx,
+						address, SOL_MINT_ADDRESS,
+						expected, had,
+					)
+					appendErrUnique(ctx.preprocessErrors, err, address)
+				}
+
+				if isTokenAccount {
+					data, ok := lt.Data.(*SolTokenAccountData)
+					if !ok {
+						parserErr := &db.ParserError{
+							TxId:  ctx.txId,
+							IxIdx: ctx.ixIdx,
+							Type:  db.ParserErrorTypeAccountDataMismatch,
+							Data: &db.ParserErrorAccountDataMismatch{
+								AccountAddress: address,
+								Message:        "Not a token account",
+							},
+						}
+						appendErrUnique(ctx.preprocessErrors, parserErr, address)
+						continue nativeBalancesLoop
+					}
+
+					found := false
+					for _, t := range tokens.Tokens {
+						if t.Token == data.Mint {
+							found = true
+							break
+						}
+					}
+					if !found {
+						parserErr := &db.ParserError{
+							TxId:  ctx.txId,
+							IxIdx: ctx.ixIdx,
+							Type:  db.ParserErrorTypeAccountDataMismatch,
+							Data: &db.ParserErrorAccountDataMismatch{
+								AccountAddress: address,
+								Message:        "Invalid token account mint",
+							},
+						}
+						appendErrUnique(ctx.preprocessErrors, parserErr, address)
+						continue nativeBalancesLoop
+					}
+				}
+
+				continue nativeBalancesLoop
+			}
+		}
+	}
 }
 
 type solInnerIxIterator struct {
@@ -355,6 +431,7 @@ func solProcessAnchorInitAccount(
 	event := solNewEvent(ctx)
 	setEventTransfer(
 		event,
+		from, to,
 		from, to,
 		fromInternal, toInternal,
 		newDecimalFromRawAmount(amount, 9),

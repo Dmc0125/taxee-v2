@@ -2,9 +2,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
+	"math"
 	"net/http"
 	"strconv"
 	"taxee/pkg/assert"
@@ -16,453 +17,245 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// TODO:
-//
-// Pagination - first page, last page
-// Querying by
-// 	- time (default, event id)
-//  - tx id
-// 	- network
-// 	- time range
-// 	- event type
-// 	- profit, incoming, outgoing, amount
-// Image urls
-// Symbols seem to not be working correcly
-// Missing prices should display coingecko token names, symbols and id
-// Amount rounding - >0.01 / 5.44e3 ??
-// Eplorer urls for each network
-// Programs images
-
-var eventsGroupHeaderComponent = `<!-- html -->
-{{ define "events_group_header" }}
-<li class="
-	w-full rounded-md bg-gray-200 px-4 mt-4 h-8 bg-crossed
-	flex items-center
-">
-	<p>{{ formatDate . }}</p>
-</li>
-{{ end }}
-`
-
-type amountComponentData struct {
-	Symbol   string
-	Amount   string
-	ImageUrl string
+type networkGlobals struct {
+	explorerUrl string
+	imgUrl      string
 }
 
-var amountComponent = `<!-- html -->
-{{ define "amount" }}
-<div class="flex gap-x-1">
-	{{ if .Amount }}
-		<p>{{ .Amount }}</p>
-		<p>{{ upper .Symbol }}</p>
-	{{ else }}
-		<p>-</p>
-	{{ end }}
+var networksGlobals = map[db.Network]networkGlobals{
+	db.NetworkSolana: {
+		explorerUrl: "https://solscan.io",
+		imgUrl:      "/static/logo_solana.svg",
+	},
+	db.NetworkArbitrum: {
+		explorerUrl: "https://arbiscan.io",
+		imgUrl:      "/static/logo_arbitrum.svg",
+	},
+}
+
+type eventTableRow struct {
+	Type  uint8
+	Date  time.Time
+	Event eventComponentData
+}
+
+const eventsPage = `<!-- html -->
+{{ define "events_page" }}
+<div class="w-[80%] mx-auto mt-10">
+	<header class="w-full">
+		<h1 class="font-semibold text-2xl">Events</h1>
+	</header>
+
+	<ul class="w-full mt-10 flex flex-col gap-y-4 relative">
+		<!-- header -->
+		<li class="
+			w-full py-2 pl-4 sticky z-1000 top-2
+			grid grid-cols-[150px_1fr]
+			bg-gray-50 border border-gray-200 rounded-lg text-gray-800
+		">
+			<span>Date</span>
+			<div class="w-full px-4 grid grid-cols-[300px_repeat(2,450px)_1fr]">
+				<span>App</span>
+				<div class="flex">
+					<span class="w-1/2">Outgoing</span>
+					<span>Disposal</span>
+				</div>
+				<div class="flex">
+					<span class="w-1/2">Incoming</span>
+					<span>Acquisition</span>
+				</div>
+				<span>Profit</span>
+			</div>
+		</li>
+
+		{{ range . }}
+			{{ if eq .Type 0 }}
+				{{ template "group_divider_component" .Date }}
+			{{ else if eq .Type 1 }}
+				{{ template "event_component" .Event }}
+			{{ end }}
+		{{ end }}
+	</ul>
 </div>
 {{ end }}
 `
 
-type parserErrorComponentData struct {
-	Title string
-	Type  db.ParserErrorType
-
-	Address  string
-	Expected string
-	Had      string
-
-	Token string
-}
-
-func newParserErrorComponentData(parserError *parserError) parserErrorComponentData {
-	var d parserErrorComponentData
-	d.Type = parserError.Type
-
-	switch parserError.Type {
-	case db.ParserErrorTypeMissingAccount:
-		d.Title = "Missing account"
-
-		data, ok := parserError.Data.(*db.ParserErrorMissingAccount)
-		assert.True(ok, "invalid parser error data: %T", parserError.Data)
-		d.Address = data.AccountAddress
-	case db.ParserErrorTypeAccountBalanceMismatch:
-		d.Title = "Balance mismatch"
-
-		data, ok := parserError.Data.(*db.ParserErrorAccountBalanceMismatch)
-		assert.True(ok, "invalid parser error data: %T", parserError.Data)
-		d.Address = data.AccountAddress
-		d.Expected = data.Expected.String()
-		d.Had = data.Had.String()
-	case db.ParserErrorTypeInsufficientBalance:
-	case db.ParserErrorTypeMissingPrice:
-		d.Title = "Missing price"
-
-		data, ok := parserError.Data.(*db.ParserErrorMissingPrice)
-		assert.True(ok, "invalid parser error data: %T", parserError.Data)
-		d.Token = data.Token
-	default:
-		assert.True(false, "invalid parser error type: %d", parserError.Type)
-	}
-
-	fmt.Println(parserErrorComponent)
-
-	return d
-}
-
-var parserErrorComponent = fmt.Sprintf(
-	`<!-- html -->
-	{{ define "parser_error" }}
-	<li class="p-2 rounded-sm flex flex-col bg-red-100">
-		<span class="font-medium text-sm text-gray-800">
-			{{ .Title }}
-		</span>
-		{{ if eq .Type %d }}
-			<span class="text-sm text-gray-800">
-				{{ .Address }}
-			</span>
-		{{ else if eq .Type %d }}
-		{{ else if eq .Type %d }}
-			<span class="text-sm text-gray-800">
-				{{ .Token }}
-			</span>
-		{{ end }}
-	</li>
-	{{ end }}
-	`,
-	db.ParserErrorTypeMissingAccount,
-	db.ParserErrorTypeAccountBalanceMismatch,
-	db.ParserErrorTypeMissingPrice,
-)
+const groupDividerComponent = `<!-- html -->
+{{ define "group_divider_component" }}
+<li class="w-full py-1 px-4 bg-crossed rounded-lg">
+	<span class="text-sm text-gray-800">{{ formatDate . }}</span>
+</li>
+{{ end }}
+`
 
 type eventComponentData struct {
 	TxId          string
-	App           string
-	MethodType    string
-	Timestamp     time.Time
 	ExplorerUrl   string
+	Timestamp     time.Time
 	NetworkImgUrl string
 
-	DisposalsAmounts    template.HTML
-	DisposalsValues     template.HTML
-	AcquisitionsAmounts template.HTML
-	AcquisitionsValues  template.HTML
-	Gain                template.HTML
+	EventType string
+	Method    string
 
-	PreprocessErrors []*parserErrorComponentData
-	ProcessErrors    []*parserErrorComponentData
-	PriceErrors      []*parserErrorComponentData
+	OutgoingTransfers *eventTransfersComponentData
+	IncomingTransfers *eventTransfersComponentData
+	Profits           []*eventFiatAmountComponentData
 }
 
-type networkUrls struct {
-	explorer string
-	img      string
-}
-
-var networksUrls = map[db.Network]networkUrls{
-	db.NetworkSolana: {
-		explorer: "solscan.io",
-		img:      "https://solana.com/src/img/branding/solanaLogoMark.svg",
-	},
-	db.NetworkArbitrum: {
-		explorer: "arbiscan.io",
-		img:      "https://file.notion.so/f/f/80206c3c-8bc5-49a2-b0cd-756884a06880/03db2a62-e8b5-4ec0-9d9d-e044010606c6/0923_Arbitrum_Logos_Logomark_RGB.svg?table=block&id=4b82f11a-85c1-4775-a4f1-904d43798391&spaceId=80206c3c-8bc5-49a2-b0cd-756884a06880&expirationTimestamp=1762228800000&signature=jT8E7tBzukmQgLg1cqtASkdQ7zZ5i-Ntmtnkky-ggUA&downloadName=Primary_Logomark_RGB.svg",
-	},
-}
-
-var eventComponent = `<!-- html -->
-{{define "event"}}
-<li class="
-	mt-4 w-full 
-	flex items-stretch
-">
-	<div class="pl-4 w-[180px] flex flex-col flex-shrink-0">
-		<a href="{{ .ExplorerUrl }}" target="_blank">
-			{{ shorten .TxId 4 2 }}
-		</a>
-		<p class="text-sm text-gray-600">{{ formatTime .Timestamp }}</p>
+const eventComponent = `<!-- html -->
+{{ define "event_component" }}
+<li class="w-full pl-4 grid grid-cols-[150px_1fr]">
+	<!-- Timestamp + explorer -->
+	<div class="flex flex-col">
+		<a
+			href="{{ .ExplorerUrl }}"
+			target="_blank"
+			class="text-gray-800"
+		>{{ .TxId }}</a>
+		<span class="text-sm text-gray-700">{{ formatTime .Timestamp }}</span>
 	</div>
 
-	<!-- card -->
+	<!-- Event -->
 	<div class="
-		w-full h-full self-stretch
-		bg-gray-100 border border-gray-200 rounded-lg
+		w-full px-4 py-2 grid grid-cols-[300px_repeat(2,450px)_1fr]
+		border border-gray-200 rounded-lg
 	">
-		<div class="
-			p-4 grid grid-cols-[250px_repeat(4,1fr)_8%]
-			items-center
-		">
-			<div class="flex items-center h-full">
-				<div class="w-10 h-10 rounded-full bg-gray-400 relative">
-					<div class="
-						absolute w-4 h-4 top-0 left-0 rounded-full
-					">
-						<img class="w-full h-full" src="{{ .NetworkImgUrl }}" />
-					</div>
-				</div>
-				<div class="flex flex-col ml-4">
-					<h3 class="font-medium">{{ toTitle .MethodType }}</h3>
-					<p class="text-sm text-gray-600">{{ toTitle .App }}</p>
+		<!-- App img, network img, event type, onchain method -->
+		<div class="flex">
+			<div class="w-10 h-10 rounded-full bg-gray-200 relative">
+				<div class="
+					w-5 h-5 absolute top-0 left-0 
+					rounded-full bg-gray-100 border border-gray-200
+					overflow-hidden
+				">
+					<img 
+						src="{{ .NetworkImgUrl }}" 
+						class="w-full h-full p-0.25"
+					/>
 				</div>
 			</div>
 
-			<div> 
-				{{ .DisposalsAmounts }}
+			<div class="flex flex-col ml-4">
+				<span class="text-gray-800 font-medium">{{ .EventType }}</span>
+				<span class="text-gray-600 text-sm">{{ .Method }}</span>
 			</div>
-			<div> 
-				{{ .DisposalsValues }}
-			</div>
-			<div> 
-				{{ .AcquisitionsAmounts }}
-			</div>
-			<div> 
-				{{ .AcquisitionsValues }}
-			</div>
-			<div>{{ .Gain }}</div>
 		</div>
 
-		<div class="grid grid-cols-[repeat(3,1fr)] border-t border-gray-200">
-			<div class="p-4 border-r border-gray-200">
-				<p>Preprocess errors</p>
-				<ul class="mt-2 flex flex-col gap-y-2">
-					{{ range .PreprocessErrors }}
-						{{ template "parser_error" . }}
-					{{ end }}
-				</ul>
-			</div>
-			<div class="p-4 border-r border-gray-200">
-				<p>Process errors</p>
-				<ul class="mt-2 flex flex-col gap-y-2">
-					{{ range .ProcessErrors }}
-						{{ template "parser_error" . }}
-					{{ end }}
-				</ul>
-			</div>
-			<div class="p-4 border-r border-gray-200">
-				<p>Price errors</p>
-				<ul class="mt-2 flex flex-col gap-y-2">
-					{{ range .PriceErrors }}
-						{{ template "parser_error" . }}
-					{{ end }}
-				</ul>
-			</div>
+		<!-- Outgoing -->
+		{{ template "event_transfers_component" .OutgoingTransfers }}
 
-		</div>
+		<!-- Incoming -->
+		{{ template "event_transfers_component" .IncomingTransfers }}
+
+		{{ if .Profits }}
+			<div class="w-full flex flex-col gap-y-1">
+				<div class="opacity-0 h-[1em] text-sm"></div>
+				<div class="mt-1">
+					{{ range .Profits }}
+						{{ template "event_fiat_amount_component" . }}
+					{{ end }}
+				</div>
+			</div>
+		{{ else }}
+			<div class="w-full flex flex-col gap-y-1">
+				<div class="opacity-0 h-[1em] text-sm"></div>
+				<div class="mt-1">-</div>
+			</div>
+		{{ end }}
 	</div>
 </li>
-{{end}}
+{{ end }}
 `
 
-type eventsPageComponentData struct {
-	LastEventIdx int32
-	Events       template.HTML
+type eventTransfersComponentData struct {
+	Wallet string
+	Tokens []*eventTokenAmountComponentData
+	Fiats  []*eventFiatAmountComponentData
 }
 
-var eventsPageComponent = `<!-- html -->
-{{define "events_page"}}
-	<div class="mx-auto w-[80%] py-10">
-		<header class="py-10 flex items-center justify-between">
-			<h1 class="text-3xl font-semibold text-gray-900">Transactions</h1>
-
-			<div>
-				<a
-					href="?from={{ .LastEventIdx }}"
-				>
-					Next
-				</a>
-			</div>
-		</header>
-		<ul class="
-			w-full relative
-		">
-			<li class="
-					h-10 w-full px-4 z-1000
-					flex items-center
-					sticky top-2 bg-gray-50 border rounded-lg border-gray-200
-				"
-			>
-				<p class="w-[180px] flex-shrink-0">Date</p> 
-				<div class="
-					w-full
-					grid grid-cols-[250px_repeat(4,1fr)_8%]
-				">
-					<p>App</p>
-					<p>Sent</p>
-					<p>Disposal</p>
-					<p>Received</p>
-					<p>Acquisition</p>
-					<p>Gain</p>
-				</div>
-			</li>
-			{{ .Events }}
-		</ul>
+const eventTransfersComponent = `<!-- html -->
+{{ define "event_transfers_component" }}
+{{ if . }}
+<div class="w-full flex flex-col gap-y-1">
+	<div class="w-full text-sm h-[1em]">
+		<span class="text-gray-500 font-medium">{{ .Wallet }}</span>
 	</div>
-{{end}}
+
+	<div class="flex mt-1">
+		<!-- Token amounts -->
+		<div class="w-1/2">
+			{{ range .Tokens }}
+				{{ template "event_token_amount_component" . }}
+			{{ end }}
+		</div>
+
+		<!-- Fiat amounts -->
+		<div>
+			{{ range .Fiats }}
+				{{ template "event_fiat_amount_component" . }}
+			{{ end }}
+		</div>
+	</div>
+</div>
+{{ else }}
+<div class="w-full flex flex-col gap-y-1">
+	<div class="opacity-0 text-sm h-[1em]">placeholder</div>
+	<div class="mt-1">-</div>
+</div>
+{{ end }}
+{{ end }}
 `
 
-type parserError struct {
-	Origin db.ErrOrigin
-	Type   db.ParserErrorType
-	Data   any
+type eventTokenAmountComponentData struct {
+	ImgUrl string
+	Amount string
+	Symbol string
 }
 
-func (dst *parserError) UnmarshalJSON(src []byte) error {
-	type noData struct {
-		Origin db.ErrOrigin `json:"origin"`
-		Type   string       `json:"type"`
-	}
-	var nd noData
-	if err := json.Unmarshal(src, &nd); err != nil {
-		return fmt.Errorf("unable to unmarshal type and oriding: %w", err)
-	}
+// renders token img + amount + symbol
+const eventTokenAmountComponent = `<!-- html -->
+{{ define "event_token_amount_component" }}
+<div class="w-fit flex items-center gap-2">
+	<div class="w-6 h-6 flex items-center justify-center rounded-full bg-gray-200">
+		{{ if .ImgUrl }}
+			<img src="{{ .ImgUrl }}" />
+		{{ else }}
+			<span class="text-sm text-gray-600">?</span>
+		{{ end }}
+	</div>
 
-	t, err := db.NewParserErrorTypeFromString(nd.Type)
-	if err != nil {
-		return fmt.Errorf("invalid error type: %s", nd.Type)
-	}
+	<span class="text-gray-800">{{ .Amount }} {{ upper .Symbol }}</span>
+</div>
+{{ end }}
+`
 
-	dst.Origin = nd.Origin
-	dst.Type = t
-
-	type d[T any] struct {
-		Data *T `json:"data"`
-	}
-
-	switch t {
-	case db.ParserErrorTypeMissingAccount:
-		var data d[db.ParserErrorMissingAccount]
-		if err = json.Unmarshal(src, &data); err != nil {
-			return fmt.Errorf("unable to unmarshal parser error data: %w", err)
-		}
-		dst.Data = data.Data
-	case db.ParserErrorTypeAccountBalanceMismatch:
-		var data d[db.ParserErrorAccountBalanceMismatch]
-		if err = json.Unmarshal(src, &data); err != nil {
-			return fmt.Errorf("unable to unmarshal parser error data: %w", err)
-		}
-		dst.Data = data.Data
-	case db.ParserErrorTypeInsufficientBalance:
-		var data d[db.ParserErrorInsufficientBalance]
-		if err = json.Unmarshal(src, &data); err != nil {
-			return fmt.Errorf("unable to unmarshal parser error data: %w", err)
-		}
-		dst.Data = data.Data
-	case db.ParserErrorTypeMissingPrice:
-		var data d[db.ParserErrorMissingPrice]
-		if err = json.Unmarshal(src, &data); err != nil {
-			return fmt.Errorf("unable to unmarshal parser error data: %w", err)
-		}
-		dst.Data = data.Data
-	}
-
-	return nil
+type eventFiatAmountComponentData struct {
+	Amount   string
+	Currency string
 }
 
-type eventWithErrors struct {
-	db.Event
-	idx    int32
-	errors []*parserError
-}
-
-func getEventsWithErrors(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	userAccountId,
-	fromIdx int32,
-	limit int32,
-) ([]*eventWithErrors, error) {
-	// TODO: still will probably require tx ?? slot based search ?
-	const q = `
-		select
-			e.idx,
-			e.tx_id,
-			e.network,
-			e.ix_idx,
-			e.timestamp,
-			e.ui_app_name,
-			e.ui_method_name,
-			e.type,
-			e.data,
-			coalesce(
-				jsonb_agg(
-					jsonb_build_object(
-						'origin', err.origin,
-						'type', err.type,
-						'data', err.data
-					) order by err.id asc
-				) filter (where err.id is not null),
-				'[]'::jsonb
-			) as errs
-		from
-			event e
-		left join
-			parser_err err on
-				err.user_account_id = e.user_account_id and
-				err.tx_id = e.tx_id and
-				err.ix_idx = e.ix_idx 
-		where
-			e.user_account_id = $1 and e.idx > $3
-		group by
-			e.idx, e.tx_id, e.network, e.ix_idx, e.timestamp,
-			e.ui_app_name, e.ui_method_name, e.type,
-			e.data
-		order by
-			e.idx asc
-		limit
-			$2
-	`
-	rows, err := pool.Query(ctx, q, userAccountId, limit, fromIdx)
-	if err != nil {
-		return nil, fmt.Errorf("unable to get events with errors: %w", err)
-	}
-
-	res := make([]*eventWithErrors, 0)
-	for rows.Next() {
-		e := eventWithErrors{}
-		var dataMarshaled, errorsMarshaled []byte
-		err := rows.Scan(
-			&e.idx,
-			&e.TxId,
-			&e.Network,
-			&e.IxIdx,
-			&e.Timestamp,
-			&e.UiAppName,
-			&e.UiMethodName,
-			&e.Type,
-			&dataMarshaled,
-			&errorsMarshaled,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("unable to scan event: %w", err)
-		}
-
-		err = e.Event.UnmarshalData(dataMarshaled)
-		assert.NoErr(err, "unable to unmarshal event data")
-
-		err = json.Unmarshal(errorsMarshaled, &e.errors)
-		assert.NoErr(err, "unable to unmarshal errors")
-
-		res = append(res, &e)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("unable to scan events: %w", err)
-	}
-
-	return res, nil
-}
+const eventFiatAmountCompoent = `<!-- html -->
+{{ define "event_fiat_amount_component" }}
+<span class="text-gray-800">{{ .Amount }} {{ upper .Currency }}</span>
+{{ end }}
+`
 
 func eventsHandler(
 	ctx context.Context,
 	pool *pgxpool.Pool,
 	templates *template.Template,
 ) http.HandlerFunc {
-	loadTemplate(templates, eventsPageComponent)
+	loadTemplate(templates, eventsPage)
+	loadTemplate(templates, groupDividerComponent)
 	loadTemplate(templates, eventComponent)
-	loadTemplate(templates, eventsGroupHeaderComponent)
-	loadTemplate(templates, amountComponent)
-	loadTemplate(templates, parserErrorComponent)
+	loadTemplate(templates, eventTransfersComponent)
+	loadTemplate(templates, eventTokenAmountComponent)
+	loadTemplate(templates, eventFiatAmountCompoent)
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		/////////////
+		// parse query
+
 		query := r.URL.Query()
 		userAccountId := int32(1)
 		// if prod {
@@ -478,225 +271,237 @@ func eventsHandler(
 		// }
 
 		var fromIdx int32
-		fromIdxQueryVal := query.Get("from")
+		limit := int32(50)
+
+		fromIdxQueryVal, limitQueryVal := query.Get("from"), query.Get("limit")
+
 		if v, err := strconv.Atoi(fromIdxQueryVal); err == nil {
 			fromIdx = int32(v)
 		}
+		if v, err := strconv.Atoi(limitQueryVal); err == nil {
+			limit = int32(v)
+		}
 
-		const limit = 50
-		events, err := getEventsWithErrors(
-			ctx, pool, userAccountId, fromIdx, limit,
-		)
+		/////////////
+		// get events
+
+		const getEventsQuery = `
+			select
+				e.tx_id,
+				e.network,
+				e.timestamp,
+				e.type,
+				e.ui_app_name,
+				e.data
+			from
+				event e
+			where
+				e.user_account_id = $1 and
+				e.idx > $2
+			order by
+				e.idx asc
+			limit
+				$3
+		`
+		eventsRows, err := pool.Query(ctx, getEventsQuery, userAccountId, fromIdx, limit)
 		if err != nil {
 			renderError(w, 500, "unable to query events: %s", err)
 			return
 		}
 
-		// fetch tokens
-		fetchTokensBatch := pgx.Batch{}
-		type tokenId struct {
-			address string
-			network db.Network
+		type event struct {
+			db.Event
 		}
-		type tokenMeta struct {
-			symbol   string
-			imageUrl string
-		}
-		tokens := make(map[tokenId]tokenMeta)
+		events := make([]*event, 0)
 
-		for _, event := range events {
-			const q = `
-				select 
-					ctd.symbol, ctd.image_url
-				from
-					coingecko_token_data ctd
-				where
-					exists (
-						select 1 from coingecko_token ct where
-							ct.address = $1 and ct.network = $2
-					) or ctd.coingecko_id = $1
-			`
-
-			var token string
-
-			switch data := event.Data.(type) {
-			case *db.EventTransferInternal:
-				token = data.Token
-			case *db.EventTransfer:
-				token = data.Token
-			default:
-				assert.True(false, "unknown event data: %T", data)
+		for eventsRows.Next() {
+			var eventData []byte
+			e := new(event)
+			if err := eventsRows.Scan(
+				&e.TxId,
+				&e.Network,
+				&e.Timestamp,
+				&e.Type,
+				&e.UiAppName,
+				&eventData,
+			); err != nil {
+				renderError(w, 500, "unable to scan events: %s", err)
+				return
 			}
 
-			queued := fetchTokensBatch.Queue(q, token, event.Network)
-			queued.QueryRow(func(row pgx.Row) error {
-				symbol, imgUrl := "", pgtype.Text{}
-				if err := row.Scan(&symbol, &imgUrl); err != nil {
-					return nil
+			if err := e.UnmarshalData(eventData); err != nil {
+				renderError(w, 500, "unable to unmarshal event: %s", err)
+				return
+			}
+
+			events = append(events, e)
+		}
+
+		/////////////
+		// render events
+		eventTableRows := make([]eventTableRow, 0)
+		prevDateUnix := int64(0)
+
+		for _, event := range events {
+			const daySecs = 60 * 60 * 24
+			dateUnix := event.Timestamp.Unix() / daySecs * daySecs
+
+			if prevDateUnix != dateUnix {
+				prevDateUnix = dateUnix
+				eventTableRows = append(eventTableRows, eventTableRow{
+					Type: 0,
+					Date: time.Unix(dateUnix, 0),
+				})
+			}
+
+			networkGlobals, ok := networksGlobals[event.Network]
+			assert.True(ok, "missing globals for network: %s", event.Network.String())
+
+			txId := fmt.Sprintf(
+				"%s...%s",
+				event.TxId[:5], event.TxId[len(event.TxId)-2:],
+			)
+			explorerUrl := fmt.Sprintf(
+				"%s/tx/%s",
+				networkGlobals.explorerUrl, event.TxId,
+			)
+
+			eventComponentData := eventComponentData{
+				TxId:          txId,
+				ExplorerUrl:   explorerUrl,
+				Timestamp:     event.Timestamp,
+				NetworkImgUrl: networkGlobals.imgUrl,
+				EventType:     toTitle(string(event.Type)),
+				Method:        toTitle(string(event.UiAppName)),
+			}
+
+			///////////////
+			// transfers
+			const getTokenMetaByCoingeckoId = `
+				select
+					symbol, image_url
+				from
+					coingecko_token_data 
+				where
+					coingecko_id = $1	
+			`
+			const getTokenMetaByAddressAndNetwork = `
+				select
+					ctd.symbol, ctd.image_url
+				from
+					coingecko_token ct
+				inner join
+					coingecko_token_data ctd on
+						ct.coingecko_id = ctd.coingecko_id
+				where
+					ct.address = $1 and ct.network = $2
+			`
+			getTokensMetaBatch := pgx.Batch{}
+
+			switch data := event.Data.(type) {
+			case *db.EventTransfer:
+				tokenAmountComponentData := &eventTokenAmountComponentData{
+					Amount: data.Amount.StringFixed(2),
+				}
+				fiatAmountComponentData := &eventFiatAmountComponentData{
+					Amount:   data.Value.StringFixed(2),
+					Currency: "eur",
+				}
+				eventComponentData.Profits = append(
+					eventComponentData.Profits,
+					&eventFiatAmountComponentData{
+						Amount:   data.Profit.StringFixed(2),
+						Currency: "eur",
+					},
+				)
+
+				if data.TokenSource == math.MaxUint16 {
+					q := getTokensMetaBatch.Queue(
+						getTokenMetaByCoingeckoId,
+						data.Token,
+					)
+					q.QueryRow(func(row pgx.Row) error {
+						var imgUrl pgtype.Text
+						err := row.Scan(
+							&tokenAmountComponentData.Symbol,
+							&imgUrl,
+						)
+						if err != nil {
+							return err
+						}
+						if imgUrl.Valid {
+							tokenAmountComponentData.ImgUrl = imgUrl.String
+						} else {
+							// fetch from coingecko
+						}
+						return nil
+					})
+				} else {
+					q := getTokensMetaBatch.Queue(
+						getTokenMetaByAddressAndNetwork,
+						data.Token,
+						event.Network,
+					)
+					q.QueryRow(func(row pgx.Row) error {
+						var imgUrl pgtype.Text
+						err := row.Scan(
+							&tokenAmountComponentData.Symbol,
+							&imgUrl,
+						)
+						if errors.Is(err, pgx.ErrNoRows) {
+							tokenAmountComponentData.Symbol = shorten(data.Token, 3, 2)
+							return nil
+						}
+						if imgUrl.Valid {
+							tokenAmountComponentData.ImgUrl = imgUrl.String
+						} else {
+							// fetch from coingecko
+						}
+						return err
+					})
 				}
 
-				meta := tokenMeta{
-					symbol: symbol,
-				}
-				if imgUrl.Valid {
-					meta.imageUrl = imgUrl.String
+				transfersComponentData := eventTransfersComponentData{
+					Wallet: shorten(data.Wallet, 4, 4),
+					Tokens: []*eventTokenAmountComponentData{
+						tokenAmountComponentData,
+					},
+					Fiats: []*eventFiatAmountComponentData{
+						fiatAmountComponentData,
+					},
 				}
 
-				tokenId := tokenId{
-					address: token,
-					network: event.Network,
+				switch data.Direction {
+				case db.EventTransferIncoming:
+					eventComponentData.IncomingTransfers = &transfersComponentData
+				case db.EventTransferOutgoing:
+					eventComponentData.OutgoingTransfers = &transfersComponentData
 				}
-				tokens[tokenId] = meta
-				return nil
+			case *db.EventTransferInternal:
+				// fromWallet = data.FromWallet
+				// toWallet = data.ToWallet
+			}
+
+			br := pool.SendBatch(ctx, &getTokensMetaBatch)
+			if err := br.Close(); err != nil {
+				renderError(w, 500, "unable to query tokens meta: %s", err)
+				return
+			}
+
+			eventTableRows = append(eventTableRows, eventTableRow{
+				Type:  1,
+				Event: eventComponentData,
 			})
 		}
 
-		br := pool.SendBatch(ctx, &fetchTokensBatch)
-		if err := br.Close(); err != nil {
-			renderError(w, 500, "unable to query tokens: %s", err)
-			return
-		}
-
-		renderedTransactions := make([]byte, 0)
-		var prevGroupTsUnix int64
-
-		for _, event := range events {
-			const oneDay = 60 * 60 * 24
-			dateTsUnix := event.Timestamp.Unix() / oneDay * oneDay
-			if prevGroupTsUnix != dateTsUnix {
-				groupHeader, err := executeTemplate(
-					templates, "events_group_header", time.Unix(dateTsUnix, 0),
-				)
-				assert.NoErr(err, "unable to execute template")
-
-				renderedTransactions = append(renderedTransactions, groupHeader...)
-				prevGroupTsUnix = dateTsUnix
-			}
-
-			cmpData := eventComponentData{
-				TxId:       event.TxId,
-				App:        event.UiAppName,
-				MethodType: string(event.Type),
-				Timestamp:  event.Timestamp,
-
-				PreprocessErrors: make([]*parserErrorComponentData, 0),
-				ProcessErrors:    make([]*parserErrorComponentData, 0),
-				PriceErrors:      make([]*parserErrorComponentData, 0),
-			}
-
-			networkUrls, ok := networksUrls[event.Network]
-			assert.True(ok, "missing network urls: %s", event.Network.String())
-			cmpData.ExplorerUrl = fmt.Sprintf("%s/tx/%s", networkUrls.explorer, event.TxId)
-			cmpData.NetworkImgUrl = networkUrls.img
-
-			for _, parserError := range event.errors {
-				data := newParserErrorComponentData(parserError)
-
-				if _, ok := parserError.Data.(*db.ParserErrorMissingPrice); ok {
-					cmpData.PriceErrors = append(cmpData.PriceErrors, &data)
-					continue
-				}
-
-				switch parserError.Origin {
-				case db.ErrOriginPreprocess:
-					cmpData.PreprocessErrors = append(cmpData.PreprocessErrors, &data)
-				case db.ErrOriginProcess:
-					cmpData.ProcessErrors = append(cmpData.ProcessErrors, &data)
-				}
-			}
-
-			switch data := event.Data.(type) {
-			case *db.EventTransferInternal:
-				token := tokens[tokenId{data.Token, event.Network}]
-
-				amountCmp := executeTemplateMust(templates, "amount", amountComponentData{
-					Symbol: token.symbol,
-					Amount: data.Amount.StringFixed(2),
-				})
-				valueCmp := executeTemplateMust(templates, "amount", amountComponentData{
-					Symbol: "eur",
-					Amount: data.Value.StringFixed(2),
-				})
-
-				cmpData.DisposalsAmounts = template.HTML(amountCmp)
-				cmpData.DisposalsValues = template.HTML(valueCmp)
-				cmpData.AcquisitionsAmounts = template.HTML(amountCmp)
-				cmpData.AcquisitionsValues = template.HTML(valueCmp)
-
-				cmpData.Gain = template.HTML(executeTemplateMust(templates, "amount", amountComponentData{
-					Symbol: "eur",
-					Amount: data.Profit.StringFixed(2),
-				}))
-			case *db.EventTransfer:
-				var disposalAmount, disposalValue,
-					acquisitionAmount, acquisitionValue []byte
-				token := tokens[tokenId{data.Token, event.Network}]
-
-				if event.Type == db.EventTypeMint ||
-					(event.Type == db.EventTypeTransfer && data.Direction == db.EventTransferIncoming) {
-					disposalAmount = executeTemplateMust(templates, "amount", amountComponentData{})
-					disposalValue = disposalAmount
-
-					acquisitionAmount = executeTemplateMust(templates, "amount", amountComponentData{
-						Symbol: token.symbol,
-						Amount: data.Amount.StringFixed(2),
-					})
-					acquisitionValue = executeTemplateMust(templates, "amount", amountComponentData{
-						Symbol: "eur",
-						Amount: data.Value.StringFixed(2),
-					})
-				} else if event.Type == db.EventTypeBurn ||
-					(event.Type == db.EventTypeTransfer && data.Direction == db.EventTransferOutgoing) {
-					disposalAmount = executeTemplateMust(templates, "amount", amountComponentData{
-						Symbol: token.symbol,
-						Amount: data.Amount.StringFixed(2),
-					})
-					disposalValue = executeTemplateMust(templates, "amount", amountComponentData{
-						Symbol: "eur",
-						Amount: data.Value.StringFixed(2),
-					})
-
-					acquisitionAmount := executeTemplateMust(templates, "amount", amountComponentData{})
-					acquisitionValue = acquisitionAmount
-				} else {
-					assert.True(false, "invalid event type: %T", event.Type)
-				}
-
-				cmpData.DisposalsAmounts = template.HTML(disposalAmount)
-				cmpData.DisposalsValues = template.HTML(disposalValue)
-				cmpData.AcquisitionsAmounts = template.HTML(acquisitionAmount)
-				cmpData.AcquisitionsValues = template.HTML(acquisitionValue)
-
-				cmpData.Gain = template.HTML(executeTemplateMust(templates, "amount", amountComponentData{
-					Symbol: "eur",
-					Amount: data.Profit.StringFixed(2),
-				}))
-			default:
-				assert.True(false, "invalid event data: %T", data)
-			}
-
-			rendered, err := executeTemplate(templates, "event", cmpData)
-			if err != nil {
-				w.WriteHeader(500)
-				w.Write(fmt.Appendf(nil, "500 server error: %s", err))
-				return
-			}
-			renderedTransactions = append(renderedTransactions, rendered...)
-		}
-
-		lastEventIdx := int32(-1)
-		if len(events) > 0 {
-			lastEventIdx = events[len(events)-1].idx
-		}
-
-		w.Header().Set("content-type", "text/html")
-		buf := executeTemplateMust(templates, "events_page", eventsPageComponentData{
-			LastEventIdx: lastEventIdx,
-			Events:       template.HTML(renderedTransactions),
-		})
+		eventsPageContent := executeTemplateMust(
+			templates,
+			"events_page",
+			eventTableRows,
+		)
 
 		page := executeTemplateMust(templates, "page_layout", pageLayoutComponentData{
-			Content: template.HTML(buf),
+			Content: template.HTML(eventsPageContent),
 		})
 		w.Write(page)
 	}

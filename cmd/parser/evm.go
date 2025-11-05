@@ -415,6 +415,7 @@ func evmProcessTx(
 		setEventTransfer(
 			event,
 			txData.From, txData.To,
+			txData.From, txData.To,
 			fromInternal, toInternal,
 			txData.Value,
 			"ethereum",

@@ -312,8 +312,15 @@ func GetTransactions(
 				ref.tx_id = tx.id and
 				ref.user_account_id = $1
 		order by
+			-- global ordering
+			tx.timestamp asc,
+			-- network specific ordering in case of timestamps conflicts
+			-- solana 
 			(tx.data->>'slot')::bigint asc,
-			(tx.data->>'blockIndex')::integer asc
+			(tx.data->>'blockIndex')::integer asc,
+			-- evm
+			(tx.data->>'block')::bigint asc,
+			(tx.data->>'txIdx')::integer asc
 	`
 	rows, err := pool.Query(ctx, query, userAccountId)
 	if err != nil {

@@ -90,6 +90,7 @@ func evmProcessErc20Tx(
 	setEventTransfer(
 		event,
 		from, to,
+		from, to,
 		fromInternal, toInternal,
 		amount,
 		tx.To,

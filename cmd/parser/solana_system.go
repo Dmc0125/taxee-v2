@@ -114,6 +114,7 @@ func solProcessSystemIx(
 	setEventTransfer(
 		event,
 		from, to,
+		from, to,
 		fromInternal, toInternal,
 		newDecimalFromRawAmount(amount, 9),
 		SOL_MINT_ADDRESS,

@@ -37,6 +37,7 @@ func newDecimalFromRawAmount(amount uint64, decimals uint8) decimal.Decimal {
 
 func setEventTransfer(
 	event *db.Event,
+	fromWallet, toWallet,
 	from, to string,
 	fromInternal, toInternal bool,
 	amount decimal.Decimal,
@@ -47,6 +48,8 @@ func setEventTransfer(
 	case fromInternal && toInternal:
 		event.Type = db.EventTypeTransferInternal
 		event.Data = &db.EventTransferInternal{
+			FromWallet:  fromWallet,
+			ToWallet:    toWallet,
 			FromAccount: from,
 			ToAccount:   to,
 			Token:       token,
@@ -57,6 +60,7 @@ func setEventTransfer(
 		event.Type = db.EventTypeTransfer
 		event.Data = &db.EventTransfer{
 			Direction:   db.EventTransferOutgoing,
+			Wallet:      fromWallet,
 			Account:     from,
 			Token:       token,
 			Amount:      amount,
@@ -66,6 +70,7 @@ func setEventTransfer(
 		event.Type = db.EventTypeTransfer
 		event.Data = &db.EventTransfer{
 			Direction:   db.EventTransferIncoming,
+			Wallet:      toWallet,
 			Account:     to,
 			Token:       token,
 			Amount:      amount,
@@ -74,28 +79,48 @@ func setEventTransfer(
 	}
 }
 
-type parserError interface {
-	IsEq(any) bool
-	Address() string
-}
-
 func appendErrUnique(
 	errors map[string][]*db.ParserError,
 	n *db.ParserError,
+	address string,
 ) {
-	nValid, ok := n.Data.(parserError)
-	assert.True(ok, "invalid error type: %T", n.Data)
+	_, isPrice := n.Data.(*db.ParserErrorMissingPrice)
+	assert.True(!isPrice, "missing price error should not be unique")
+	accountErrors, ok := errors[address]
 
-	address := nValid.Address()
-	accountErrors := errors[address]
+	isEq := func(e1, e2 any) bool {
+		if d1, ok := e1.(*db.ParserErrorMissingAccount); ok {
+			if d2, ok := e2.(*db.ParserErrorMissingAccount); ok {
+				return d1.AccountAddress == d2.AccountAddress
+			}
+			return false
+		}
 
-	switch {
-	case accountErrors == nil || len(accountErrors) == 0:
+		if d1, ok := e1.(*db.ParserErrorAccountBalanceMismatch); ok {
+			if d2, ok := e2.(*db.ParserErrorAccountBalanceMismatch); ok {
+				return d1.AccountAddress == d2.AccountAddress &&
+					d1.Expected.Equal(d2.Expected) &&
+					d1.Real.Equal(d2.Real)
+			}
+			return false
+		}
+
+		if d1, ok := e1.(*db.ParserErrorAccountDataMismatch); ok {
+			if d2, ok := e2.(*db.ParserErrorAccountDataMismatch); ok {
+				return d1.AccountAddress == d2.AccountAddress &&
+					d1.Message == d2.Message
+			}
+			return false
+		}
+
+		return false
+	}
+
+	if !ok && len(accountErrors) == 0 {
 		errors[address] = append(errors[address], n)
-	default:
+	} else {
 		l := accountErrors[len(accountErrors)-1]
-
-		if !nValid.IsEq(l) {
+		if !isEq(n.Data, l.Data) {
 			errors[address] = append(errors[address], n)
 		}
 	}
@@ -297,6 +322,8 @@ func Parse(
 			solCtx.txId = tx.Id
 			solCtx.timestamp = tx.Timestamp
 			solCtx.slot = txData.Slot
+			solCtx.nativeBalances = txData.NativeBalances
+			solCtx.tokenBalances = txData.TokenBalances
 
 			solPreprocessTx(&solCtx, txData.Instructions)
 		case *db.EvmTransactionData:

@@ -57,18 +57,6 @@ create table event (
     data jsonb not null
 );
 
-create type parser_err_origin as enum (
-    'preparse',
-    'parse'
-);
-
-create type parser_err_type as enum (
-    'missing_account',
-    'account_balance_mismatch',
-    'missing_price',
-    'insufficient_balance'
-);
-
 create table parser_err (
     id serial primary key,
     user_account_id integer not null,
@@ -88,8 +76,8 @@ create table parser_err (
     --     user_account_id, id
     -- ) on delete cascade,
 
-    origin parser_err_origin not null,
-    type parser_err_type not null,
+    origin smallint not null,
+    type smallint not null,
     data jsonb not null
 );
 

@@ -2,11 +2,9 @@ package parser
 
 import (
 	"encoding/binary"
-	"taxee/cmd/fetcher/solana"
 	"taxee/pkg/db"
 
 	"github.com/mr-tron/base58"
-	"github.com/shopspring/decimal"
 )
 
 const SOL_TOKEN_PROGRAM_ADDRESS = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
@@ -150,12 +148,15 @@ func solTokenProcessTransfer(
 
 	if fromAccount != nil && toAccount != nil {
 		fromAccountData := solAccountDataMust[SolTokenAccountData](fromAccount)
+		toAccountData := solAccountDataMust[SolTokenAccountData](toAccount)
 		decimals := solDecimalsMust(ctx, fromAccountData.Mint)
 
 		ok = true
 		// TODO: check toAccount, it should have the same mint as fromAccount
 		t = db.EventTypeTransferInternal
 		d = &db.EventTransferInternal{
+			FromWallet:  fromAccountData.Owner,
+			ToWallet:    toAccountData.Owner,
 			FromAccount: from,
 			ToAccount:   to,
 			Token:       fromAccountData.Mint,
@@ -178,9 +179,6 @@ func solTokenProcessTransfer(
 		direction, tokenAccount = db.EventTransferIncoming, to
 	default:
 		return
-	case fromAccount != nil && toAccount != nil:
-	case fromAccount != nil:
-	case toAccount != nil:
 	}
 
 	decimals := solDecimalsMust(ctx, tokenAccountData.Mint)
@@ -188,6 +186,7 @@ func solTokenProcessTransfer(
 	t = db.EventTypeTransfer
 	d = &db.EventTransfer{
 		Direction:   direction,
+		Wallet:      tokenAccountData.Owner,
 		Account:     tokenAccount,
 		Token:       tokenAccountData.Mint,
 		Amount:      newDecimalFromRawAmount(amount, decimals),
