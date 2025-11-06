@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -9,12 +11,15 @@ import (
 	"net/http"
 	"strconv"
 	"taxee/pkg/assert"
+	"taxee/pkg/coingecko"
 	"taxee/pkg/db"
+	"taxee/pkg/logger"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 )
 
 type networkGlobals struct {
@@ -46,36 +51,39 @@ const eventsPage = `<!-- html -->
 		<h1 class="font-semibold text-2xl">Events</h1>
 	</header>
 
-	<ul class="w-full mt-10 flex flex-col gap-y-4 relative">
-		<!-- header -->
-		<li class="
-			w-full py-2 pl-4 sticky z-1000 top-2
-			grid grid-cols-[150px_1fr]
-			bg-gray-50 border border-gray-200 rounded-lg text-gray-800
-		">
-			<span>Date</span>
-			<div class="w-full px-4 grid grid-cols-[300px_repeat(2,450px)_1fr]">
-				<span>App</span>
-				<div class="flex">
-					<span class="w-1/2">Outgoing</span>
-					<span>Disposal</span>
+	<div class="w-full mt-10 overflow-x-auto">
+		<ul class="w-fit min-w-full flex flex-col gap-y-4 relative">
+			<!-- header -->
+			<!-- TODO: sticky -->
+			<li class="
+				w-full py-2 pl-4 top-2
+				grid grid-cols-[150px_1fr]
+				bg-gray-50 border border-gray-200 rounded-lg text-gray-800
+			">
+				<span>Date</span>
+				<div class="w-full px-4 grid grid-cols-[300px_repeat(2,minmax(350px,1fr))_150px]">
+					<span>App</span>
+					<div class="flex">
+						<span class="w-1/2">Outgoing</span>
+						<span>Disposal</span>
+					</div>
+					<div class="flex">
+						<span class="w-1/2">Incoming</span>
+						<span>Acquisition</span>
+					</div>
+					<span>Profit</span>
 				</div>
-				<div class="flex">
-					<span class="w-1/2">Incoming</span>
-					<span>Acquisition</span>
-				</div>
-				<span>Profit</span>
-			</div>
-		</li>
+			</li>
 
-		{{ range . }}
-			{{ if eq .Type 0 }}
-				{{ template "group_divider_component" .Date }}
-			{{ else if eq .Type 1 }}
-				{{ template "event_component" .Event }}
+			{{ range . }}
+				{{ if eq .Type 0 }}
+					{{ template "group_divider_component" .Date }}
+				{{ else if eq .Type 1 }}
+					{{ template "event_component" .Event }}
+				{{ end }}
 			{{ end }}
-		{{ end }}
-	</ul>
+		</ul>
+	</div>
 </div>
 {{ end }}
 `
@@ -116,52 +124,67 @@ const eventComponent = `<!-- html -->
 	</div>
 
 	<!-- Event -->
-	<div class="
-		w-full px-4 py-2 grid grid-cols-[300px_repeat(2,450px)_1fr]
-		border border-gray-200 rounded-lg
-	">
-		<!-- App img, network img, event type, onchain method -->
-		<div class="flex">
-			<div class="w-10 h-10 rounded-full bg-gray-200 relative">
-				<div class="
-					w-5 h-5 absolute top-0 left-0 
-					rounded-full bg-gray-100 border border-gray-200
-					overflow-hidden
-				">
-					<img 
-						src="{{ .NetworkImgUrl }}" 
-						class="w-full h-full p-0.25"
-					/>
+	<div class="w-full border border-gray-200 rounded-lg">
+		<div class="
+			w-full px-4 py-2 grid grid-cols-[300px_repeat(2,minmax(350px,1fr))_150px]
+		">
+			<!-- App img, network img, event type, onchain method -->
+			<div class="flex">
+				<div class="w-10 h-10 rounded-full bg-gray-200 relative">
+					<div class="
+						w-5 h-5 p-0.5 absolute top-0 left-0
+						rounded-full bg-gray-100 border border-gray-200
+						overflow-hidden
+					">
+						<img 
+							src="{{ .NetworkImgUrl }}" 
+							class="w-full h-full"
+						/>
+					</div>
+				</div>
+
+				<div class="flex flex-col ml-4">
+					<span class="text-gray-800 font-medium">{{ .EventType }}</span>
+					<span class="text-gray-600 text-sm">{{ .Method }}</span>
 				</div>
 			</div>
 
-			<div class="flex flex-col ml-4">
-				<span class="text-gray-800 font-medium">{{ .EventType }}</span>
-				<span class="text-gray-600 text-sm">{{ .Method }}</span>
-			</div>
+			<!-- Outgoing -->
+			{{ template "event_transfers_component" .OutgoingTransfers }}
+
+			<!-- Incoming -->
+			{{ template "event_transfers_component" .IncomingTransfers }}
+
+			{{ if .Profits }}
+				<div class="w-full flex flex-col gap-y-1">
+					<div class="opacity-0 h-[1em] text-sm"></div>
+					<div class="mt-1">
+						{{ range .Profits }}
+							{{ template "event_fiat_amount_component" . }}
+						{{ end }}
+					</div>
+				</div>
+			{{ else }}
+				<div class="w-full flex flex-col gap-y-1">
+					<div class="opacity-0 h-[1em] text-sm"></div>
+					<div class="mt-1">-</div>
+				</div>
+			{{ end }}
 		</div>
 
-		<!-- Outgoing -->
-		{{ template "event_transfers_component" .OutgoingTransfers }}
-
-		<!-- Incoming -->
-		{{ template "event_transfers_component" .IncomingTransfers }}
-
-		{{ if .Profits }}
-			<div class="w-full flex flex-col gap-y-1">
-				<div class="opacity-0 h-[1em] text-sm"></div>
-				<div class="mt-1">
-					{{ range .Profits }}
-						{{ template "event_fiat_amount_component" . }}
-					{{ end }}
-				</div>
+		<!--
+		<div class="
+			w-full grid grid-cols-[repeat(3,1fr)]
+			border-t border-gray-200
+		">
+			<div>
+				<span>Missing prices</span> 
 			</div>
-		{{ else }}
-			<div class="w-full flex flex-col gap-y-1">
-				<div class="opacity-0 h-[1em] text-sm"></div>
-				<div class="mt-1">-</div>
+			<div>
+				<span>Missing prices</span>
 			</div>
-		{{ end }}
+		</div>
+		-->
 	</div>
 </li>
 {{ end }}
@@ -175,34 +198,39 @@ type eventTransfersComponentData struct {
 
 const eventTransfersComponent = `<!-- html -->
 {{ define "event_transfers_component" }}
-{{ if . }}
 <div class="w-full flex flex-col gap-y-1">
 	<div class="w-full text-sm h-[1em]">
-		<span class="text-gray-500 font-medium">{{ .Wallet }}</span>
+		<span class="text-gray-500 font-medium">
+			{{ if . }}
+				{{ .Wallet }}
+			{{ end }}
+		</span>
 	</div>
 
-	<div class="flex mt-1">
+	<div class="flex items-center mt-1">
 		<!-- Token amounts -->
 		<div class="w-1/2">
-			{{ range .Tokens }}
-				{{ template "event_token_amount_component" . }}
+			{{ if . }}
+				{{ range .Tokens }}
+					{{ template "event_token_amount_component" . }}
+				{{ end }}
+			{{ else }}
+				<div class="mt-1">-</div>
 			{{ end }}
 		</div>
 
 		<!-- Fiat amounts -->
 		<div>
-			{{ range .Fiats }}
-				{{ template "event_fiat_amount_component" . }}
+			{{ if . }}
+				{{ range .Fiats }}
+					{{ template "event_fiat_amount_component" . }}
+				{{ end }}
+			{{ else }}
+				<div class="mt-1">-</div>
 			{{ end }}
 		</div>
 	</div>
 </div>
-{{ else }}
-<div class="w-full flex flex-col gap-y-1">
-	<div class="opacity-0 text-sm h-[1em]">placeholder</div>
-	<div class="mt-1">-</div>
-</div>
-{{ end }}
 {{ end }}
 `
 
@@ -216,15 +244,23 @@ type eventTokenAmountComponentData struct {
 const eventTokenAmountComponent = `<!-- html -->
 {{ define "event_token_amount_component" }}
 <div class="w-fit flex items-center gap-2">
-	<div class="w-6 h-6 flex items-center justify-center rounded-full bg-gray-200">
+	<div class="
+		w-5 h-5 
+		rounded-full overflow-hidden
+	">
 		{{ if .ImgUrl }}
-			<img src="{{ .ImgUrl }}" />
+			<img src="{{ .ImgUrl }}" class="w-5 h-5 rounded-full" />
 		{{ else }}
-			<span class="text-sm text-gray-600">?</span>
+			<div class="
+				w-full h-full flex items-center justify-center
+				text-sm text-gray-600 bg-gray-200
+			">
+				?
+			</div>
 		{{ end }}
 	</div>
 
-	<span class="text-gray-800">{{ .Amount }} {{ upper .Symbol }}</span>
+	<span class="text-gray-800 text-sm">{{ .Amount }} {{ upper .Symbol }}</span>
 </div>
 {{ end }}
 `
@@ -232,13 +268,161 @@ const eventTokenAmountComponent = `<!-- html -->
 type eventFiatAmountComponentData struct {
 	Amount   string
 	Currency string
+	Zero     bool
+	Missing  bool
+	Sign     int
 }
 
-const eventFiatAmountCompoent = `<!-- html -->
+const eventFiatAmountComponent = `<!-- html -->
 {{ define "event_fiat_amount_component" }}
-<span class="text-gray-800">{{ .Amount }} {{ upper .Currency }}</span>
+<div class="h-5 flex items-center gap-x-2">
+{{ if .Zero }}
+	{{ if .Missing }}
+		<div class="w-full flex items-center gap-x-1">
+			<span class="
+				w-5 h-5 rounded-full text-xs bg-red-700/20 text-red-700
+				flex items-center justify-center flex-shrink-0
+			">!</span>
+			<span class="
+				w-full px-2 py-1 text-sm text-red-800
+			">Missing price</span>
+		</div>
+	{{ else }}
+		<span class="text-gray-800 text-sm">-</span>
+	{{ end }}
+{{ else }}
+	<span class="
+		text-sm
+		{{ tern (eq .Sign 0) "text-gray-800" (eq .Sign -1) "text-red-800" "text-green-800" }}
+	">{{ .Amount }} {{ upper .Currency }}</span>
+{{ end }}
+</div>
 {{ end }}
 `
+
+type fetchTokenMetadataQueued struct {
+	coingeckoId string
+	tokensData  []*eventTokenAmountComponentData
+}
+
+func eventsRenderTokenAmounts(
+	amount,
+	value,
+	profit,
+	price decimal.Decimal,
+	token string,
+	network db.Network,
+	tokenSource uint16,
+	getTokensMetaBatch *pgx.Batch,
+	tokensQueue *[]*fetchTokenMetadataQueued,
+) (tokenData *eventTokenAmountComponentData, fiatData, profitData *eventFiatAmountComponentData) {
+	tokenData = &eventTokenAmountComponentData{
+		Amount: amount.StringFixed(2),
+	}
+	fiatData = &eventFiatAmountComponentData{
+		Amount:   value.StringFixed(2),
+		Currency: "eur",
+		Sign:     value.Sign(),
+		Missing:  price.Equal(decimal.Zero),
+		Zero:     value.Equal(decimal.Zero),
+	}
+	fmt.Printf("%#v\n", *fiatData)
+	profitData = &eventFiatAmountComponentData{
+		Amount:   profit.StringFixed(2),
+		Currency: "eur",
+		Sign:     profit.Sign(),
+		Zero:     profit.Equal(decimal.Zero),
+	}
+
+	appendTokenToQueue := func(coingeckoId string) {
+		contains := false
+		for _, q := range *tokensQueue {
+			if q.coingeckoId == coingeckoId {
+				contains = true
+				q.tokensData = append(q.tokensData, tokenData)
+				break
+			}
+		}
+
+		if !contains {
+			*tokensQueue = append(*tokensQueue, &fetchTokenMetadataQueued{
+				coingeckoId: coingeckoId,
+				tokensData: []*eventTokenAmountComponentData{
+					tokenData,
+				},
+			})
+		}
+	}
+
+	if tokenSource == math.MaxUint16 {
+		const getTokenMetaByCoingeckoId = `
+			select
+				symbol, image_url
+			from
+				coingecko_token_data 
+			where
+				coingecko_id = $1	
+		`
+		q := getTokensMetaBatch.Queue(
+			getTokenMetaByCoingeckoId,
+			token,
+		)
+		q.QueryRow(func(row pgx.Row) error {
+			var imgUrl pgtype.Text
+			err := row.Scan(
+				&tokenData.Symbol,
+				&imgUrl,
+			)
+			if err != nil {
+				return err
+			}
+			if imgUrl.Valid {
+				tokenData.ImgUrl = imgUrl.String
+			} else {
+				appendTokenToQueue(token)
+			}
+			return nil
+		})
+	} else {
+		const getTokenMetaByAddressAndNetwork = `
+			select
+				ctd.symbol, ctd.image_url, ctd.coingecko_id
+			from
+				coingecko_token ct
+			inner join
+				coingecko_token_data ctd on
+					ct.coingecko_id = ctd.coingecko_id
+			where
+				ct.address = $1 and ct.network = $2
+		`
+		q := getTokensMetaBatch.Queue(
+			getTokenMetaByAddressAndNetwork,
+			token,
+			network,
+		)
+		q.QueryRow(func(row pgx.Row) error {
+			var imgUrl pgtype.Text
+			var coingeckoId string
+			err := row.Scan(
+				&tokenData.Symbol,
+				&imgUrl,
+				&coingeckoId,
+			)
+			if errors.Is(err, pgx.ErrNoRows) {
+				tokenData.Symbol = shorten(token, 3, 2)
+				return nil
+			}
+			if imgUrl.Valid {
+				tokenData.ImgUrl = imgUrl.String
+			} else {
+				appendTokenToQueue(coingeckoId)
+			}
+			return err
+		})
+	}
+
+	return
+}
 
 func eventsHandler(
 	ctx context.Context,
@@ -250,7 +434,7 @@ func eventsHandler(
 	loadTemplate(templates, eventComponent)
 	loadTemplate(templates, eventTransfersComponent)
 	loadTemplate(templates, eventTokenAmountComponent)
-	loadTemplate(templates, eventFiatAmountCompoent)
+	loadTemplate(templates, eventFiatAmountComponent)
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		/////////////
@@ -292,7 +476,26 @@ func eventsHandler(
 				e.timestamp,
 				e.type,
 				e.ui_app_name,
-				e.data
+				e.data,
+				(
+					select
+						coalesce(
+							jsonb_agg(
+								jsonb_build_object(
+									'origin', perr.origin,
+									'type', perr.type,
+									'data', perr.data
+								) order by perr.id asc
+							),
+							'[]'::jsonb
+						)
+					from
+						parser_err perr
+					where
+						perr.tx_id = e.tx_id and
+						perr.ix_idx = e.ix_idx and
+						perr.user_account_id = e.user_account_id
+				) as errors
 			from
 				event e
 			where
@@ -315,7 +518,7 @@ func eventsHandler(
 		events := make([]*event, 0)
 
 		for eventsRows.Next() {
-			var eventData []byte
+			var eventData, errorsSerialized []byte
 			e := new(event)
 			if err := eventsRows.Scan(
 				&e.TxId,
@@ -324,6 +527,7 @@ func eventsHandler(
 				&e.Type,
 				&e.UiAppName,
 				&eventData,
+				&errorsSerialized,
 			); err != nil {
 				renderError(w, 500, "unable to scan events: %s", err)
 				return
@@ -334,6 +538,60 @@ func eventsHandler(
 				return
 			}
 
+			decoder := json.NewDecoder(bytes.NewBuffer(errorsSerialized))
+			{
+				token, err := decoder.Token()
+				assert.NoErr(err, "empty errors json")
+				if delim, ok := token.(json.Delim); ok {
+					assert.True(delim == '[', "invalid errors json")
+				} else {
+					assert.True(false, "expected [")
+				}
+			}
+
+			properties := 0
+			var (
+				parserErrorData   json.RawMessage
+				parserErrorOrigin db.ErrOrigin
+				parserErrorType   db.ParserErrorType
+			)
+
+			for decoder.More() {
+				token, err := decoder.Token()
+				assert.NoErr(err, "invalid errors json")
+
+				if delim, ok := token.(json.Delim); ok {
+					switch delim {
+					case ']':
+						break
+					default:
+						continue
+					}
+				}
+
+				ident, ok := token.(string)
+				if ok {
+					var err error
+					switch ident {
+					case "origin":
+						err = decoder.Decode(&parserErrorOrigin)
+						properties += 1
+					case "type":
+						err = decoder.Decode(&parserErrorType)
+						properties += 1
+					case "data":
+						err = decoder.Decode(&parserErrorData)
+						properties += 1
+					}
+					assert.NoErr(err, fmt.Sprintf("unable to decode: %s", ident))
+
+					if properties == 3 {
+						// done
+						fmt.Println("Done")
+					}
+				}
+			}
+
 			events = append(events, e)
 		}
 
@@ -341,6 +599,9 @@ func eventsHandler(
 		// render events
 		eventTableRows := make([]eventTableRow, 0)
 		prevDateUnix := int64(0)
+
+		getTokensMetaBatch := pgx.Batch{}
+		fetchTokensMetadataQueue := make([]*fetchTokenMetadataQueued, 0)
 
 		for _, event := range events {
 			const daySecs = 60 * 60 * 24
@@ -377,97 +638,32 @@ func eventsHandler(
 
 			///////////////
 			// transfers
-			const getTokenMetaByCoingeckoId = `
-				select
-					symbol, image_url
-				from
-					coingecko_token_data 
-				where
-					coingecko_id = $1	
-			`
-			const getTokenMetaByAddressAndNetwork = `
-				select
-					ctd.symbol, ctd.image_url
-				from
-					coingecko_token ct
-				inner join
-					coingecko_token_data ctd on
-						ct.coingecko_id = ctd.coingecko_id
-				where
-					ct.address = $1 and ct.network = $2
-			`
-			getTokensMetaBatch := pgx.Batch{}
 
 			switch data := event.Data.(type) {
 			case *db.EventTransfer:
-				tokenAmountComponentData := &eventTokenAmountComponentData{
-					Amount: data.Amount.StringFixed(2),
-				}
-				fiatAmountComponentData := &eventFiatAmountComponentData{
-					Amount:   data.Value.StringFixed(2),
-					Currency: "eur",
-				}
-				eventComponentData.Profits = append(
-					eventComponentData.Profits,
-					&eventFiatAmountComponentData{
-						Amount:   data.Profit.StringFixed(2),
-						Currency: "eur",
-					},
+				tokenData, fiatData, profitData := eventsRenderTokenAmounts(
+					data.Amount,
+					data.Value,
+					data.Profit,
+					data.Price,
+					data.Token,
+					event.Network,
+					data.TokenSource,
+					&getTokensMetaBatch,
+					&fetchTokensMetadataQueue,
 				)
 
-				if data.TokenSource == math.MaxUint16 {
-					q := getTokensMetaBatch.Queue(
-						getTokenMetaByCoingeckoId,
-						data.Token,
-					)
-					q.QueryRow(func(row pgx.Row) error {
-						var imgUrl pgtype.Text
-						err := row.Scan(
-							&tokenAmountComponentData.Symbol,
-							&imgUrl,
-						)
-						if err != nil {
-							return err
-						}
-						if imgUrl.Valid {
-							tokenAmountComponentData.ImgUrl = imgUrl.String
-						} else {
-							// fetch from coingecko
-						}
-						return nil
-					})
-				} else {
-					q := getTokensMetaBatch.Queue(
-						getTokenMetaByAddressAndNetwork,
-						data.Token,
-						event.Network,
-					)
-					q.QueryRow(func(row pgx.Row) error {
-						var imgUrl pgtype.Text
-						err := row.Scan(
-							&tokenAmountComponentData.Symbol,
-							&imgUrl,
-						)
-						if errors.Is(err, pgx.ErrNoRows) {
-							tokenAmountComponentData.Symbol = shorten(data.Token, 3, 2)
-							return nil
-						}
-						if imgUrl.Valid {
-							tokenAmountComponentData.ImgUrl = imgUrl.String
-						} else {
-							// fetch from coingecko
-						}
-						return err
-					})
-				}
-
+				eventComponentData.Profits = append(
+					eventComponentData.Profits,
+					profitData,
+				)
 				transfersComponentData := eventTransfersComponentData{
 					Wallet: shorten(data.Wallet, 4, 4),
 					Tokens: []*eventTokenAmountComponentData{
-						tokenAmountComponentData,
+						tokenData,
 					},
 					Fiats: []*eventFiatAmountComponentData{
-						fiatAmountComponentData,
+						fiatData,
 					},
 				}
 
@@ -478,20 +674,82 @@ func eventsHandler(
 					eventComponentData.OutgoingTransfers = &transfersComponentData
 				}
 			case *db.EventTransferInternal:
-				// fromWallet = data.FromWallet
-				// toWallet = data.ToWallet
-			}
+				// NOTE: profit can exist event on internal transfers
+				// in case of missing balances
+				tokenData, fiatData, profitData := eventsRenderTokenAmounts(
+					data.Amount,
+					data.Value,
+					data.Profit,
+					data.Price,
+					data.Token,
+					event.Network,
+					data.TokenSource,
+					&getTokensMetaBatch,
+					&fetchTokensMetadataQueue,
+				)
+				fiatData.Sign = 0
 
-			br := pool.SendBatch(ctx, &getTokensMetaBatch)
-			if err := br.Close(); err != nil {
-				renderError(w, 500, "unable to query tokens meta: %s", err)
-				return
+				eventComponentData.Profits = append(
+					eventComponentData.Profits,
+					profitData,
+				)
+
+				eventComponentData.OutgoingTransfers = &eventTransfersComponentData{
+					Wallet: shorten(data.FromWallet, 4, 4),
+					Tokens: []*eventTokenAmountComponentData{tokenData},
+					Fiats:  []*eventFiatAmountComponentData{fiatData},
+				}
+				eventComponentData.IncomingTransfers = &eventTransfersComponentData{
+					Wallet: shorten(data.ToWallet, 4, 4),
+					Tokens: []*eventTokenAmountComponentData{tokenData},
+					Fiats:  []*eventFiatAmountComponentData{fiatData},
+				}
 			}
 
 			eventTableRows = append(eventTableRows, eventTableRow{
 				Type:  1,
 				Event: eventComponentData,
 			})
+		}
+
+		///////////////
+		// execute network stuff
+
+		br := pool.SendBatch(ctx, &getTokensMetaBatch)
+		if err := br.Close(); err != nil {
+			renderError(w, 500, "unable to query tokens meta: %s", err)
+			return
+		}
+
+		// TODO: this should not be done like this but after the html was sent
+		// via server sent events or something
+		insertTokenImgUrlBatch := pgx.Batch{}
+		logger.Info("Fetching tokens: %d", len(fetchTokensMetadataQueue))
+		for _, queued := range fetchTokensMetadataQueue {
+			meta, err := coingecko.GetCoinMetadata(queued.coingeckoId)
+			if err == nil {
+				for _, tokenData := range queued.tokensData {
+					tokenData.ImgUrl = meta.Image.Small
+				}
+
+				const insertTokenImgUrl = `
+					update coingecko_token_data set
+						image_url = $1
+					where
+						coingecko_id = $2
+				`
+				insertTokenImgUrlBatch.Queue(
+					insertTokenImgUrl,
+					meta.Image.Small,
+					queued.coingeckoId,
+				)
+			}
+		}
+
+		br = pool.SendBatch(ctx, &insertTokenImgUrlBatch)
+		if err := br.Close(); err != nil {
+			renderError(w, 500, "unable to insert token img urls: %s", err)
+			return
 		}
 
 		eventsPageContent := executeTemplateMust(

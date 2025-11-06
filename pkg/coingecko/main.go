@@ -71,13 +71,14 @@ func sendRequest[T any](
 
 	defer res.Body.Close()
 	resBody, err := io.ReadAll(res.Body)
+
 	if err != nil {
 		return fmt.Errorf("unable to read response body: %w", err)
 	}
 	if res.StatusCode != 200 {
 		return fmt.Errorf("body: %s\nresponse status != 200", string(resBody))
 	}
-	if err = json.Unmarshal(resBody, &resBodyData); err != nil {
+	if err = json.Unmarshal(resBody, resBodyData); err != nil {
 		return fmt.Errorf(
 			"body: %s\nunable to unmarshal response body: %w",
 			string(resBody),
@@ -218,4 +219,18 @@ func GetCoinOhlc(
 	err := sendRequest(endpoint, &res)
 
 	return res, err
+}
+
+type CoinMetadata struct {
+	Image struct {
+		Thumb string `json:"thumb"`
+		Small string `json:"small"`
+		Large string `json:"large"`
+	} `json:"image"`
+}
+
+func GetCoinMetadata(coinId string) (res CoinMetadata, err error) {
+	endpoint := fmt.Sprintf("/coins/%s", coinId)
+	err = sendRequest(endpoint, &res)
+	return
 }

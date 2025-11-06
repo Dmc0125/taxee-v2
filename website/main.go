@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"taxee/pkg/assert"
+	"taxee/pkg/coingecko"
 	"taxee/pkg/db"
 	"taxee/pkg/dotenv"
 	"time"
@@ -134,6 +135,8 @@ func main() {
 		prod = false
 	}
 
+	coingecko.Init()
+
 	templateFuncs := template.FuncMap{
 		"formatDate": func(t time.Time) string {
 			return t.Format("02/01/2006")
@@ -146,6 +149,19 @@ func main() {
 		},
 		"shorten": shorten,
 		"toTitle": toTitle,
+		"tern": func(pairs ...any) any {
+			assert.True(len(pairs)%2 != 0, "invalid pairs len")
+
+			for i := 0; i < len(pairs)-1; i += 2 {
+				cond, ok := pairs[i].(bool)
+				assert.True(ok, "expected bool")
+				if cond {
+					return pairs[i+1]
+				}
+			}
+
+			return pairs[len(pairs)-1]
+		},
 	}
 	var templates *template.Template = template.New("root").Funcs(templateFuncs)
 	loadTemplate(templates, pageLayoutComponent)

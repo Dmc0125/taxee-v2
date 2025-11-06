@@ -13,7 +13,7 @@
 .bg-crossed {
     background-image: repeating-linear-gradient(
         -55deg,
-        var(--color-gray-300) 0 2px,
+        var(--color-gray-200) 0 2px,
         transparent 2px 8px
     );
 }
