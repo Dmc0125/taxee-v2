@@ -38,7 +38,7 @@ var networksGlobals = map[db.Network]networkGlobals{
 	},
 }
 
-type eventTableRow struct {
+type eventTableRowComponentData struct {
 	Type  uint8
 	Date  time.Time
 	Event eventComponentData
@@ -108,6 +108,10 @@ type eventComponentData struct {
 	OutgoingTransfers *eventTransfersComponentData
 	IncomingTransfers *eventTransfersComponentData
 	Profits           []*eventFiatAmountComponentData
+
+	HasErrors        bool
+	PreprocessErrors eventErrorGroupComponentData
+	ProcessErrors    eventErrorGroupComponentData
 }
 
 const eventComponent = `<!-- html -->
@@ -172,21 +176,76 @@ const eventComponent = `<!-- html -->
 			{{ end }}
 		</div>
 
-		<!--
+		{{ if .HasErrors }}
 		<div class="
-			w-full grid grid-cols-[repeat(3,1fr)]
+			w-full grid grid-cols-[repeat(2,1fr)]
 			border-t border-gray-200
 		">
-			<div>
-				<span>Missing prices</span> 
-			</div>
-			<div>
-				<span>Missing prices</span>
-			</div>
+			{{ template "event_error_group_component" .PreprocessErrors }}
+			{{ template "event_error_group_component" .ProcessErrors }}
 		</div>
-		-->
+		{{ end }}
 	</div>
 </li>
+{{ end }}
+`
+
+type eventErrorComponentData struct {
+	Address  string
+	Type     int
+	Had      any
+	Expected any
+}
+
+type eventErrorGroupComponentData struct {
+	Type   int
+	Errors []eventErrorComponentData
+}
+
+const eventErrorGroupComponent = `<!-- html -->
+{{ define "event_error_group_component" }}
+<div class="px-4 py-2 border-r border-gray-200">
+	<span class="text-gray-800">
+		{{ if eq .Type 0 }}
+			Preprocess errors
+		{{ else }}
+			Process errors
+		{{ end }}
+	</span> 
+	
+	<ul class="
+		w-full mt-2 gap-y-2
+		grid grid-cols-[20%_repeat(3,1fr)]
+	">
+		<li class="
+			w-full py-1 col-[1/-1] grid grid-cols-subgrid
+			text-gray-600 border-b border-gray-200
+		">
+			<span>Account</span>
+			<span>Type</span>
+			<span>Real</span>
+			<span>Expected</span>
+		</li>
+		{{ range .Errors }}
+			<li class="col-[1/-1] grid grid-cols-subgrid text-gray-600 text-sm">
+				<span>{{ .Address }} </span>
+				{{ if eq .Type 1 }}
+					<span>Missing account</span>
+					<span>-</span>
+					<span>-</span>
+				{{ else if eq .Type 2 }}
+					<span>Balance mismatch</span>
+					<span>{{ .Had }}</span>
+					<span>{{ .Expected }}</span>
+				{{ else if eq .Type 3 }}
+					<span>Data mismatch</span>
+					<span>{{ .Had }}</span>
+					<span>{{ .Expected }}</span>
+				{{ end }}
+			</li>
+		{{ end }}
+	</ul>
+</div>
 {{ end }}
 `
 
@@ -326,7 +385,6 @@ func eventsRenderTokenAmounts(
 		Missing:  price.Equal(decimal.Zero),
 		Zero:     value.Equal(decimal.Zero),
 	}
-	fmt.Printf("%#v\n", *fiatData)
 	profitData = &eventFiatAmountComponentData{
 		Amount:   profit.StringFixed(2),
 		Currency: "eur",
@@ -435,6 +493,7 @@ func eventsHandler(
 	loadTemplate(templates, eventTransfersComponent)
 	loadTemplate(templates, eventTokenAmountComponent)
 	loadTemplate(templates, eventFiatAmountComponent)
+	loadTemplate(templates, eventErrorGroupComponent)
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		/////////////
@@ -514,12 +573,16 @@ func eventsHandler(
 
 		type event struct {
 			db.Event
+			preprocessErrors eventErrorGroupComponentData
+			processErrors    eventErrorGroupComponentData
 		}
 		events := make([]*event, 0)
 
 		for eventsRows.Next() {
 			var eventData, errorsSerialized []byte
 			e := new(event)
+			e.processErrors.Type = 1
+
 			if err := eventsRows.Scan(
 				&e.TxId,
 				&e.Network,
@@ -581,13 +644,63 @@ func eventsHandler(
 						properties += 1
 					case "data":
 						err = decoder.Decode(&parserErrorData)
+						fmt.Println(string(parserErrorData))
 						properties += 1
 					}
 					assert.NoErr(err, fmt.Sprintf("unable to decode: %s", ident))
 
 					if properties == 3 {
-						// done
-						fmt.Println("Done")
+						var errorComponentData eventErrorComponentData
+
+						switch parserErrorType {
+						case db.ParserErrorTypeMissingAccount:
+							var data db.ParserErrorMissingAccount
+							assert.NoErr(
+								json.Unmarshal(parserErrorData, &data),
+								"unable to unmarshal parser error",
+							)
+							errorComponentData.Type = 0
+							errorComponentData.Address = data.AccountAddress
+						case db.ParserErrorTypeAccountBalanceMismatch:
+							var data db.ParserErrorAccountBalanceMismatch
+							assert.NoErr(
+								json.Unmarshal(parserErrorData, &data),
+								"unable to unmarshal parser error",
+							)
+
+							errorComponentData.Type = 1
+							errorComponentData.Address = data.AccountAddress
+							errorComponentData.Had = data.Real.StringFixed(2)
+							errorComponentData.Expected = data.Expected.StringFixed(2)
+
+						case db.ParserErrorTypeAccountDataMismatch:
+							var data db.ParserErrorAccountDataMismatch
+							assert.NoErr(
+								json.Unmarshal(parserErrorData, &data),
+								"unable to unmarshal parser error",
+							)
+
+							errorComponentData.Type = 2
+							errorComponentData.Address = data.AccountAddress
+							// errorComponentData.Had = data.
+							// errorComponentData.Address = data.AccountAddress
+						}
+
+						switch parserErrorOrigin {
+						case db.ErrOriginPreprocess:
+							e.preprocessErrors.Errors = append(
+								e.preprocessErrors.Errors,
+								errorComponentData,
+							)
+						case db.ErrOriginProcess:
+							e.processErrors.Errors = append(
+								e.processErrors.Errors,
+								errorComponentData,
+							)
+						}
+
+						parserErrorData = json.RawMessage{}
+						properties = 0
 					}
 				}
 			}
@@ -597,7 +710,7 @@ func eventsHandler(
 
 		/////////////
 		// render events
-		eventTableRows := make([]eventTableRow, 0)
+		eventTableRows := make([]eventTableRowComponentData, 0)
 		prevDateUnix := int64(0)
 
 		getTokensMetaBatch := pgx.Batch{}
@@ -609,7 +722,7 @@ func eventsHandler(
 
 			if prevDateUnix != dateUnix {
 				prevDateUnix = dateUnix
-				eventTableRows = append(eventTableRows, eventTableRow{
+				eventTableRows = append(eventTableRows, eventTableRowComponentData{
 					Type: 0,
 					Date: time.Unix(dateUnix, 0),
 				})
@@ -634,6 +747,11 @@ func eventsHandler(
 				NetworkImgUrl: networkGlobals.imgUrl,
 				EventType:     toTitle(string(event.Type)),
 				Method:        toTitle(string(event.UiAppName)),
+
+				PreprocessErrors: event.preprocessErrors,
+				ProcessErrors:    event.processErrors,
+				HasErrors: len(event.preprocessErrors.Errors) != 0 ||
+					len(event.processErrors.Errors) != 0,
 			}
 
 			///////////////
@@ -706,7 +824,7 @@ func eventsHandler(
 				}
 			}
 
-			eventTableRows = append(eventTableRows, eventTableRow{
+			eventTableRows = append(eventTableRows, eventTableRowComponentData{
 				Type:  1,
 				Event: eventComponentData,
 			})

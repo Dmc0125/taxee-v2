@@ -84,8 +84,6 @@ func appendErrUnique(
 	n *db.ParserError,
 	address string,
 ) {
-	_, isPrice := n.Data.(*db.ParserErrorMissingPrice)
-	assert.True(!isPrice, "missing price error should not be unique")
 	accountErrors, ok := errors[address]
 
 	isEq := func(e1, e2 any) bool {
@@ -124,44 +122,6 @@ func appendErrUnique(
 			errors[address] = append(errors[address], n)
 		}
 	}
-}
-
-func appendMissingPriceError(
-	errors *[]*db.ParserError,
-	txId string,
-	ixIdx uint32,
-	token string,
-	timestamp time.Time,
-) {
-	e2Data := db.ParserErrorMissingPrice{
-		Token:     token,
-		Timestamp: timestamp,
-	}
-	e2 := db.ParserError{
-		TxId:  txId,
-		IxIdx: ixIdx,
-		Type:  db.ParserErrorTypeMissingPrice,
-		Data:  &e2Data,
-	}
-
-	if len(*errors) == 0 {
-		*errors = append(*errors, &e2)
-		return
-	}
-
-	// NOTE: errors are appended chronologically by time, so check from last
-	for i := len(*errors) - 1; i >= 0; i -= 1 {
-		e1Data := (*errors)[i].Data.(*db.ParserErrorMissingPrice)
-
-		if e2Data.Timestamp != e1Data.Timestamp {
-			*errors = append(*errors, &e2)
-			return
-		}
-		if e2Data.Token == e1Data.Token {
-			return
-		}
-	}
-
 }
 
 func devDeleteParsed(
@@ -519,13 +479,7 @@ func Parse(
 				var cid, priceStr string
 				err := row.Scan(&cid, &priceStr)
 				if errors.Is(err, pgx.ErrNoRows) {
-					appendMissingPriceError(
-						&priceErrors,
-						event.TxId,
-						uint32(event.IxIdx),
-						token,
-						roundedTimestamp,
-					)
+					// ERROR
 					return nil
 				} else {
 					assert.NoErr(
@@ -579,13 +533,7 @@ func Parse(
 				var coingeckoId, priceStr string
 				err := row.Scan(&coingeckoId, &priceStr)
 				if errors.Is(err, pgx.ErrNoRows) {
-					appendMissingPriceError(
-						&priceErrors,
-						event.TxId,
-						uint32(event.IxIdx),
-						token,
-						roundedTimestamp,
-					)
+					// ERROR
 					return nil
 				} else {
 					assert.NoErr(err, fmt.Sprintf("unable to scan pricepoint: %s", token))
@@ -664,14 +612,9 @@ func Parse(
 					price, ok = p.Close, true
 				}
 			} else {
-				event := events[token.eventIdx]
-				appendMissingPriceError(
-					&priceErrors,
-					event.TxId,
-					uint32(event.IxIdx),
-					token.coingeckoId,
-					ts,
-				)
+				// event := events[token.eventIdx]
+				// ERROR
+				continue
 			}
 		} else {
 			logger.Info("Found pricepoint in coingecko prices: %s %s", token.coingeckoId, ts)
