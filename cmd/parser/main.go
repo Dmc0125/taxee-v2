@@ -124,16 +124,21 @@ func appendErrUnique(
 	}
 }
 
-func devDeleteParsed(
+func devDeleteEvents(
 	ctx context.Context,
 	pool *pgxpool.Pool,
 	userAccountId int32,
 ) error {
-	const q = "call dev_delete_parsed($1)"
-	_, err := pool.Exec(ctx, q, userAccountId)
+	batch := pgx.Batch{}
+	batch.Queue("delete from event where user_account_id = $1", userAccountId)
+	batch.Queue("delete from parser_error where user_account_id = $1", userAccountId)
+
+	br := pool.SendBatch(ctx, &batch)
+	err := br.Close()
 	if err != nil {
-		return fmt.Errorf("unable to call dev_delete_parsed: %w", err)
+		return fmt.Errorf("unable to delete events")
 	}
+
 	return nil
 }
 
@@ -224,7 +229,7 @@ func Parse(
 	fetchCoingeckoTokens(ctx, pool)
 
 	if fresh {
-		err := devDeleteParsed(ctx, pool, userAccountId)
+		err := devDeleteEvents(ctx, pool, userAccountId)
 		assert.NoErr(err, "")
 	}
 
@@ -320,8 +325,15 @@ func Parse(
 			dataSerialized, err := json.Marshal(preprocessErr.Data)
 			assert.NoErr(err, "unable to marshal preprocess error data")
 
+			const insertErrorQuery = `
+				insert into parser_error (
+					user_account_id, tx_id, ix_idx, origin, type, data
+				) values (
+					$1, $2, $3, $4, $5, $6
+				)
+			`
 			insertErrorsBatch.Queue(
-				db.InsertParserError,
+				insertErrorQuery,
 				userAccountId,
 				preprocessErr.TxId,
 				preprocessErr.IxIdx,
@@ -445,7 +457,6 @@ func Parse(
 		eventIdx    int
 	}
 	tokenPricesToFetch := make([]tokenPriceToFetch, 0)
-	priceErrors := make([]*db.ParserError, 0)
 
 	for eventIdx, event := range events {
 		var token string
@@ -624,25 +635,6 @@ func Parse(
 		event.Data.SetPrice(price)
 	}
 
-	insertErrorsBatch = pgx.Batch{}
-	for _, priceError := range priceErrors {
-		dataSerialized, err := json.Marshal(priceError.Data)
-		assert.NoErr(err, "unable to marshal data")
-		insertErrorsBatch.Queue(
-			db.InsertParserError,
-			userAccountId,
-			priceError.TxId,
-			priceError.IxIdx,
-			db.ErrOriginProcess,
-			priceError.Type,
-			dataSerialized,
-		)
-	}
-
-	br = pool.SendBatch(ctx, &insertErrorsBatch)
-	err = br.Close()
-	assert.NoErr(err, "unable to insert price errors")
-
 	///////////////
 	// process events
 
@@ -650,16 +642,29 @@ func Parse(
 		accounts: make(map[inventoryAccountId][]*inventoryAccount),
 	}
 	eventsBatch := pgx.Batch{}
-	for eventIdx, event := range events {
+	for _, event := range events {
 		inv.processEvent(event)
 
-		_, err := db.EnqueueInsertEvent(
-			&eventsBatch,
+		eventData, err := json.Marshal(event.Data)
+		assert.NoErr(err, "unable to marshal event data")
+		const insertEventQuery = `
+			insert into event (
+				user_account_id, tx_id, ix_idx,
+				ui_app_name, ui_method_name, type, data
+			) values (
+				$1, $2, $3, $4, $5, $6, $7
+			)
+		`
+		eventsBatch.Queue(
+			insertEventQuery,
 			userAccountId,
-			int32(eventIdx),
-			event,
+			event.TxId,
+			event.IxIdx,
+			event.UiAppName,
+			event.UiMethodName,
+			event.Type,
+			eventData,
 		)
-		assert.NoErr(err, "")
 	}
 
 	br = pool.SendBatch(ctx, &eventsBatch)

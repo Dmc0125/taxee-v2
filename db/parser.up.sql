@@ -34,63 +34,40 @@ create type event_type as enum (
 );
 
 create table event (
+    id serial primary key,
+
     user_account_id integer not null,
-
-    -- TODO: later, custom events will be a thing so this should be reviewd
     tx_id varchar not null,
-    network network not null,
-    ix_idx integer,
-    idx integer not null,
-    timestamp timestamptz not null,
-
-    -- TODO: review this later
-    primary key (user_account_id, tx_id, network, ix_idx, idx),
-
     foreign key (user_account_id, tx_id) references tx_ref (
         user_account_id, tx_id
     ) on delete cascade,
+
+    ix_idx integer,
 
     ui_app_name varchar not null,
     ui_method_name varchar not null,
     type event_type not null,
-
     data jsonb not null
 );
 
-create table parser_err (
+create table parser_error (
     id serial primary key,
-    user_account_id integer not null,
 
-    -- err related to tx
+    user_account_id integer not null,
     tx_id varchar not null,
     foreign key (user_account_id, tx_id) references tx_ref (
         user_account_id, tx_id
     ) on delete cascade,
-    -- NOTE: could be eth -> does not have concept of ixs
+
     ix_idx integer,
-    unique (user_account_id, tx_id, ix_idx),
+    event_id integer,
+    foreign key (event_id) references event (id) on delete cascade,
 
-    -- -- err related to event
-    -- event_id integer,
-    -- foreign key (user_account_id, event_id) references event (
-    --     user_account_id, id
-    -- ) on delete cascade,
-
+    -- 0 => tx preprocess
+    -- 1 => tx process / event process
     origin smallint not null,
     type smallint not null,
     data jsonb not null
 );
-
-create procedure dev_delete_parsed(
-    p_user_account_id integer
-)
-language plpgsql
-as $$
-declare
-begin
-    delete from parser_err where user_account_id = p_user_account_id;
-    delete from event where user_account_id = p_user_account_id;
-end;
-$$;
 
 commit;

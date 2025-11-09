@@ -1,8 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,9 +39,22 @@ var networksGlobals = map[db.Network]networkGlobals{
 }
 
 type eventTableRowComponentData struct {
-	Type  uint8
-	Date  time.Time
-	Event eventComponentData
+	Type uint8
+
+	Timestamp   time.Time
+	TxId        string
+	ExplorerUrl string
+
+	Event *eventComponentData
+
+	HasErrors        bool
+	PreprocessErrors eventErrorGroupComponentData
+	ProcessErrors    eventErrorGroupComponentData
+}
+
+type eventsPageData struct {
+	NextUrl string
+	Rows    []eventTableRowComponentData
 }
 
 const eventsPage = `<!-- html -->
@@ -75,11 +88,44 @@ const eventsPage = `<!-- html -->
 				</div>
 			</li>
 
-			{{ range . }}
+			{{ range .Rows }}
 				{{ if eq .Type 0 }}
-					{{ template "group_divider_component" .Date }}
-				{{ else if eq .Type 1 }}
-					{{ template "event_component" .Event }}
+					{{ template "group_divider_component" .Timestamp }}
+				{{ else }}
+					<!-- Timestamp + explorer -->
+					<li class="w-full pl-4 grid grid-cols-[150px_1fr]">
+						<div class="flex flex-col">
+							<a
+								href="{{ .ExplorerUrl }}"
+								target="_blank"
+								class="text-gray-800"
+							>{{ .TxId }}</a>
+							<span class="text-sm text-gray-700">{{ formatTime .Timestamp }}</span>
+						</div>
+
+						<!-- event data -->
+						<div class="
+							w-full border border-gray-200 rounded-lg
+						">
+							{{ if eq .Type 1 }}
+								{{ template "event_component" .Event }}
+							{{ else if eq .Type 2 }}
+								<div class="w-full min-h-14 flex items-center justify-center">
+									This transaction does not have any events	
+								</div>
+							{{ end }}
+
+							{{ if .HasErrors }}
+								<div class="
+									w-full grid grid-cols-[repeat(2,1fr)]
+									border-t border-gray-200
+								">
+									{{ template "event_error_group_component" .PreprocessErrors }}
+									{{ template "event_error_group_component" .ProcessErrors }}
+								</div>
+							{{ end }}
+						</div>
+					</li>
 				{{ end }}
 			{{ end }}
 		</ul>
@@ -97,96 +143,63 @@ const groupDividerComponent = `<!-- html -->
 `
 
 type eventComponentData struct {
-	TxId          string
-	ExplorerUrl   string
-	Timestamp     time.Time
 	NetworkImgUrl string
-
-	EventType string
-	Method    string
+	EventType     string
+	Method        string
 
 	OutgoingTransfers *eventTransfersComponentData
 	IncomingTransfers *eventTransfersComponentData
 	Profits           []*eventFiatAmountComponentData
-
-	HasErrors        bool
-	PreprocessErrors eventErrorGroupComponentData
-	ProcessErrors    eventErrorGroupComponentData
 }
 
 const eventComponent = `<!-- html -->
 {{ define "event_component" }}
-<li class="w-full pl-4 grid grid-cols-[150px_1fr]">
-	<!-- Timestamp + explorer -->
-	<div class="flex flex-col">
-		<a
-			href="{{ .ExplorerUrl }}"
-			target="_blank"
-			class="text-gray-800"
-		>{{ .TxId }}</a>
-		<span class="text-sm text-gray-700">{{ formatTime .Timestamp }}</span>
-	</div>
-
-	<!-- Event -->
-	<div class="w-full border border-gray-200 rounded-lg">
-		<div class="
-			w-full px-4 py-2 grid grid-cols-[300px_repeat(2,minmax(350px,1fr))_150px]
-		">
-			<!-- App img, network img, event type, onchain method -->
-			<div class="flex">
-				<div class="w-10 h-10 rounded-full bg-gray-200 relative">
-					<div class="
-						w-5 h-5 p-0.5 absolute top-0 left-0
-						rounded-full bg-gray-100 border border-gray-200
-						overflow-hidden
-					">
-						<img 
-							src="{{ .NetworkImgUrl }}" 
-							class="w-full h-full"
-						/>
-					</div>
-				</div>
-
-				<div class="flex flex-col ml-4">
-					<span class="text-gray-800 font-medium">{{ .EventType }}</span>
-					<span class="text-gray-600 text-sm">{{ .Method }}</span>
-				</div>
+<div class="
+	w-full px-4 py-2 grid grid-cols-[300px_repeat(2,minmax(350px,1fr))_150px]
+">
+	<!-- App img, network img, event type, onchain method -->
+	<div class="flex">
+		<div class="w-10 h-10 rounded-full bg-gray-200 relative">
+			<div class="
+				w-5 h-5 p-0.5 absolute top-0 left-0
+				rounded-full bg-gray-100 border border-gray-200
+				overflow-hidden
+			">
+				<img 
+					src="{{ .NetworkImgUrl }}" 
+					class="w-full h-full"
+				/>
 			</div>
-
-			<!-- Outgoing -->
-			{{ template "event_transfers_component" .OutgoingTransfers }}
-
-			<!-- Incoming -->
-			{{ template "event_transfers_component" .IncomingTransfers }}
-
-			{{ if .Profits }}
-				<div class="w-full flex flex-col gap-y-1">
-					<div class="opacity-0 h-[1em] text-sm"></div>
-					<div class="mt-1">
-						{{ range .Profits }}
-							{{ template "event_fiat_amount_component" . }}
-						{{ end }}
-					</div>
-				</div>
-			{{ else }}
-				<div class="w-full flex flex-col gap-y-1">
-					<div class="opacity-0 h-[1em] text-sm"></div>
-					<div class="mt-1">-</div>
-				</div>
-			{{ end }}
 		</div>
 
-		{{ if .HasErrors }}
-		<div class="
-			w-full grid grid-cols-[repeat(2,1fr)]
-			border-t border-gray-200
-		">
-			{{ template "event_error_group_component" .PreprocessErrors }}
-			{{ template "event_error_group_component" .ProcessErrors }}
+		<div class="flex flex-col ml-4">
+			<span class="text-gray-800 font-medium">{{ .EventType }}</span>
+			<span class="text-gray-600 text-sm">{{ .Method }}</span>
 		</div>
-		{{ end }}
 	</div>
-</li>
+
+	<!-- Outgoing -->
+	{{ template "event_transfers_component" .OutgoingTransfers }}
+
+	<!-- Incoming -->
+	{{ template "event_transfers_component" .IncomingTransfers }}
+
+	{{ if .Profits }}
+		<div class="w-full flex flex-col gap-y-1">
+			<div class="opacity-0 h-[1em] text-sm"></div>
+			<div class="mt-1">
+				{{ range .Profits }}
+					{{ template "event_fiat_amount_component" . }}
+				{{ end }}
+			</div>
+		</div>
+	{{ else }}
+		<div class="w-full flex flex-col gap-y-1">
+			<div class="opacity-0 h-[1em] text-sm"></div>
+			<div class="mt-1">-</div>
+		</div>
+	{{ end }}
+</div>
 {{ end }}
 `
 
@@ -204,7 +217,7 @@ type eventErrorGroupComponentData struct {
 
 const eventErrorGroupComponent = `<!-- html -->
 {{ define "event_error_group_component" }}
-<div class="px-4 py-2 border-r border-gray-200">
+<div class="px-4 py-2 flex flex-col border-r border-gray-200">
 	<span class="text-gray-800">
 		{{ if eq .Type 0 }}
 			Preprocess errors
@@ -212,39 +225,47 @@ const eventErrorGroupComponent = `<!-- html -->
 			Process errors
 		{{ end }}
 	</span> 
-	
-	<ul class="
-		w-full mt-2 gap-y-2
-		grid grid-cols-[20%_repeat(3,1fr)]
-	">
-		<li class="
-			w-full py-1 col-[1/-1] grid grid-cols-subgrid
-			text-gray-600 border-b border-gray-200
+
+	{{ if .Errors }}
+		<ul class="
+			w-full mt-2 gap-y-2
+			grid grid-cols-[20%_repeat(3,1fr)]
 		">
-			<span>Account</span>
-			<span>Type</span>
-			<span>Real</span>
-			<span>Expected</span>
-		</li>
-		{{ range .Errors }}
-			<li class="col-[1/-1] grid grid-cols-subgrid text-gray-600 text-sm">
-				<span>{{ .Address }} </span>
-				{{ if eq .Type 1 }}
-					<span>Missing account</span>
-					<span>-</span>
-					<span>-</span>
-				{{ else if eq .Type 2 }}
-					<span>Balance mismatch</span>
-					<span>{{ .Had }}</span>
-					<span>{{ .Expected }}</span>
-				{{ else if eq .Type 3 }}
-					<span>Data mismatch</span>
-					<span>{{ .Had }}</span>
-					<span>{{ .Expected }}</span>
-				{{ end }}
+			<li class="
+				w-full py-1 col-[1/-1] grid grid-cols-subgrid
+				text-gray-600 border-b border-gray-200 text-sm
+			">
+				<span>Account</span>
+				<span>Type</span>
+				<span>Real</span>
+				<span>Expected</span>
 			</li>
-		{{ end }}
-	</ul>
+			{{ range .Errors }}
+				<li class="col-[1/-1] grid grid-cols-subgrid text-gray-600 text-sm">
+					<span>{{ shorten .Address 4 4 }} </span>
+					{{ if eq .Type 0 }}
+						<span>Missing account</span>
+						<span>-</span>
+						<span>-</span>
+					{{ else if eq .Type 1 }}
+						<span>Balance mismatch</span>
+						<span>{{ .Had }}</span>
+						<span>{{ .Expected }}</span>
+					{{ else if eq .Type 2 }}
+						<span>Data mismatch</span>
+						<span>{{ .Had }}</span>
+						<span>{{ .Expected }}</span>
+					{{ end }}
+				</li>
+			{{ end }}
+		</ul>
+	{{ else }}
+		<div class="w-full h-full mt-2 flex items-center justify-center">
+			<span class="text-gray-600">
+				No errors of this kind
+			</span>
+		</div>
+	{{ end }}
 </div>
 {{ end }}
 `
@@ -513,321 +534,384 @@ func eventsHandler(
 		// 	// TODO: Auth
 		// }
 
-		var fromIdx int32
-		limit := int32(50)
+		var (
+			limit = int32(50)
 
-		fromIdxQueryVal, limitQueryVal := query.Get("from"), query.Get("limit")
+			offset        = query.Get("offset")
+			limitQueryVal = query.Get("limit")
+			txId          = query.Get("tx_id")
+		)
 
-		if v, err := strconv.Atoi(fromIdxQueryVal); err == nil {
-			fromIdx = int32(v)
-		}
 		if v, err := strconv.Atoi(limitQueryVal); err == nil {
 			limit = int32(v)
+		}
+
+		type eventsOffsetT struct {
+			SolanaSlot            uint64
+			SolanaBlockIndex      int32
+			ArbitrumOneBlock      uint64
+			ArbitrumOneBlockIndex uint64
+		}
+		var eventsOffset eventsOffsetT
+		if offset != "" {
+			if offsetBytes, err := hex.DecodeString(offset); err == nil {
+				if err := json.Unmarshal(offsetBytes, &eventsOffset); err != nil {
+					renderError(w, 400, "unable to unmarshal offset: %s", err)
+					return
+				}
+			}
 		}
 
 		/////////////
 		// get events
 
-		const getEventsQuery = `
+		// fetch transactions which have at least one event or error
+		const getEventsQuerySelect = `
 			select
-				e.tx_id,
-				e.network,
-				e.timestamp,
-				e.type,
-				e.ui_app_name,
-				e.data,
-				(
-					select
-						coalesce(
-							jsonb_agg(
-								jsonb_build_object(
-									'origin', perr.origin,
-									'type', perr.type,
-									'data', perr.data
-								) order by perr.id asc
-							),
-							'[]'::jsonb
-						)
-					from
-						parser_err perr
-					where
-						perr.tx_id = e.tx_id and
-						perr.ix_idx = e.ix_idx and
-						perr.user_account_id = e.user_account_id
+				tx.id,
+				tx.network,
+				tx.timestamp,
+				coalesce(
+					jsonb_agg(
+						jsonb_build_object(
+							'IxIdx', e.ix_idx,
+							'UiAppName', e.ui_app_name,
+							'UiMethodName', e.ui_method_name,
+							'Type', e.type,
+							'Data', e.data
+						) order by e.id asc
+					) filter (where e.id is not null),
+					'[]'::jsonb
+				) as events,
+				coalesce(
+					jsonb_agg(
+						jsonb_build_object(
+							'IxIdx', pe.ix_idx,
+							'EventId', pe.event_id,
+							'Origin', pe.origin,
+							'Type', pe.type,
+							'Data', pe.data
+						) order by pe.origin asc
+					) filter (where pe.id is not null),
+					'[]'::jsonb
 				) as errors
 			from
-				event e
-			where
-				e.user_account_id = $1 and
-				e.idx > $2
-			order by
-				e.idx asc
-			limit
-				$3
+				tx_ref
+			inner join
+				tx on tx.id = tx_ref.tx_id
+			left join
+				event e on 
+					e.tx_id = tx_ref.tx_id and 
+					e.user_account_id = tx_ref.user_account_id
+			left join
+				parser_error pe on
+					pe.tx_id = tx_ref.tx_id and
+					pe.user_account_id = tx_ref.user_account_id
 		`
-		eventsRows, err := pool.Query(ctx, getEventsQuery, userAccountId, fromIdx, limit)
+		const getEventsQuerySelectAfter = `
+			group by
+				tx.id
+			order by
+				-- global ordering
+				tx.timestamp asc,
+				-- network specific ordering in case of timestamps conflicts
+				-- solana 
+				(tx.data->>'slot')::bigint asc,
+				(tx.data->>'blockIndex')::integer asc,
+				-- evm
+				(tx.data->>'block')::bigint asc,
+				(tx.data->>'txIdx')::integer asc
+		`
+
+		var eventsRows pgx.Rows
+		var err error
+
+		switch {
+		case txId != "":
+			getEventByTxId := fmt.Sprintf(`
+					%s
+					where
+						tx_ref.user_account_id = $1 and tx.id = $2
+					%s
+				`,
+				getEventsQuerySelect,
+				getEventsQuerySelectAfter,
+			)
+			eventsRows, err = pool.Query(
+				ctx,
+				getEventByTxId,
+				userAccountId,
+				txId,
+			)
+		default:
+			getEventsQuery := fmt.Sprintf(`
+					%s
+					where
+						tx_ref.user_account_id = $1 and
+						(e.id is not null or pe.id is not null) and
+
+						-- pagination
+						(
+							(
+								tx.network = 'solana' and (
+									(tx.data->>'slot')::bigint > $3 or (
+										(tx.data->>'slot')::bigint = $3 and 
+										(tx.data->>'blockIndex')::integer > $4
+									)
+								)
+							) or (
+								tx.network = 'arbitrum' and (
+									(tx.data->>'block')::bigint > $5 or (
+										(tx.data->>'block')::bigint = $5 and
+										(tx.data->>'txIdx')::integer > $6
+									)
+								)
+							)
+						)
+					%s
+					limit
+						$2
+				`,
+				getEventsQuerySelect,
+				getEventsQuerySelectAfter,
+			)
+			eventsRows, err = pool.Query(
+				ctx,
+				getEventsQuery,
+				// args
+				userAccountId,
+				limit,
+				eventsOffset.SolanaSlot, eventsOffset.SolanaBlockIndex,
+				eventsOffset.ArbitrumOneBlock, eventsOffset.ArbitrumOneBlockIndex,
+			)
+		}
+
 		if err != nil {
-			renderError(w, 500, "unable to query events: %s", err)
+			renderError(w, 500, "unable to query txs: %s", err)
 			return
 		}
 
-		type event struct {
-			db.Event
-			preprocessErrors eventErrorGroupComponentData
-			processErrors    eventErrorGroupComponentData
+		eventsPageData := eventsPageData{
+			NextUrl: "",
+			Rows:    make([]eventTableRowComponentData, 0),
 		}
-		events := make([]*event, 0)
-
-		for eventsRows.Next() {
-			var eventData, errorsSerialized []byte
-			e := new(event)
-			e.processErrors.Type = 1
-
-			if err := eventsRows.Scan(
-				&e.TxId,
-				&e.Network,
-				&e.Timestamp,
-				&e.Type,
-				&e.UiAppName,
-				&eventData,
-				&errorsSerialized,
-			); err != nil {
-				renderError(w, 500, "unable to scan events: %s", err)
-				return
-			}
-
-			if err := e.UnmarshalData(eventData); err != nil {
-				renderError(w, 500, "unable to unmarshal event: %s", err)
-				return
-			}
-
-			decoder := json.NewDecoder(bytes.NewBuffer(errorsSerialized))
-			{
-				token, err := decoder.Token()
-				assert.NoErr(err, "empty errors json")
-				if delim, ok := token.(json.Delim); ok {
-					assert.True(delim == '[', "invalid errors json")
-				} else {
-					assert.True(false, "expected [")
-				}
-			}
-
-			properties := 0
-			var (
-				parserErrorData   json.RawMessage
-				parserErrorOrigin db.ErrOrigin
-				parserErrorType   db.ParserErrorType
-			)
-
-			for decoder.More() {
-				token, err := decoder.Token()
-				assert.NoErr(err, "invalid errors json")
-
-				if delim, ok := token.(json.Delim); ok {
-					switch delim {
-					case ']':
-						break
-					default:
-						continue
-					}
-				}
-
-				ident, ok := token.(string)
-				if ok {
-					var err error
-					switch ident {
-					case "origin":
-						err = decoder.Decode(&parserErrorOrigin)
-						properties += 1
-					case "type":
-						err = decoder.Decode(&parserErrorType)
-						properties += 1
-					case "data":
-						err = decoder.Decode(&parserErrorData)
-						fmt.Println(string(parserErrorData))
-						properties += 1
-					}
-					assert.NoErr(err, fmt.Sprintf("unable to decode: %s", ident))
-
-					if properties == 3 {
-						var errorComponentData eventErrorComponentData
-
-						switch parserErrorType {
-						case db.ParserErrorTypeMissingAccount:
-							var data db.ParserErrorMissingAccount
-							assert.NoErr(
-								json.Unmarshal(parserErrorData, &data),
-								"unable to unmarshal parser error",
-							)
-							errorComponentData.Type = 0
-							errorComponentData.Address = data.AccountAddress
-						case db.ParserErrorTypeAccountBalanceMismatch:
-							var data db.ParserErrorAccountBalanceMismatch
-							assert.NoErr(
-								json.Unmarshal(parserErrorData, &data),
-								"unable to unmarshal parser error",
-							)
-
-							errorComponentData.Type = 1
-							errorComponentData.Address = data.AccountAddress
-							errorComponentData.Had = data.Real.StringFixed(2)
-							errorComponentData.Expected = data.Expected.StringFixed(2)
-
-						case db.ParserErrorTypeAccountDataMismatch:
-							var data db.ParserErrorAccountDataMismatch
-							assert.NoErr(
-								json.Unmarshal(parserErrorData, &data),
-								"unable to unmarshal parser error",
-							)
-
-							errorComponentData.Type = 2
-							errorComponentData.Address = data.AccountAddress
-							// errorComponentData.Had = data.
-							// errorComponentData.Address = data.AccountAddress
-						}
-
-						switch parserErrorOrigin {
-						case db.ErrOriginPreprocess:
-							e.preprocessErrors.Errors = append(
-								e.preprocessErrors.Errors,
-								errorComponentData,
-							)
-						case db.ErrOriginProcess:
-							e.processErrors.Errors = append(
-								e.processErrors.Errors,
-								errorComponentData,
-							)
-						}
-
-						parserErrorData = json.RawMessage{}
-						properties = 0
-					}
-				}
-			}
-
-			events = append(events, e)
-		}
-
-		/////////////
-		// render events
-		eventTableRows := make([]eventTableRowComponentData, 0)
-		prevDateUnix := int64(0)
-
 		getTokensMetaBatch := pgx.Batch{}
 		fetchTokensMetadataQueue := make([]*fetchTokenMetadataQueued, 0)
+		var prevDateUnix int64
 
-		for _, event := range events {
+		for eventsRows.Next() {
+			var (
+				txId                                   string
+				network                                db.Network
+				timestamp                              time.Time
+				eventsMarshaled, parserErrorsMarshaled json.RawMessage
+			)
+
+			if err := eventsRows.Scan(
+				&txId, &network, &timestamp, &eventsMarshaled, &parserErrorsMarshaled,
+			); err != nil {
+				renderError(w, 500, "unable to scan txs: %s", err)
+				return
+			}
+
 			const daySecs = 60 * 60 * 24
-			dateUnix := event.Timestamp.Unix() / daySecs * daySecs
-
-			if prevDateUnix != dateUnix {
+			if dateUnix := timestamp.Unix() / daySecs * daySecs; prevDateUnix != dateUnix {
 				prevDateUnix = dateUnix
-				eventTableRows = append(eventTableRows, eventTableRowComponentData{
-					Type: 0,
-					Date: time.Unix(dateUnix, 0),
-				})
-			}
-
-			networkGlobals, ok := networksGlobals[event.Network]
-			assert.True(ok, "missing globals for network: %s", event.Network.String())
-
-			txId := fmt.Sprintf(
-				"%s...%s",
-				event.TxId[:5], event.TxId[len(event.TxId)-2:],
-			)
-			explorerUrl := fmt.Sprintf(
-				"%s/tx/%s",
-				networkGlobals.explorerUrl, event.TxId,
-			)
-
-			eventComponentData := eventComponentData{
-				TxId:          txId,
-				ExplorerUrl:   explorerUrl,
-				Timestamp:     event.Timestamp,
-				NetworkImgUrl: networkGlobals.imgUrl,
-				EventType:     toTitle(string(event.Type)),
-				Method:        toTitle(string(event.UiAppName)),
-
-				PreprocessErrors: event.preprocessErrors,
-				ProcessErrors:    event.processErrors,
-				HasErrors: len(event.preprocessErrors.Errors) != 0 ||
-					len(event.processErrors.Errors) != 0,
-			}
-
-			///////////////
-			// transfers
-
-			switch data := event.Data.(type) {
-			case *db.EventTransfer:
-				tokenData, fiatData, profitData := eventsRenderTokenAmounts(
-					data.Amount,
-					data.Value,
-					data.Profit,
-					data.Price,
-					data.Token,
-					event.Network,
-					data.TokenSource,
-					&getTokensMetaBatch,
-					&fetchTokensMetadataQueue,
-				)
-
-				eventComponentData.Profits = append(
-					eventComponentData.Profits,
-					profitData,
-				)
-				transfersComponentData := eventTransfersComponentData{
-					Wallet: shorten(data.Wallet, 4, 4),
-					Tokens: []*eventTokenAmountComponentData{
-						tokenData,
+				eventsPageData.Rows = append(
+					eventsPageData.Rows,
+					eventTableRowComponentData{
+						Type:      0,
+						Timestamp: timestamp,
 					},
-					Fiats: []*eventFiatAmountComponentData{
-						fiatData,
-					},
-				}
-
-				switch data.Direction {
-				case db.EventTransferIncoming:
-					eventComponentData.IncomingTransfers = &transfersComponentData
-				case db.EventTransferOutgoing:
-					eventComponentData.OutgoingTransfers = &transfersComponentData
-				}
-			case *db.EventTransferInternal:
-				// NOTE: profit can exist event on internal transfers
-				// in case of missing balances
-				tokenData, fiatData, profitData := eventsRenderTokenAmounts(
-					data.Amount,
-					data.Value,
-					data.Profit,
-					data.Price,
-					data.Token,
-					event.Network,
-					data.TokenSource,
-					&getTokensMetaBatch,
-					&fetchTokensMetadataQueue,
 				)
-				fiatData.Sign = 0
+			}
 
-				eventComponentData.Profits = append(
-					eventComponentData.Profits,
-					profitData,
-				)
+			networkGlobals, ok := networksGlobals[network]
+			assert.True(ok, "missing globals for network: %s", network.String())
 
-				eventComponentData.OutgoingTransfers = &eventTransfersComponentData{
-					Wallet: shorten(data.FromWallet, 4, 4),
-					Tokens: []*eventTokenAmountComponentData{tokenData},
-					Fiats:  []*eventFiatAmountComponentData{fiatData},
+			tableRowComponent := eventTableRowComponentData{
+				Timestamp: timestamp,
+				TxId: fmt.Sprintf(
+					"%s...%s",
+					txId[:5], txId[len(txId)-2:],
+				),
+				ExplorerUrl: fmt.Sprintf(
+					"%s/tx/%s",
+					networkGlobals.explorerUrl, txId,
+				),
+			}
+
+			var events []*struct {
+				*db.Event
+				SerializedData json.RawMessage `json:"Data"`
+			}
+
+			// NOTE: '[]' if empty
+			if len(eventsMarshaled) != 2 {
+				if err := json.Unmarshal(eventsMarshaled, &events); err != nil {
+					renderError(w, 500, "unable to unmarshal events: %s", err)
+					return
 				}
-				eventComponentData.IncomingTransfers = &eventTransfersComponentData{
-					Wallet: shorten(data.ToWallet, 4, 4),
-					Tokens: []*eventTokenAmountComponentData{tokenData},
-					Fiats:  []*eventFiatAmountComponentData{fiatData},
+
+				for _, e := range events {
+					if err := e.UnmarshalData(e.SerializedData); err != nil {
+						renderError(w, 500, "unmable to unmarshal event data: %s", err)
+						return
+					}
+
+					eventComponentData := &eventComponentData{
+						NetworkImgUrl: networkGlobals.imgUrl,
+						EventType:     toTitle(string(e.Type)),
+						Method:        toTitle(string(e.UiAppName)),
+					}
+					tableRowComponent.Event = eventComponentData
+					tableRowComponent.Type = 1
+					eventsPageData.Rows = append(
+						eventsPageData.Rows,
+						tableRowComponent,
+					)
+
+					///////////////
+					// transfers
+
+					switch data := e.Data.(type) {
+					case *db.EventTransfer:
+						tokenData, fiatData, profitData := eventsRenderTokenAmounts(
+							data.Amount,
+							data.Value,
+							data.Profit,
+							data.Price,
+							data.Token,
+							network,
+							data.TokenSource,
+							&getTokensMetaBatch,
+							&fetchTokensMetadataQueue,
+						)
+
+						eventComponentData.Profits = append(
+							eventComponentData.Profits,
+							profitData,
+						)
+						transfersComponentData := eventTransfersComponentData{
+							Wallet: shorten(data.Wallet, 4, 4),
+							Tokens: []*eventTokenAmountComponentData{
+								tokenData,
+							},
+							Fiats: []*eventFiatAmountComponentData{
+								fiatData,
+							},
+						}
+
+						switch data.Direction {
+						case db.EventTransferIncoming:
+							eventComponentData.IncomingTransfers = &transfersComponentData
+						case db.EventTransferOutgoing:
+							eventComponentData.OutgoingTransfers = &transfersComponentData
+						}
+					case *db.EventTransferInternal:
+						// NOTE: profit can exist event on internal transfers
+						// in case of missing balances
+						tokenData, fiatData, profitData := eventsRenderTokenAmounts(
+							data.Amount,
+							data.Value,
+							data.Profit,
+							data.Price,
+							data.Token,
+							network,
+							data.TokenSource,
+							&getTokensMetaBatch,
+							&fetchTokensMetadataQueue,
+						)
+						fiatData.Sign = 0
+
+						eventComponentData.Profits = append(
+							eventComponentData.Profits,
+							profitData,
+						)
+
+						eventComponentData.OutgoingTransfers = &eventTransfersComponentData{
+							Wallet: shorten(data.FromWallet, 4, 4),
+							Tokens: []*eventTokenAmountComponentData{tokenData},
+							Fiats:  []*eventFiatAmountComponentData{fiatData},
+						}
+						eventComponentData.IncomingTransfers = &eventTransfersComponentData{
+							Wallet: shorten(data.ToWallet, 4, 4),
+							Tokens: []*eventTokenAmountComponentData{tokenData},
+							Fiats:  []*eventFiatAmountComponentData{fiatData},
+						}
+					}
 				}
 			}
 
-			eventTableRows = append(eventTableRows, eventTableRowComponentData{
-				Type:  1,
-				Event: eventComponentData,
-			})
+			if len(parserErrorsMarshaled) != 2 {
+				var errors []*struct {
+					IxIdx   int32
+					EventId pgtype.Int4
+					Origin  db.ErrOrigin
+					Type    db.ParserErrorType
+					Data    json.RawMessage
+				}
+				if err := json.Unmarshal(parserErrorsMarshaled, &errors); err != nil {
+					renderError(w, 500, "unable to unmarshal parser errors: %s", err)
+					return
+				}
+
+				for _, err := range errors {
+					var errorComponentData eventErrorComponentData
+					errorComponentData.Type = int(err.Type)
+
+					switch err.Type {
+					case db.ParserErrorTypeMissingAccount:
+						var data db.ParserErrorMissingAccount
+						if err := json.Unmarshal(err.Data, &data); err != nil {
+							renderError(w, 500, "unable to unmarshal parser error: %s", err)
+							return
+						}
+						errorComponentData.Address = data.AccountAddress
+					case db.ParserErrorTypeAccountBalanceMismatch:
+						var data db.ParserErrorAccountBalanceMismatch
+						if err := json.Unmarshal(err.Data, &data); err != nil {
+							renderError(w, 500, "unable to unmarshal parser error: %s", err)
+							return
+						}
+						errorComponentData.Address = data.AccountAddress
+						errorComponentData.Had = data.Real.StringFixed(2)
+						errorComponentData.Expected = data.Expected.StringFixed(2)
+					case db.ParserErrorTypeAccountDataMismatch:
+						var data db.ParserErrorMissingAccount
+						if err := json.Unmarshal(err.Data, &data); err != nil {
+							renderError(w, 500, "unable to unmarshal parser error: %s", err)
+							return
+						}
+						errorComponentData.Address = data.AccountAddress
+					default:
+						assert.True(false, "invalid parser error: %d", err.Type)
+					}
+
+					switch err.Origin {
+					case db.ErrOriginPreprocess:
+						tableRowComponent.PreprocessErrors.Errors = append(
+							tableRowComponent.PreprocessErrors.Errors,
+							errorComponentData,
+						)
+					case db.ErrOriginProcess:
+						tableRowComponent.ProcessErrors.Errors = append(
+							tableRowComponent.ProcessErrors.Errors,
+							errorComponentData,
+						)
+					}
+				}
+
+				tableRowComponent.HasErrors = true
+				if len(events) == 0 {
+					tableRowComponent.Type = 2
+				}
+
+				eventsPageData.Rows = append(
+					eventsPageData.Rows,
+					tableRowComponent,
+				)
+			}
 		}
 
 		///////////////
@@ -873,7 +957,7 @@ func eventsHandler(
 		eventsPageContent := executeTemplateMust(
 			templates,
 			"events_page",
-			eventTableRows,
+			eventsPageData,
 		)
 
 		page := executeTemplateMust(templates, "page_layout", pageLayoutComponentData{
