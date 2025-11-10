@@ -60,8 +60,11 @@ type eventsPageData struct {
 const eventsPage = `<!-- html -->
 {{ define "events_page" }}
 <div class="w-[80%] mx-auto mt-10">
-	<header class="w-full">
+	<header class="w-full flex items-center justify-between">
 		<h1 class="font-semibold text-2xl">Events</h1>
+		<a href="{{ .NextUrl }}" class="">
+			Next
+		</a>
 	</header>
 
 	<div class="w-full mt-10 overflow-x-auto">
@@ -110,7 +113,7 @@ const eventsPage = `<!-- html -->
 							{{ if eq .Type 1 }}
 								{{ template "event_component" .Event }}
 							{{ else if eq .Type 2 }}
-								<div class="w-full min-h-14 flex items-center justify-center">
+								<div class="w-full min-h-14 flex items-center justify-center text-gray-600">
 									This transaction does not have any events	
 								</div>
 							{{ end }}
@@ -217,18 +220,27 @@ type eventErrorGroupComponentData struct {
 
 const eventErrorGroupComponent = `<!-- html -->
 {{ define "event_error_group_component" }}
-<div class="px-4 py-2 flex flex-col border-r border-gray-200">
-	<span class="text-gray-800">
+<div class="px-4 py-4 flex flex-col border-r border-gray-200">
+	<div class="w-full flex items-center justify-between">
+		<span class="text-gray-600 text-sm">
 		{{ if eq .Type 0 }}
-			Preprocess errors
+			Preprocess errors 
 		{{ else }}
 			Process errors
 		{{ end }}
-	</span> 
+		</span>
+
+		{{ if .Errors }}
+			<span class="
+				w-5 h-5 rounded-full text-xs bg-red-700/20 text-red-700
+				flex items-center justify-center flex-shrink-0
+			">{{ len .Errors }}</span>
+		{{ end }}
+	</div> 
 
 	{{ if .Errors }}
 		<ul class="
-			w-full mt-2 gap-y-2
+			w-full mt-2 gap-y-4
 			grid grid-cols-[20%_repeat(3,1fr)]
 		">
 			<li class="
@@ -241,7 +253,7 @@ const eventErrorGroupComponent = `<!-- html -->
 				<span>Expected</span>
 			</li>
 			{{ range .Errors }}
-				<li class="col-[1/-1] grid grid-cols-subgrid text-gray-600 text-sm">
+				<li class="col-[1/-1] grid grid-cols-subgrid text-gray-800 text-sm">
 					<span>{{ shorten .Address 4 4 }} </span>
 					{{ if eq .Type 0 }}
 						<span>Missing account</span>
@@ -503,6 +515,31 @@ func eventsRenderTokenAmounts(
 	return
 }
 
+type eventsPagination struct {
+	SolanaSlot         int64
+	SolanaBlockIndex   int32
+	ArbitrumBlock      int64
+	ArbitrumBlockIndex int32
+}
+
+func (p *eventsPagination) serialize() string {
+	serialized, err := json.Marshal(p)
+	assert.NoErr(err, "unable to serialize events pagination")
+	return hex.EncodeToString(serialized)
+}
+
+func (p *eventsPagination) deserialize(src []byte) error {
+	parsed, err := hex.DecodeString(string(src))
+	if err != nil {
+		return fmt.Errorf("unable to parse pagination: %w", err)
+	}
+	err = json.Unmarshal(parsed, p)
+	if err != nil {
+		return fmt.Errorf("unable to deserialize pagination: %w", err)
+	}
+	return nil
+}
+
 func eventsHandler(
 	ctx context.Context,
 	pool *pgxpool.Pool,
@@ -546,31 +583,26 @@ func eventsHandler(
 			limit = int32(v)
 		}
 
-		type eventsOffsetT struct {
-			SolanaSlot            uint64
-			SolanaBlockIndex      int32
-			ArbitrumOneBlock      uint64
-			ArbitrumOneBlockIndex uint64
-		}
-		var eventsOffset eventsOffsetT
+		var eventsOffset eventsPagination
 		if offset != "" {
-			if offsetBytes, err := hex.DecodeString(offset); err == nil {
-				if err := json.Unmarshal(offsetBytes, &eventsOffset); err != nil {
-					renderError(w, 400, "unable to unmarshal offset: %s", err)
-					return
-				}
+			if err := eventsOffset.deserialize([]byte(offset)); err != nil {
+				renderError(w, 400, "invalid pagination: %s", err)
+				return
 			}
 		}
 
 		/////////////
 		// get events
 
-		// fetch transactions which have at least one event or error
 		const getEventsQuerySelect = `
 			select
 				tx.id,
 				tx.network,
 				tx.timestamp,
+				(tx.data->>'slot')::bigint as solana_slot,
+				(tx.data->>'blockIndex')::integer as solana_block_index,
+				(tx.data->>'block')::bigint as evm_block,
+				(tx.data->>'txIdx')::integer as evm_block_index,
 				coalesce(
 					jsonb_agg(
 						jsonb_build_object(
@@ -682,7 +714,7 @@ func eventsHandler(
 				userAccountId,
 				limit,
 				eventsOffset.SolanaSlot, eventsOffset.SolanaBlockIndex,
-				eventsOffset.ArbitrumOneBlock, eventsOffset.ArbitrumOneBlockIndex,
+				eventsOffset.ArbitrumBlock, eventsOffset.ArbitrumBlockIndex,
 			)
 		}
 
@@ -691,10 +723,7 @@ func eventsHandler(
 			return
 		}
 
-		eventsPageData := eventsPageData{
-			NextUrl: "",
-			Rows:    make([]eventTableRowComponentData, 0),
-		}
+		eventsTableRows := make([]eventTableRowComponentData, 0)
 		getTokensMetaBatch := pgx.Batch{}
 		fetchTokensMetadataQueue := make([]*fetchTokenMetadataQueued, 0)
 		var prevDateUnix int64
@@ -704,21 +733,35 @@ func eventsHandler(
 				txId                                   string
 				network                                db.Network
 				timestamp                              time.Time
+				solanaSlot, evmBlock                   pgtype.Int8
+				solanaBlockIndex, evmBlockIndex        pgtype.Int4
 				eventsMarshaled, parserErrorsMarshaled json.RawMessage
 			)
 
 			if err := eventsRows.Scan(
-				&txId, &network, &timestamp, &eventsMarshaled, &parserErrorsMarshaled,
+				&txId, &network, &timestamp,
+				&solanaSlot, &solanaBlockIndex,
+				&evmBlock, &evmBlockIndex,
+				&eventsMarshaled, &parserErrorsMarshaled,
 			); err != nil {
 				renderError(w, 500, "unable to scan txs: %s", err)
 				return
 			}
 
+			switch network {
+			case db.NetworkSolana:
+				eventsOffset.SolanaSlot = solanaSlot.Int64
+				eventsOffset.SolanaBlockIndex = solanaBlockIndex.Int32
+			case db.NetworkArbitrum:
+				eventsOffset.ArbitrumBlock = evmBlock.Int64
+				eventsOffset.ArbitrumBlockIndex = evmBlockIndex.Int32
+			}
+
 			const daySecs = 60 * 60 * 24
 			if dateUnix := timestamp.Unix() / daySecs * daySecs; prevDateUnix != dateUnix {
 				prevDateUnix = dateUnix
-				eventsPageData.Rows = append(
-					eventsPageData.Rows,
+				eventsTableRows = append(
+					eventsTableRows,
 					eventTableRowComponentData{
 						Type:      0,
 						Timestamp: timestamp,
@@ -766,8 +809,8 @@ func eventsHandler(
 					}
 					tableRowComponent.Event = eventComponentData
 					tableRowComponent.Type = 1
-					eventsPageData.Rows = append(
-						eventsPageData.Rows,
+					eventsTableRows = append(
+						eventsTableRows,
 						tableRowComponent,
 					)
 
@@ -907,8 +950,8 @@ func eventsHandler(
 					tableRowComponent.Type = 2
 				}
 
-				eventsPageData.Rows = append(
-					eventsPageData.Rows,
+				eventsTableRows = append(
+					eventsTableRows,
 					tableRowComponent,
 				)
 			}
@@ -952,6 +995,11 @@ func eventsHandler(
 		if err := br.Close(); err != nil {
 			renderError(w, 500, "unable to insert token img urls: %s", err)
 			return
+		}
+
+		eventsPageData := eventsPageData{
+			NextUrl: fmt.Sprintf("/events?offset=%s", eventsOffset.serialize()),
+			Rows:    eventsTableRows,
 		}
 
 		eventsPageContent := executeTemplateMust(
