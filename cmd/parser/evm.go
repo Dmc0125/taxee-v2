@@ -324,10 +324,11 @@ type evmContractImplementation struct {
 }
 
 type evmContext struct {
-	contracts map[string][]evmContractImplementation
-	wallets   []string
-	network   db.Network
-	decimals  map[string]uint8
+	contracts     map[string][]evmContractImplementation
+	wallets       []string
+	network       db.Network
+	decimals      map[string]uint8
+	processErrors map[string][]*db.ParserError
 
 	// different for each tx
 	timestamp time.Time

@@ -44,7 +44,10 @@ func invSubBalance(
 	return
 }
 
-func (inv *inventory) processEvent(event *db.Event) {
+func (inv *inventory) processEvent(
+	event *db.Event,
+	errors map[string][]*db.ParserError,
+) {
 	switch data := event.Data.(type) {
 	case *db.EventTransferInternal:
 		fromAccountId := inventoryAccountId{event.Network, data.FromAccount, data.Token}
@@ -72,8 +75,26 @@ func (inv *inventory) processEvent(event *db.Event) {
 
 		if remainingAmount.GreaterThan(decimal.Zero) {
 			// TODO: missing amount error
-			inv.income = inv.income.Add(data.Value)
+			appendErrUnique(
+				errors,
+				&db.ParserError{
+					TxId:     event.TxId,
+					IxIdx:    event.IxIdx,
+					EventIdx: event.Idx,
+					Type:     db.ParserErrorTypeAccountBalanceMismatch,
+					Data: &db.ParserErrorAccountBalanceMismatch{
+						AccountAddress: data.FromAccount,
+						Token:          data.Token,
+						Expected:       decimal.Zero,
+						Real:           remainingAmount,
+					},
+				},
+				data.FromAccount,
+			)
 
+			inv.income = inv.income.Add(
+				remainingAmount.Mul(data.Price),
+			)
 			toBalances = append(toBalances, &inventoryAccount{
 				amount:   remainingAmount,
 				acqPrice: data.Price,
@@ -118,6 +139,29 @@ func (inv *inventory) processEvent(event *db.Event) {
 					inv.disposal = inv.disposal.Add(disposal)
 					inv.acquisition = inv.acquisition.Add(acquisition)
 				}
+			}
+
+			if remainingAmount.GreaterThan(decimal.Zero) {
+				appendErrUnique(
+					errors,
+					&db.ParserError{
+						TxId:     event.TxId,
+						IxIdx:    event.IxIdx,
+						EventIdx: event.Idx,
+						Type:     db.ParserErrorTypeAccountBalanceMismatch,
+						Data: &db.ParserErrorAccountBalanceMismatch{
+							AccountAddress: data.Account,
+							Token:          data.Token,
+							Expected:       decimal.Zero,
+							Real:           remainingAmount,
+						},
+					},
+					data.Account,
+				)
+
+				inv.income = inv.income.Add(
+					remainingAmount.Mul(data.Price),
+				)
 			}
 		default:
 			assert.True(false, "invalid direction: %d", data.Direction)

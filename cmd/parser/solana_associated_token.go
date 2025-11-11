@@ -99,3 +99,52 @@ func solPreprocessAssociatedTokenIx(ctx *solanaContext, ix *db.SolanaInstruction
 	case solAssociatedTokenIxRecoverNested:
 	}
 }
+
+func solProcessAssociatedTokenIx(
+	ctx *solanaContext,
+	ix *db.SolanaInstruction,
+	events *[]*db.Event,
+) {
+	ixType, ok := solAssociatedTokenIxFromData(ix.Data)
+	if !ok {
+		return
+	}
+
+	if ixType > solAssociatedTokenIxCreateIdempotent {
+		return
+	}
+	if len(ix.InnerInstructions) == 0 {
+		return
+	}
+
+	var (
+		payer        = ix.Accounts[0]
+		tokenAccount = ix.Accounts[1]
+		owner        = ix.Accounts[2]
+	)
+
+	fromInternal, toInternal := ctx.walletOwned(owner), ctx.walletOwned(payer)
+
+	if !fromInternal && !toInternal {
+		return
+	}
+
+	transferIx := ix.InnerInstructions[1]
+	amount := binary.LittleEndian.Uint64(transferIx.Data[4:])
+
+	event := solNewEvent(ctx)
+	event.UiAppName = "associated_token_program"
+	event.UiMethodName = "create"
+
+	setEventTransfer(
+		event,
+		payer, owner,
+		payer, tokenAccount,
+		fromInternal, toInternal,
+		newDecimalFromRawAmount(amount, 9),
+		SOL_MINT_ADDRESS,
+		uint16(db.NetworkSolana),
+	)
+
+	*events = append(*events, event)
+}

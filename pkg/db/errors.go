@@ -37,8 +37,9 @@ const (
 )
 
 type ParserError struct {
-	TxId  string
-	IxIdx uint32
+	TxId     string
+	IxIdx    int32
+	EventIdx int32
 
 	Type ParserErrorType
 	Data any

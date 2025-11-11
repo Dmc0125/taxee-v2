@@ -245,9 +245,10 @@ func Parse(
 
 	for i := db.NetworkEvmStart + 1; i < db.NetworksCount; i += 1 {
 		evmContexts[i] = &evmContext{
-			contracts: make(map[string][]evmContractImplementation),
-			network:   i,
-			decimals:  make(map[string]uint8),
+			contracts:     make(map[string][]evmContractImplementation),
+			network:       i,
+			decimals:      make(map[string]uint8),
+			processErrors: make(map[string][]*db.ParserError),
 		}
 	}
 
@@ -623,7 +624,6 @@ func Parse(
 					price, ok = p.Close, true
 				}
 			} else {
-				// event := events[token.eventIdx]
 				// ERROR
 				continue
 			}
@@ -643,16 +643,22 @@ func Parse(
 	}
 	eventsBatch := pgx.Batch{}
 	for _, event := range events {
-		inv.processEvent(event)
+		switch {
+		case event.Network == db.NetworkSolana:
+			inv.processEvent(event, solCtx.processErrors)
+		case event.Network > db.NetworkEvmStart:
+			ctx := evmContexts[event.Network]
+			inv.processEvent(event, ctx.processErrors)
+		}
 
 		eventData, err := json.Marshal(event.Data)
 		assert.NoErr(err, "unable to marshal event data")
 		const insertEventQuery = `
 			insert into event (
-				user_account_id, tx_id, ix_idx,
+				user_account_id, tx_id, ix_idx, idx,
 				ui_app_name, ui_method_name, type, data
 			) values (
-				$1, $2, $3, $4, $5, $6, $7
+				$1, $2, $3, $4, $5, $6, $7, $8
 			)
 		`
 		eventsBatch.Queue(
@@ -660,11 +666,44 @@ func Parse(
 			userAccountId,
 			event.TxId,
 			event.IxIdx,
+			event.Idx,
 			event.UiAppName,
 			event.UiMethodName,
 			event.Type,
 			eventData,
 		)
+	}
+
+	batchAppendErrors := func(errors []*db.ParserError) {
+		for _, error := range errors {
+			data, err := json.Marshal(error.Data)
+			assert.NoErr(err, "unable to marshal error data")
+
+			const insertErrorQuery = `
+				insert into parser_error (
+					user_account_id, tx_id, ix_idx, event_idx, 
+					origin, type, data
+				) values (
+					$1, $2, $3, $4, $5, $6, $7
+				)
+			`
+			eventsBatch.Queue(
+				insertErrorQuery,
+				// args
+				userAccountId,
+				error.TxId, error.IxIdx, error.EventIdx,
+				db.ErrOriginProcess, error.Type, data,
+			)
+		}
+	}
+
+	for _, errors := range solCtx.processErrors {
+		batchAppendErrors(errors)
+	}
+	for _, ctx := range evmContexts {
+		for _, errors := range ctx.processErrors {
+			batchAppendErrors(errors)
+		}
 	}
 
 	br = pool.SendBatch(ctx, &eventsBatch)

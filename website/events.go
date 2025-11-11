@@ -45,7 +45,7 @@ type eventTableRowComponentData struct {
 	TxId        string
 	ExplorerUrl string
 
-	Event *eventComponentData
+	Events []*eventComponentData
 
 	HasErrors        bool
 	PreprocessErrors eventErrorGroupComponentData
@@ -93,11 +93,13 @@ const eventsPage = `<!-- html -->
 
 			{{ range .Rows }}
 				{{ if eq .Type 0 }}
-					{{ template "group_divider_component" .Timestamp }}
+					<li class="w-full py-1 px-4 bg-crossed rounded-lg">
+						<span class="text-sm text-gray-800">{{ formatDate .Timestamp }}</span>
+					</li>
 				{{ else }}
 					<!-- Timestamp + explorer -->
-					<li class="w-full pl-4 grid grid-cols-[150px_1fr]">
-						<div class="flex flex-col">
+					<li class="w-full pl-4 grid grid-cols-[150px_1fr] gap-y-4">
+						<div class="flex flex-col col-[1/2]">
 							<a
 								href="{{ .ExplorerUrl }}"
 								target="_blank"
@@ -107,41 +109,40 @@ const eventsPage = `<!-- html -->
 						</div>
 
 						<!-- event data -->
-						<div class="
-							w-full border border-gray-200 rounded-lg
-						">
-							{{ if eq .Type 1 }}
-								{{ template "event_component" .Event }}
-							{{ else if eq .Type 2 }}
-								<div class="w-full min-h-14 flex items-center justify-center text-gray-600">
-									This transaction does not have any events	
-								</div>
-							{{ end }}
-
-							{{ if .HasErrors }}
+						
+						{{ if .Events }}
+							{{ range .Events }}
 								<div class="
-									w-full grid grid-cols-[repeat(2,1fr)]
-									border-t border-gray-200
+									w-full col-[2/-1] border border-gray-200 rounded-lg
 								">
-									{{ template "event_error_group_component" .PreprocessErrors }}
-									{{ template "event_error_group_component" .ProcessErrors }}
+									{{ template "event_component" . }}
 								</div>
 							{{ end }}
-						</div>
+						{{ else }}
+							<div class="
+								w-full col-[2/-1] min-h-14
+								flex items-center justify-center 
+								border border-gray-200 rounded-lg text-gray-600
+							">
+								This transaction does not have any events	
+							</div>
+						{{ end }}
+
+						{{ if .HasErrors }}
+							<div class="
+								w-full col-[2/-1] grid grid-cols-[repeat(2,1fr)]
+								border border-gray-200 rounded-lg 
+							">
+								{{ template "event_error_group_component" .PreprocessErrors }}
+								{{ template "event_error_group_component" .ProcessErrors }}
+							</div>
+						{{ end }}
 					</li>
 				{{ end }}
 			{{ end }}
 		</ul>
 	</div>
 </div>
-{{ end }}
-`
-
-const groupDividerComponent = `<!-- html -->
-{{ define "group_divider_component" }}
-<li class="w-full py-1 px-4 bg-crossed rounded-lg">
-	<span class="text-sm text-gray-800">{{ formatDate . }}</span>
-</li>
 {{ end }}
 `
 
@@ -546,7 +547,6 @@ func eventsHandler(
 	templates *template.Template,
 ) http.HandlerFunc {
 	loadTemplate(templates, eventsPage)
-	loadTemplate(templates, groupDividerComponent)
 	loadTemplate(templates, eventComponent)
 	loadTemplate(templates, eventTransfersComponent)
 	loadTemplate(templates, eventTokenAmountComponent)
@@ -611,15 +611,15 @@ func eventsHandler(
 							'UiMethodName', e.ui_method_name,
 							'Type', e.type,
 							'Data', e.data
-						) order by e.id asc
-					) filter (where e.id is not null),
+						) order by e.idx asc
+					) filter (where e.tx_id is not null),
 					'[]'::jsonb
 				) as events,
 				coalesce(
 					jsonb_agg(
 						jsonb_build_object(
 							'IxIdx', pe.ix_idx,
-							'EventId', pe.event_id,
+							'EventId', pe.event_idx,
 							'Origin', pe.origin,
 							'Type', pe.type,
 							'Data', pe.data
@@ -680,7 +680,7 @@ func eventsHandler(
 					%s
 					where
 						tx_ref.user_account_id = $1 and
-						(e.id is not null or pe.id is not null) and
+						(e.tx_id is not null or pe.id is not null) and
 
 						-- pagination
 						(
@@ -772,7 +772,8 @@ func eventsHandler(
 			networkGlobals, ok := networksGlobals[network]
 			assert.True(ok, "missing globals for network: %s", network.String())
 
-			tableRowComponent := eventTableRowComponentData{
+			rowData := eventTableRowComponentData{
+				Type:      1,
 				Timestamp: timestamp,
 				TxId: fmt.Sprintf(
 					"%s...%s",
@@ -782,15 +783,19 @@ func eventsHandler(
 					"%s/tx/%s",
 					networkGlobals.explorerUrl, txId,
 				),
-			}
-
-			var events []*struct {
-				*db.Event
-				SerializedData json.RawMessage `json:"Data"`
+				Events: make([]*eventComponentData, 0),
+				ProcessErrors: eventErrorGroupComponentData{
+					Type: 1,
+				},
 			}
 
 			// NOTE: '[]' if empty
 			if len(eventsMarshaled) != 2 {
+				var events []*struct {
+					*db.Event
+					SerializedData json.RawMessage `json:"Data"`
+				}
+
 				if err := json.Unmarshal(eventsMarshaled, &events); err != nil {
 					renderError(w, 500, "unable to unmarshal events: %s", err)
 					return
@@ -807,12 +812,7 @@ func eventsHandler(
 						EventType:     toTitle(string(e.Type)),
 						Method:        toTitle(string(e.UiAppName)),
 					}
-					tableRowComponent.Event = eventComponentData
-					tableRowComponent.Type = 1
-					eventsTableRows = append(
-						eventsTableRows,
-						tableRowComponent,
-					)
+					rowData.Events = append(rowData.Events, eventComponentData)
 
 					///////////////
 					// transfers
@@ -899,6 +899,8 @@ func eventsHandler(
 					return
 				}
 
+				rowData.HasErrors = true
+
 				for _, err := range errors {
 					var errorComponentData eventErrorComponentData
 					errorComponentData.Type = int(err.Type)
@@ -933,28 +935,20 @@ func eventsHandler(
 
 					switch err.Origin {
 					case db.ErrOriginPreprocess:
-						tableRowComponent.PreprocessErrors.Errors = append(
-							tableRowComponent.PreprocessErrors.Errors,
+						rowData.PreprocessErrors.Errors = append(
+							rowData.PreprocessErrors.Errors,
 							errorComponentData,
 						)
 					case db.ErrOriginProcess:
-						tableRowComponent.ProcessErrors.Errors = append(
-							tableRowComponent.ProcessErrors.Errors,
+						rowData.ProcessErrors.Errors = append(
+							rowData.ProcessErrors.Errors,
 							errorComponentData,
 						)
 					}
 				}
-
-				tableRowComponent.HasErrors = true
-				if len(events) == 0 {
-					tableRowComponent.Type = 2
-				}
-
-				eventsTableRows = append(
-					eventsTableRows,
-					tableRowComponent,
-				)
 			}
+
+			eventsTableRows = append(eventsTableRows, rowData)
 		}
 
 		///////////////

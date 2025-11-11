@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
 )
 
@@ -156,15 +155,15 @@ const (
 )
 
 type Event struct {
-	UiAppName    string
-	UiMethodName string
-	Timestamp    time.Time
-	Network      Network
 	TxId         string
 	IxIdx        int32
-
-	Type EventType
-	Data EventData
+	Idx          int32
+	Timestamp    time.Time
+	Network      Network
+	UiAppName    string
+	UiMethodName string
+	Type         EventType
+	Data         EventData
 }
 
 func (event *Event) UnmarshalData(src []byte) error {
@@ -184,32 +183,4 @@ func (event *Event) UnmarshalData(src []byte) error {
 	}
 
 	return nil
-}
-
-func EnqueueInsertEvent(
-	batch *pgx.Batch,
-	userAccountId,
-	idx int32,
-	event *Event,
-) (*pgx.QueuedQuery, error) {
-	const q = `
-		insert into event (
-			user_account_id, tx_id, network, ix_idx, idx, timestamp,
-			ui_app_name, ui_method_name, type,
-			data
-		) values (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10
-		)
-	`
-
-	data, err := json.Marshal(event.Data)
-	if err != nil {
-		return nil, fmt.Errorf("unable to marshal event data: %w", err)
-	}
-
-	return batch.Queue(
-		q,
-		userAccountId, event.TxId, event.Network, event.IxIdx, idx, event.Timestamp,
-		event.UiAppName, event.UiMethodName, event.Type, data,
-	), nil
 }

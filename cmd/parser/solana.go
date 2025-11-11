@@ -117,7 +117,7 @@ func (ctx *solanaContext) receiveSol(address string, amount uint64) {
 func solNewErrMissingAccount(ctx *solanaContext, address string) *db.ParserError {
 	e := db.ParserError{
 		TxId:  ctx.txId,
-		IxIdx: ctx.ixIdx,
+		IxIdx: int32(ctx.ixIdx),
 		Type:  db.ParserErrorTypeMissingAccount,
 		Data: &db.ParserErrorMissingAccount{
 			AccountAddress: address,
@@ -140,7 +140,7 @@ func solNewErrAccountBalanceMismatch(
 
 	return &db.ParserError{
 		TxId:  ctx.txId,
-		IxIdx: ctx.ixIdx,
+		IxIdx: int32(ctx.ixIdx),
 		Type:  db.ParserErrorTypeAccountBalanceMismatch,
 		Data:  d,
 	}
@@ -309,7 +309,7 @@ nativeBalancesLoop:
 					if !ok {
 						parserErr := &db.ParserError{
 							TxId:  ctx.txId,
-							IxIdx: ctx.ixIdx,
+							IxIdx: int32(ctx.ixIdx),
 							Type:  db.ParserErrorTypeAccountDataMismatch,
 							Data: &db.ParserErrorAccountDataMismatch{
 								AccountAddress: address,
@@ -330,7 +330,7 @@ nativeBalancesLoop:
 					if !found {
 						parserErr := &db.ParserError{
 							TxId:  ctx.txId,
-							IxIdx: ctx.ixIdx,
+							IxIdx: int32(ctx.ixIdx),
 							Type:  db.ParserErrorTypeAccountDataMismatch,
 							Data: &db.ParserErrorAccountDataMismatch{
 								AccountAddress: address,
@@ -452,6 +452,8 @@ func solProcessIx(
 		solProcessSystemIx(ctx, ix, events)
 	case SOL_TOKEN_PROGRAM_ADDRESS:
 		solProcessTokenIx(ctx, ix, events)
+	case SOL_ASSOCIATED_TOKEN_PROGRAM_ADDRESS:
+		solProcessAssociatedTokenIx(ctx, ix, events)
 	case SOL_SQUADS_V4_PROGRAM_ADDRESS:
 		solProcessSquadsV4Ix(ctx, ix, events)
 	}

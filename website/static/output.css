@@ -208,6 +208,12 @@
   .col-\[1\/-1\] {
     grid-column: 1/-1;
   }
+  .col-\[1\/2\] {
+    grid-column: 1/2;
+  }
+  .col-\[2\/-1\] {
+    grid-column: 2/-1;
+  }
   .mx-auto {
     margin-inline: auto;
   }
@@ -216,6 +222,9 @@
   }
   .mt-2 {
     margin-top: calc(var(--spacing) * 2);
+  }
+  .mt-4 {
+    margin-top: calc(var(--spacing) * 4);
   }
   .mt-10 {
     margin-top: calc(var(--spacing) * 10);
@@ -316,9 +325,6 @@
   .gap-y-1 {
     row-gap: calc(var(--spacing) * 1);
   }
-  .gap-y-2 {
-    row-gap: calc(var(--spacing) * 2);
-  }
   .gap-y-4 {
     row-gap: calc(var(--spacing) * 4);
   }
@@ -337,10 +343,6 @@
   .border {
     border-style: var(--tw-border-style);
     border-width: 1px;
-  }
-  .border-t {
-    border-top-style: var(--tw-border-style);
-    border-top-width: 1px;
   }
   .border-r {
     border-right-style: var(--tw-border-style);

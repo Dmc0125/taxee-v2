@@ -60,7 +60,14 @@ func sendRequest[T any](
 	assert.NoErr(err, "unable to create new request")
 	req.Header.Add(header, apiKey)
 
-	res, err := http.DefaultClient.Do(req)
+	// NOTE: workaround because of HTTP/2 error:
+	// stream error: stream ID 1; INTERNAL_ERROR; received from peer
+	httpClient := http.Client{
+		Transport: &http.Transport{
+			ForceAttemptHTTP2: false,
+		},
+	}
+	res, err := httpClient.Do(req)
 
 	lastReqUnixMillis = time.Now().UnixMilli()
 	lock.Unlock()
