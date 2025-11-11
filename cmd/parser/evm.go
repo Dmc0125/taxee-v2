@@ -76,7 +76,6 @@ func queryBatchUntilAllSuccessful(
 func evmIdentifyNonProxyContract(bytecode []byte) []uint32 {
 	implementations := make([]uint32, 0)
 	contractsIds := make(map[uint32]uint32)
-	selectors := make([]uint32, 0)
 
 	// NOTE: dispatch methods should be in the bytecode as these instructions:
 	// 1. PUSH4 ix = 0x63
@@ -104,9 +103,11 @@ func evmIdentifyNonProxyContract(bytecode []byte) []uint32 {
 			if _, ok := evmErc20Selectors[selector]; ok {
 				contractsIds[evmErc20ContractId] ^= selector
 			}
-			if _, ok := evm1inchSelectors[selector]; ok {
-				selectors = append(selectors, selector)
+			if _, ok := evm1inchV4Selectors[selector]; ok {
 				contractsIds[evm1inchV4ContractId] ^= selector
+			}
+			if _, ok := evm1inchVUnknownSelectors[selector]; ok {
+				contractsIds[evm1inchVUnknownContractId] ^= selector
 			}
 		}
 	}
@@ -204,11 +205,11 @@ func evmIdentifyContracts(
 		// TODO: Gnome proxy, ...
 
 		blocks := addressesWithBlocksMap[contractAddress]
+		implementations := evmIdentifyNonProxyContract(
+			bytecode,
+		)
 
 		for _, b := range blocks {
-			implementations := evmIdentifyNonProxyContract(
-				bytecode,
-			)
 			evmAppendContractImplementation(
 				context,
 				contractAddress,
@@ -427,12 +428,13 @@ func evmProcessTx(
 		return
 	}
 
-	if slices.Contains(contract.impl, evmErc20ContractId) {
-		// erc20 tx
-		evmProcessErc20Tx(ctx, events, txData)
-	}
-
-	if slices.Contains(contract.impl, evm1inchV4ContractId) {
-		// fmt.Println(ctx.txId)
+	for _, contractId := range contract.impl {
+		switch contractId {
+		case evmErc20ContractId:
+			evmProcessErc20Tx(ctx, events, txData)
+		case evm1inchV4ContractId:
+		case evm1inchVUnknownContractId:
+			evmProcess1InchVUknownTx(ctx, events, txData)
+		}
 	}
 }

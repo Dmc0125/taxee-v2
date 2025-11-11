@@ -81,7 +81,7 @@ func abiProcessInputs(inputs []abiInput) string {
 
 func abiProcessMethods(
 	abi []abiComponent,
-) (signatures map[string]string, selectors map[string]uint32, contractId uint32) {
+) (signatures map[string]string, selectors map[string]uint32) {
 	signatures = make(map[string]string)
 	selectors = make(map[string]uint32)
 
@@ -109,7 +109,6 @@ func abiProcessMethods(
 
 		signatures[funcName] = signatureStr
 		selectors[funcName] = selector
-		contractId ^= selector
 	}
 
 	return
@@ -141,10 +140,12 @@ func main() {
 		err = json.Unmarshal(abiBytes, &data)
 		assert.NoErr(err, "")
 
-		signatures, selectors, contractId := abiProcessMethods(data)
+		signatures, selectors := abiProcessMethods(data)
+		var contractId uint32
 
 		for funcName, signature := range signatures {
 			selector := selectors[funcName]
+			contractId ^= selector
 
 			varDef := strings.Builder{}
 			varDef.WriteString("evm")

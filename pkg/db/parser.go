@@ -78,11 +78,6 @@ const GetPricepointByCoingeckoId string = `
 		ct.coingecko_id = $1
 `
 
-type EventData interface {
-	SetPrice(decimal.Decimal)
-	SetAmountDecimals(decimals uint8)
-}
-
 type EventTransferInternal struct {
 	// wallets corresponding to accounts
 	FromWallet string `json:"fromWallet"`
@@ -96,20 +91,6 @@ type EventTransferInternal struct {
 	Price       decimal.Decimal `json:"price"`
 	Value       decimal.Decimal `json:"value"`
 	Profit      decimal.Decimal `json:"profit"`
-}
-
-var _ EventData = (*EventTransferInternal)(nil)
-
-func (internal *EventTransferInternal) SetPrice(price decimal.Decimal) {
-	internal.Price = price
-	internal.Value = price.Mul(internal.Amount)
-}
-
-func (t *EventTransferInternal) SetAmountDecimals(decimals uint8) {
-	t.Amount = decimal.NewFromBigInt(
-		t.Amount.BigInt(),
-		-int32(decimals),
-	)
 }
 
 type EventTransferDirection uint8
@@ -131,18 +112,20 @@ type EventTransfer struct {
 	Profit      decimal.Decimal        `json:"profit"`
 }
 
-var _ EventData = (*EventTransfer)(nil)
-
-func (transfer *EventTransfer) SetPrice(price decimal.Decimal) {
-	transfer.Price = price
-	transfer.Value = price.Mul(transfer.Amount)
+type EventSwapTransfer struct {
+	Account     string          `json:"account"`
+	Token       string          `json:"token"`
+	Amount      decimal.Decimal `json:"amount"`
+	TokenSource uint16          `json:"tokenSource"`
+	Price       decimal.Decimal `json:"price"`
+	Value       decimal.Decimal `json:"value"`
+	Profit      decimal.Decimal `json:"profit"`
 }
 
-func (t *EventTransfer) SetAmountDecimals(decimals uint8) {
-	t.Amount = decimal.NewFromBigInt(
-		t.Amount.BigInt(),
-		-int32(decimals),
-	)
+type EventSwap struct {
+	Wallet   string              `json:"wallet"`
+	Outgoing []EventSwapTransfer `json:"outgoing"`
+	Incoming []EventSwapTransfer `json:"incoming"`
 }
 
 type EventType string
@@ -152,6 +135,7 @@ const (
 	EventTypeTransferInternal EventType = "transfer_internal"
 	EventTypeMint             EventType = "mint"
 	EventTypeBurn             EventType = "burn"
+	EventTypeSwap             EventType = "swap"
 )
 
 type Event struct {
@@ -163,7 +147,7 @@ type Event struct {
 	UiAppName    string
 	UiMethodName string
 	Type         EventType
-	Data         EventData
+	Data         any
 }
 
 func (event *Event) UnmarshalData(src []byte) error {

@@ -138,7 +138,7 @@ func solTokenProcessTransfer(
 	ctx *solanaContext,
 	from, to string,
 	amount uint64,
-) (d db.EventData, t db.EventType, ok bool) {
+) (d any, t db.EventType, ok bool) {
 	fromAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, from)
 	toAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, to)
 

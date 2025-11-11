@@ -226,6 +226,7 @@ func Parse(
 		}()
 	}
 
+	logger.Info("Update congecko tokens")
 	fetchCoingeckoTokens(ctx, pool)
 
 	if fresh {
@@ -236,6 +237,7 @@ func Parse(
 	/////////////////
 	// Init
 
+	logger.Info("Init parser state")
 	solCtx := solanaContext{
 		accounts:         make(map[string][]accountLifetime),
 		preprocessErrors: make(map[string][]*db.ParserError),
@@ -275,6 +277,7 @@ func Parse(
 
 	///////////////////
 	// preprocess txs
+	logger.Info("Preprocess txs")
 
 	evmAddresses := make(map[db.Network]map[string][]uint64)
 
@@ -307,6 +310,7 @@ func Parse(
 		}
 	}
 
+	logger.Info("Identify EVM contracts")
 	for network, addresses := range evmAddresses {
 		ctx, ok := evmContexts[network]
 		assert.True(ok, "missing evm context %s", network.String())
@@ -350,6 +354,7 @@ func Parse(
 
 	///////////////////
 	// process txs
+	logger.Info("Process txs")
 
 	events := make([]*db.Event, 0)
 
@@ -381,24 +386,10 @@ func Parse(
 
 	///////////////
 	// fetch evm decimals
+	logger.Info("Fetch EVM tokens decimals")
 	tokensByNetwork := make(map[db.Network][]string)
 
-	for _, event := range events {
-		var token string
-		var tokenSource uint16
-
-		switch data := event.Data.(type) {
-		case *db.EventTransferInternal:
-			token = data.Token
-			tokenSource = data.TokenSource
-		case *db.EventTransfer:
-			token = data.Token
-			tokenSource = data.TokenSource
-		default:
-			assert.True(false, "unknown event data: %T %#v", data, *event)
-			continue
-		}
-
+	appendEvmTokensByNetwork := func(token string, tokenSource uint16) {
 		isEvm := tokenSource != tokenSourceCoingecko &&
 			tokenSource > uint16(db.NetworkEvmStart)
 		if isEvm {
@@ -407,6 +398,25 @@ func Parse(
 				tokens = append(tokens, token)
 				tokensByNetwork[db.Network(tokenSource)] = tokens
 			}
+		}
+	}
+
+	for _, event := range events {
+		switch data := event.Data.(type) {
+		case *db.EventTransferInternal:
+			appendEvmTokensByNetwork(data.Token, data.TokenSource)
+		case *db.EventTransfer:
+			appendEvmTokensByNetwork(data.Token, data.TokenSource)
+		case *db.EventSwap:
+			for _, t := range data.Outgoing {
+				appendEvmTokensByNetwork(t.Token, t.TokenSource)
+			}
+			for _, t := range data.Incoming {
+				appendEvmTokensByNetwork(t.Token, t.TokenSource)
+			}
+		default:
+			assert.True(false, "unknown event data: %T %#v", data, *event)
+			continue
 		}
 	}
 
@@ -450,38 +460,26 @@ func Parse(
 
 	///////////////
 	// set evm decimals and fetch prices
+	logger.Info("Set EVM tokens decimals and fetch tokens prices")
 
 	queryPricesBatch := pgx.Batch{}
 	type tokenPriceToFetch struct {
 		coingeckoId string
 		timestamp   int64
-		eventIdx    int
+		price       *decimal.Decimal
+		value       *decimal.Decimal
+		amount      *decimal.Decimal
 	}
 	tokenPricesToFetch := make([]tokenPriceToFetch, 0)
 
-	for eventIdx, event := range events {
-		var token string
-		var tokenSource uint16
-
-		switch data := event.Data.(type) {
-		case *db.EventTransferInternal:
-			token = data.Token
-			tokenSource = data.TokenSource
-		case *db.EventTransfer:
-			token = data.Token
-			tokenSource = data.TokenSource
-		default:
-			assert.True(false, "unknown event data: %T %#v", data, *event)
-			continue
-		}
-
-		const hour, halfHour = 60 * 60, 60 * 30
-		roundedTimestamp := time.Unix(
-			(event.Timestamp.Unix()+halfHour)/int64(hour)*int64(hour),
-			0,
-		)
-
-		if tokenSource == tokenSourceCoingecko {
+	queryEventDataPrice := func(
+		roundedTimestamp time.Time,
+		network db.Network,
+		token string,
+		tokenSource uint16,
+		price, value, amount *decimal.Decimal,
+	) {
+		if tokenSource == math.MaxUint16 {
 			q := queryPricesBatch.Queue(
 				db.GetPricepointByCoingeckoId,
 				token,
@@ -506,15 +504,18 @@ func Parse(
 						tokenPriceToFetch{
 							coingeckoId: token,
 							timestamp:   roundedTimestamp.Unix(),
-							eventIdx:    eventIdx,
+							price:       price,
+							value:       value,
+							amount:      amount,
 						},
 					)
 				} else {
-					logger.Info("Found coingecko pricepoint in db: %s %s", token, roundedTimestamp)
+					// logger.Info("Found coingecko pricepoint in db: %s %s", token, roundedTimestamp)
 					pricepoint, err := decimal.NewFromString(priceStr)
 					assert.NoErr(err, fmt.Sprintf("invalid price: %s", priceStr))
 
-					event.Data.SetPrice(pricepoint)
+					*price = pricepoint
+					*value = pricepoint.Mul(*amount)
 				}
 
 				return nil
@@ -532,13 +533,16 @@ func Parse(
 					tokenSource, token,
 				)
 
-				event.Data.SetAmountDecimals(decimals)
+				*amount = decimal.NewFromBigInt(
+					amount.BigInt(),
+					-int32(decimals),
+				)
 			}
 
 			q := queryPricesBatch.Queue(
 				db.GetPricepointByNetworkAndTokenAddress,
 				roundedTimestamp,
-				event.Network,
+				network,
 				token,
 			)
 			q.QueryRow(func(row pgx.Row) error {
@@ -551,23 +555,67 @@ func Parse(
 					assert.NoErr(err, fmt.Sprintf("unable to scan pricepoint: %s", token))
 				}
 
-				if priceStr != "" {
-					price, err := decimal.NewFromString(priceStr)
-					assert.NoErr(err, fmt.Sprintf("invalid price: %s", priceStr))
-					logger.Info("Found pricepoint in db: %s %s", coingeckoId, roundedTimestamp)
-					event.Data.SetPrice(price)
-				} else {
+				if priceStr == "" {
 					tokenPricesToFetch = append(
 						tokenPricesToFetch,
 						tokenPriceToFetch{
-							coingeckoId,
-							roundedTimestamp.Unix(),
-							eventIdx,
+							coingeckoId: coingeckoId,
+							timestamp:   roundedTimestamp.Unix(),
+							price:       price,
+							value:       value,
+							amount:      amount,
 						},
 					)
+				} else {
+					pricepoint, err := decimal.NewFromString(priceStr)
+					assert.NoErr(err, fmt.Sprintf("invalid price: %s", priceStr))
+					// logger.Info("Found pricepoint in db: %s %s", coingeckoId, roundedTimestamp)
+
+					*price = pricepoint
+					*value = pricepoint.Mul(*amount)
 				}
 				return nil
 			})
+		}
+	}
+
+	for _, event := range events {
+		const hour, halfHour = 60 * 60, 60 * 30
+		roundedTimestamp := time.Unix(
+			(event.Timestamp.Unix()+halfHour)/int64(hour)*int64(hour),
+			0,
+		)
+
+		switch data := event.Data.(type) {
+		case *db.EventTransferInternal:
+			queryEventDataPrice(
+				roundedTimestamp,
+				event.Network,
+				data.Token,
+				data.TokenSource,
+				&data.Price, &data.Value, &data.Amount,
+			)
+		case *db.EventTransfer:
+			queryEventDataPrice(
+				roundedTimestamp,
+				event.Network,
+				data.Token,
+				data.TokenSource,
+				&data.Price, &data.Value, &data.Amount,
+			)
+		case *db.EventSwap:
+			for _, transfer := range data.Outgoing {
+				queryEventDataPrice(
+					roundedTimestamp,
+					event.Network,
+					transfer.Token,
+					transfer.TokenSource,
+					&transfer.Price, &transfer.Value, &transfer.Amount,
+				)
+			}
+		default:
+			assert.True(false, "unknown event data: %T %#v", data, *event)
+			continue
 		}
 	}
 
@@ -620,7 +668,7 @@ func Parse(
 				assert.NoErr(err, "unable to insert coingecko prices")
 
 				if p := coingeckoPrices[0]; p.Timestamp.Equal(ts) {
-					logger.Info("Fetched pricepoint from coingecko: %s %s", token.coingeckoId, ts)
+					// logger.Info("Fetched pricepoint from coingecko: %s %s", token.coingeckoId, ts)
 					price, ok = p.Close, true
 				}
 			} else {
@@ -628,15 +676,16 @@ func Parse(
 				continue
 			}
 		} else {
-			logger.Info("Found pricepoint in coingecko prices: %s %s", token.coingeckoId, ts)
+			// logger.Info("Found pricepoint in coingecko prices: %s %s", token.coingeckoId, ts)
 		}
 
-		event := events[token.eventIdx]
-		event.Data.SetPrice(price)
+		*token.price = price
+		*token.value = price.Mul(*token.amount)
 	}
 
 	///////////////
 	// process events
+	logger.Info("Process events")
 
 	inv := inventory{
 		accounts: make(map[inventoryAccountId][]*inventoryAccount),

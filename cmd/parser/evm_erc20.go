@@ -27,6 +27,8 @@ const (
 		evmErc20TransferFrom
 )
 
+var evmErc20TransferTopic = [32]uint8{221, 242, 82, 173, 27, 226, 200, 155, 105, 194, 176, 104, 252, 55, 141, 170, 149, 43, 167, 241, 99, 196, 161, 22, 40, 245, 90, 77, 245, 35, 179, 239}
+
 var evmErc20Selectors = map[uint32]bool{
 	evmErc20TotalSupply:  true,
 	evmErc20BalanceOf:    true,

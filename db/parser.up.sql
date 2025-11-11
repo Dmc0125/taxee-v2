@@ -30,7 +30,8 @@ create type event_type as enum (
     'transfer',
     'transfer_internal',
     'mint',
-    'burn'
+    'burn',
+    'swap'
 );
 
 create table event (
