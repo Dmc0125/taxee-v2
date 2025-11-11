@@ -41,9 +41,10 @@ var networksGlobals = map[db.Network]networkGlobals{
 type eventTableRowComponentData struct {
 	Type uint8
 
-	Timestamp   time.Time
-	TxId        string
-	ExplorerUrl string
+	Timestamp     time.Time
+	TxId          string
+	ExplorerUrl   string
+	NetworkImgUrl string
 
 	Events []*eventComponentData
 
@@ -60,7 +61,7 @@ type eventsPageData struct {
 const eventsPage = `<!-- html -->
 {{ define "events_page" }}
 <div class="w-[80%] mx-auto mt-10">
-	<header class="w-full flex items-center justify-between">
+	<header class="w-full flex items-center justify-between text-gray-800">
 		<h1 class="font-semibold text-2xl">Events</h1>
 		<a href="{{ .NextUrl }}" class="">
 			Next
@@ -120,10 +121,12 @@ const eventsPage = `<!-- html -->
 							{{ end }}
 						{{ else }}
 							<div class="
-								w-full col-[2/-1] min-h-14
+								w-full col-[2/-1] min-h-14 relative
 								flex items-center justify-center 
 								border border-gray-200 rounded-lg text-gray-600
 							">
+								{{ template "events_network_component" .NetworkImgUrl }}
+
 								This transaction does not have any events	
 							</div>
 						{{ end }}
@@ -146,6 +149,21 @@ const eventsPage = `<!-- html -->
 {{ end }}
 `
 
+const eventsNetworkImgComponent = `<!-- html -->
+{{ define "events_network_component" }}
+<div class="
+	w-5 h-5 p-0.5 absolute top-0 left-0 -translate-y-1/3 -translate-x-1/3
+	rounded-full bg-gray-100 border border-gray-200
+	overflow-hidden
+">
+	<img 
+		src="{{ . }}" 
+		class="w-full h-full"
+	/>
+</div>
+{{ end }}
+`
+
 type eventComponentData struct {
 	NetworkImgUrl string
 	EventType     string
@@ -159,21 +177,14 @@ type eventComponentData struct {
 const eventComponent = `<!-- html -->
 {{ define "event_component" }}
 <div class="
-	w-full px-4 py-2 grid grid-cols-[300px_repeat(2,minmax(350px,1fr))_150px]
+	w-full px-4 py-2 grid grid-cols-[300px_repeat(2,minmax(350px,1fr))_150px] relative
 ">
+	{{ template "events_network_component" .NetworkImgUrl }}
+
 	<!-- App img, network img, event type, onchain method -->
 	<div class="flex">
-		<div class="w-10 h-10 rounded-full bg-gray-200 relative">
-			<div class="
-				w-5 h-5 p-0.5 absolute top-0 left-0
-				rounded-full bg-gray-100 border border-gray-200
-				overflow-hidden
-			">
-				<img 
-					src="{{ .NetworkImgUrl }}" 
-					class="w-full h-full"
-				/>
-			</div>
+		<div class="w-10 h-10 rounded-full bg-gray-200">
+			
 		</div>
 
 		<div class="flex flex-col ml-4">
@@ -552,6 +563,7 @@ func eventsHandler(
 	loadTemplate(templates, eventTokenAmountComponent)
 	loadTemplate(templates, eventFiatAmountComponent)
 	loadTemplate(templates, eventErrorGroupComponent)
+	loadTemplate(templates, eventsNetworkImgComponent)
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		/////////////
@@ -577,6 +589,7 @@ func eventsHandler(
 			offset        = query.Get("offset")
 			limitQueryVal = query.Get("limit")
 			txId          = query.Get("tx_id")
+			mode          = query.Get("mode")
 		)
 
 		if v, err := strconv.Atoi(limitQueryVal); err == nil {
@@ -658,6 +671,11 @@ func eventsHandler(
 		var eventsRows pgx.Rows
 		var err error
 
+		var filterEmptyTxs string
+		if mode != "dev" {
+			filterEmptyTxs = "(e.tx_id is not null or pe.id is not null) and"
+		}
+
 		switch {
 		case txId != "":
 			getEventByTxId := fmt.Sprintf(`
@@ -680,7 +698,7 @@ func eventsHandler(
 					%s
 					where
 						tx_ref.user_account_id = $1 and
-						(e.tx_id is not null or pe.id is not null) and
+						%s
 
 						-- pagination
 						(
@@ -705,6 +723,7 @@ func eventsHandler(
 						$2
 				`,
 				getEventsQuerySelect,
+				filterEmptyTxs,
 				getEventsQuerySelectAfter,
 			)
 			eventsRows, err = pool.Query(
@@ -783,7 +802,8 @@ func eventsHandler(
 					"%s/tx/%s",
 					networkGlobals.explorerUrl, txId,
 				),
-				Events: make([]*eventComponentData, 0),
+				NetworkImgUrl: networkGlobals.imgUrl,
+				Events:        make([]*eventComponentData, 0),
 				ProcessErrors: eventErrorGroupComponentData{
 					Type: 1,
 				},
