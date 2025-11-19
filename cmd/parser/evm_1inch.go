@@ -1,14 +1,5 @@
 package parser
 
-import (
-	"encoding/binary"
-	"math"
-	"slices"
-	"taxee/pkg/db"
-
-	"github.com/shopspring/decimal"
-)
-
 const (
 	// V4
 	evm1inchV4FillOrderRFQTo            uint32 = 0xbaba5855 // fillOrderRFQTo((uint256,address,address,address,address,uint256,uint256),bytes,uint256,uint256,address)
@@ -150,77 +141,55 @@ var evm1inchVUnknownSelectors = map[uint32]bool{
 	evm1inchVUnknownRemainingsRaw:                true,
 }
 
-func evmProcess1InchVUknownTx(
-	ctx *evmContext,
-	events *[]*db.Event,
-	tx *db.EvmTransactionData,
-) {
-	selector := binary.BigEndian.Uint32(tx.Input[:4])
-
-	switch selector {
-	case evm1inchVUnknownSwap:
-		sender := tx.From
-
-		if !evmWalletOwned(ctx, sender) {
-			return
-		}
-
-		amounts := make(map[string]decimal.Decimal)
-
-		if !tx.Value.Equal(decimal.Zero) {
-			amounts["ethereum"] = tx.Value.Neg()
-		}
-
-		// native amount
-		// logs
-		// internal
-
-		for _, log := range tx.Events {
-			if slices.Equal(log.Topics[0], evmErc20TransferTopic[:]) {
-				from := evmAddressFrom32Bytes(log.Topics[1])
-				to := evmAddressFrom32Bytes(log.Topics[2])
-				amount := evmAmountFrom32Bytes(log.Data[:32])
-
-				if sender == from {
-					amounts[log.Address] = amounts[log.Address].Sub(amount)
-				} else if sender == to {
-					amounts[log.Address] = amounts[log.Address].Add(amount)
-				}
-			}
-		}
-
-		swapData := db.EventSwap{
-			Wallet: sender,
-		}
-
-		for token, amount := range amounts {
-			if amount.Equal(decimal.Zero) {
-				continue
-			}
-
-			t := db.EventSwapTransfer{
-				Account:     sender,
-				Token:       token,
-				Amount:      amount.Abs(),
-				TokenSource: uint16(ctx.network),
-			}
-			if token == "ethereum" {
-				t.TokenSource = math.MaxUint16
-			}
-
-			if amount.LessThan(decimal.Zero) {
-				swapData.Outgoing = append(swapData.Outgoing, &t)
-			} else if amount.GreaterThan(decimal.Zero) {
-				swapData.Incoming = append(swapData.Incoming, &t)
-			}
-		}
-
-		event := evmNewEvent(ctx)
-		event.UiAppName = "1inch_aggregator"
-		event.UiMethodName = "swap"
-		event.Type = db.EventTypeSwap
-		event.Data = &swapData
-
-		*events = append(*events, event)
-	}
-}
+// func evmProcess1InchTx(
+// 	ctx *evmContext,
+// 	events *[]*db.Event,
+// 	tx *db.EvmTransactionData,
+// ) {
+// 	sender := tx.From
+//
+// 	if !evmWalletOwned(ctx, sender) {
+// 		return
+// 	}
+//
+// 	swapData := evmProcessSwap(
+// 		sender, ctx.network,
+// 		tx.Value, tx.InternalTxs, tx.Events,
+// 	)
+//
+// 	if len(swapData.Incoming) == 0 && len(swapData.Outgoing) == 0 {
+// 		return
+// 	}
+//
+// 	event := evmNewEvent(ctx)
+// 	event.UiAppName = "1inch_aggregator"
+// 	event.UiMethodName = "swap"
+// 	event.Type = db.EventTypeSwap
+// 	event.Data = &swapData
+//
+// 	*events = append(*events, event)
+// 	//
+// 	// selector := binary.BigEndian.Uint32(tx.Input[:4])
+// 	//
+// 	// switch selector {
+// 	// case evm1inchVUnknownSwap:
+// 	// 	sender := tx.From
+// 	//
+// 	// 	if !evmWalletOwned(ctx, sender) {
+// 	// 		return
+// 	// 	}
+// 	//
+// 	// 	swapData := evmProcessSwap(
+// 	// 		sender, ctx.network,
+// 	// 		tx.Value, tx.InternalTxs, tx.Events,
+// 	// 	)
+// 	//
+// 	// 	event := evmNewEvent(ctx)
+// 	// 	event.UiAppName = "1inch_aggregator"
+// 	// 	event.UiMethodName = "swap"
+// 	// 	event.Type = db.EventTypeSwap
+// 	// 	event.Data = &swapData
+// 	//
+// 	// 	*events = append(*events, event)
+// 	// }
+// }

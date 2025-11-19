@@ -1,9 +1,4 @@
 {{ define "events_page" }}
-<style>
-#fiat-value:hover + #fiat-price {
-    display: block;
-}
-</style>
 <div class="w-[80%] mx-auto mt-10">
 	<header class="w-full flex items-center justify-between text-gray-800">
 		<h1 class="font-semibold text-2xl">Events</h1>
@@ -246,7 +241,7 @@
 {{ end }}
 
 {{ define "event_token_amount_component" }}
-<div class="w-fit flex items-center gap-2">
+<div class="w-fit flex items-center gap-2 relative">
 	<div class="
 		w-5 h-5 
 		rounded-full overflow-hidden
@@ -263,7 +258,19 @@
 		{{ end }}
 	</div>
 
-	<span class="text-gray-800 text-sm">{{ .Amount }} {{ upper .Symbol }}</span>
+	<span
+        id="hoverable"
+        class="text-gray-800 text-sm"
+    >
+        {{ .Amount }} {{ upper .Symbol }}
+        <div id="floating" class="flex-col">
+            <span class="text-gray-500 text-xs font-semibold">Long amount</span>
+            {{ .LongAmount }} {{ upper .Symbol }}
+        </div>
+    </span>
+
+
+    
 </div>
 {{ end }}
 
@@ -284,25 +291,18 @@
 		<span class="text-gray-800 text-sm">-</span>
 	{{ end }}
 {{ else }}
-	<span id="fiat-value" class="
+	<span id="hoverable" class="
 		text-sm
 		{{ tern (eq .Sign 0) "text-gray-800" (eq .Sign -1) "text-red-800" "text-green-800" }}
 	">
         {{ .Amount }} {{ upper .Currency }}
-    </span>
-    {{ if not .IsProfit }}
-        <div 
-            id="fiat-price"
-            class="
-                absolute w-fit px-4 py-2 -top-2 -translate-y-full left-1/2 -translate-x-1/2
-                bg-white border border-gray-200 rounded-lg text-sm hidden
-            "
-        >
-            <span class="text-nowrap text-gray-800">
+        {{ if not .IsProfit }}
+            <div id="floating" class="flex-col">
+                <span class="text-gray-500 text-xs font-semibold">Price</span>
                 {{ .Price }} {{ upper .Currency }}
-            </span>
-        </div>
-    {{ end }}
+            </div>
+        {{ end }}
+    </span>
 {{ end }}
 </div>
 {{ end }}

@@ -87,9 +87,10 @@ type eventTransfersComponentData struct {
 }
 
 type eventTokenAmountComponentData struct {
-	ImgUrl string
-	Amount string
-	Symbol string
+	ImgUrl     string
+	Amount     string
+	Symbol     string
+	LongAmount string
 }
 
 type eventFiatAmountComponentData struct {
@@ -120,6 +121,7 @@ func eventsRenderTokenAmounts(
 ) (tokenData *eventTokenAmountComponentData, fiatData, profitData *eventFiatAmountComponentData) {
 	tokenData = &eventTokenAmountComponentData{
 		Amount: amount.StringFixed(2),
+		LongAmount: amount.String(),
 	}
 	fiatData = &eventFiatAmountComponentData{
 		Amount:   value.StringFixed(2),

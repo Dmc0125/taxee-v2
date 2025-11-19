@@ -12,6 +12,8 @@ import (
 	"taxee/pkg/assert"
 	"taxee/pkg/db"
 	"time"
+
+	"github.com/shopspring/decimal"
 )
 
 func queryBatchUntilAllSuccessful(
@@ -108,6 +110,15 @@ func evmIdentifyNonProxyContract(bytecode []byte) []uint32 {
 			}
 			if _, ok := evm1inchVUnknownSelectors[selector]; ok {
 				contractsIds[evm1inchVUnknownContractId] ^= selector
+			}
+			if _, ok := evmUniswapV3Selectors[selector]; ok {
+				contractsIds[evmUniswapV3ContractId] ^= selector
+			}
+			if _, ok := evmTraderJoeRouter2Selectors[selector]; ok {
+				contractsIds[evmTraderJoeRouter2ContractId] ^= selector
+			}
+			if _, ok := evmParaswapSelectors[selector]; ok {
+				contractsIds[evmParaswapContractId] ^= selector
 			}
 		}
 	}
@@ -379,12 +390,7 @@ func evmFindContract(
 }
 
 func evmWalletOwned(ctx *evmContext, address string) bool {
-	for _, a := range ctx.wallets {
-		if a == address {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(ctx.wallets, address)
 }
 
 func evmNewEvent(ctx *evmContext) *db.Event {
@@ -395,6 +401,99 @@ func evmNewEvent(ctx *evmContext) *db.Event {
 	}
 }
 
+func evmProcessSwap(
+	sender string,
+	network db.Network,
+	value decimal.Decimal,
+	itxs []*db.EvmInternalTx,
+	logs []*db.EvmTransactionEvent,
+) db.EventSwap {
+	amounts := make(map[string]decimal.Decimal)
+
+	if !value.Equal(decimal.Zero) {
+		amounts["ethereum"] = value.Neg()
+	}
+
+	for _, itx := range itxs {
+		if sender == itx.From {
+			amounts["ethereum"] = amounts["ethereum"].Sub(itx.Value)
+		} else if sender == itx.To {
+			amounts["ethereum"] = amounts["ethereum"].Add(itx.Value)
+		}
+	}
+
+	for _, log := range logs {
+		if slices.Equal(log.Topics[0], evmErc20TransferTopic[:]) {
+			from := evmAddressFrom32Bytes(log.Topics[1])
+			to := evmAddressFrom32Bytes(log.Topics[2])
+			amount := evmAmountFrom32Bytes(log.Data[:32])
+
+			if sender == from {
+				amounts[log.Address] = amounts[log.Address].Sub(amount)
+			} else if sender == to {
+				amounts[log.Address] = amounts[log.Address].Add(amount)
+			}
+		}
+	}
+
+	swapData := db.EventSwap{
+		Wallet: sender,
+	}
+
+	for token, amount := range amounts {
+		if amount.Equal(decimal.Zero) {
+			continue
+		}
+
+		t := db.EventSwapTransfer{
+			Account:     sender,
+			Token:       token,
+			Amount:      amount.Abs(),
+			TokenSource: uint16(network),
+		}
+		if token == "ethereum" {
+			t.TokenSource = math.MaxUint16
+		}
+
+		if amount.LessThan(decimal.Zero) {
+			swapData.Outgoing = append(swapData.Outgoing, &t)
+		} else if amount.GreaterThan(decimal.Zero) {
+			swapData.Incoming = append(swapData.Incoming, &t)
+		}
+	}
+
+	return swapData
+}
+
+func evmProcessSwapTx(
+	ctx *evmContext,
+	events *[]*db.Event,
+	tx *db.EvmTransactionData,
+	appName, methodName string,
+) {
+	sender := tx.From
+	if !evmWalletOwned(ctx, sender) {
+		return
+	}
+
+	swapData := evmProcessSwap(
+		sender, ctx.network,
+		tx.Value, tx.InternalTxs, tx.Events,
+	)
+
+	if len(swapData.Incoming) == 0 && len(swapData.Outgoing) == 0 {
+		return
+	}
+
+	event := evmNewEvent(ctx)
+	event.UiAppName = appName
+	event.UiMethodName = methodName
+	event.Type = db.EventTypeSwap
+	event.Data = &swapData
+
+	*events = append(*events, event)
+}
+
 func evmProcessTx(
 	ctx *evmContext,
 	events *[]*db.Event,
@@ -402,7 +501,7 @@ func evmProcessTx(
 ) {
 	contract, ok := evmFindContract(ctx, txData.To, txData.Block)
 
-	if !ok {
+	if !ok && txData.Value.GreaterThan(decimal.Zero) {
 		fromInternal := evmWalletOwned(ctx, txData.From)
 		toInternal := evmWalletOwned(ctx, txData.To)
 
@@ -428,13 +527,25 @@ func evmProcessTx(
 		return
 	}
 
-	for _, contractId := range contract.impl {
-		switch contractId {
-		case evmErc20ContractId:
-			evmProcessErc20Tx(ctx, events, txData)
-		case evm1inchV4ContractId:
-		case evm1inchVUnknownContractId:
-			evmProcess1InchVUknownTx(ctx, events, txData)
+	switch txData.To {
+	case evmArbitrumDistributorContractAddress:
+		evmProcessArbitrumDistributorTx(ctx, events, txData)
+	default:
+		for _, contractId := range contract.impl {
+			switch contractId {
+			case evmErc20ContractId:
+				evmProcessErc20Tx(ctx, events, txData)
+			case evm1inchV4ContractId:
+				evmProcessSwapTx(ctx, events, txData, "paraswap", "swap")
+			case evm1inchVUnknownContractId:
+				evmProcessSwapTx(ctx, events, txData, "paraswap", "swap")
+			case evmUniswapV3ContractId:
+				evmProcessUniswapV3Tx(ctx, events, txData)
+			case evmTraderJoeRouter2ContractId:
+				evmProcessSwapTx(ctx, events, txData, "paraswap", "swap")
+			case evmParaswapContractId:
+				evmProcessSwapTx(ctx, events, txData, "paraswap", "swap")
+			}
 		}
 	}
 }
