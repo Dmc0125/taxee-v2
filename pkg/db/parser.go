@@ -124,8 +124,8 @@ type EventSwapTransfer struct {
 
 type EventSwap struct {
 	Wallet   string              `json:"wallet"`
-	Outgoing []EventSwapTransfer `json:"outgoing"`
-	Incoming []EventSwapTransfer `json:"incoming"`
+	Outgoing []*EventSwapTransfer `json:"outgoing"`
+	Incoming []*EventSwapTransfer `json:"incoming"`
 }
 
 type EventType string
@@ -160,6 +160,12 @@ func (event *Event) UnmarshalData(src []byte) error {
 		event.Data = data
 	case EventTypeTransfer, EventTypeMint, EventTypeBurn:
 		data := new(EventTransfer)
+		if err := json.Unmarshal(src, data); err != nil {
+			return fmt.Errorf("unable to unmarshal %s event data: %w", event.Type, err)
+		}
+		event.Data = data
+	case EventTypeSwap:
+		data := new(EventSwap)
 		if err := json.Unmarshal(src, data); err != nil {
 			return fmt.Errorf("unable to unmarshal %s event data: %w", event.Type, err)
 		}

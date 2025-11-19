@@ -41,6 +41,22 @@ func loadTemplate(templates *template.Template, tmpl string) {
 	assert.NoErr(err, "unable to load template")
 }
 
+func loadTemplates(templates *template.Template, dirPath string) {
+	entries, err := os.ReadDir(dirPath)
+	assert.NoErr(err, "unable to read html dir")
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			fileName := path.Join(dirPath, entry.Name())
+			fileData, err := os.ReadFile(fileName)
+			assert.NoErr(err, fmt.Sprintf("unable to read html for: %s", fileName))
+
+			templates, err = templates.Parse(string(fileData))
+			assert.NoErr(err, fmt.Sprintf("unable to parse html for: %s", fileName))
+		}
+	}
+}
+
 type bufWriter []byte
 
 func (b *bufWriter) Write(n []byte) (int, error) {
@@ -135,6 +151,9 @@ func main() {
 		prod = false
 	}
 
+	htmlPath := os.Getenv("HTML")
+	assert.True(len(htmlPath) > 0, "missing html path")
+
 	coingecko.Init()
 
 	templateFuncs := template.FuncMap{
@@ -165,6 +184,7 @@ func main() {
 	}
 	var templates *template.Template = template.New("root").Funcs(templateFuncs)
 	loadTemplate(templates, pageLayoutComponent)
+	loadTemplates(templates, htmlPath)
 	pool, err := db.InitPool(context.Background(), appEnv)
 	assert.NoErr(err, "")
 

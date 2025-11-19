@@ -613,6 +613,15 @@ func Parse(
 					&transfer.Price, &transfer.Value, &transfer.Amount,
 				)
 			}
+			for _, transfer := range data.Incoming {
+				queryEventDataPrice(
+					roundedTimestamp,
+					event.Network,
+					transfer.Token,
+					transfer.TokenSource,
+					&transfer.Price, &transfer.Value, &transfer.Amount,
+				)
+			}
 		default:
 			assert.True(false, "unknown event data: %T %#v", data, *event)
 			continue

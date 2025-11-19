@@ -44,6 +44,68 @@ func invSubBalance(
 	return
 }
 
+func invSubFromAccount(
+	inv *inventory,
+	account, token string,
+	event *db.Event,
+	amount, price decimal.Decimal,
+	profit *decimal.Decimal,
+	increaseProfits bool,
+	errors map[string][]*db.ParserError,
+) {
+	accountId := inventoryAccountId{event.Network, account, token}
+	balances := inv.accounts[accountId]
+
+	remainingAmount := amount
+
+	for len(balances) > 0 && remainingAmount.GreaterThan(decimal.Zero) {
+		acqPrice := balances[0].acqPrice
+
+		var movedAmount decimal.Decimal
+		remainingAmount, movedAmount = invSubBalance(
+			&balances,
+			remainingAmount,
+		)
+
+		if increaseProfits {
+			disposal := movedAmount.Mul(price)
+			acquisition := movedAmount.Mul(acqPrice)
+
+			*profit = disposal.Sub(acquisition)
+			inv.disposal = inv.disposal.Add(disposal)
+			inv.acquisition = inv.acquisition.Add(acquisition)
+		}
+	}
+
+	if remainingAmount.GreaterThan(decimal.Zero) {
+		// TODO: missing amount error
+		appendErrUnique(
+			errors,
+			&db.ParserError{
+				TxId:     event.TxId,
+				IxIdx:    event.IxIdx,
+				EventIdx: event.Idx,
+				Type:     db.ParserErrorTypeAccountBalanceMismatch,
+				Data: &db.ParserErrorAccountBalanceMismatch{
+					AccountAddress: account,
+					Token:          token,
+					Expected:       decimal.Zero,
+					Real:           remainingAmount,
+				},
+			},
+			account,
+		)
+
+		if increaseProfits {
+			value := remainingAmount.Mul(price)
+			*profit = value
+			inv.income = inv.income.Add(value)
+		}
+	}
+
+	inv.accounts[accountId] = balances
+}
+
 func (inv *inventory) processEvent(
 	event *db.Event,
 	errors map[string][]*db.ParserError,
@@ -92,9 +154,10 @@ func (inv *inventory) processEvent(
 				data.FromAccount,
 			)
 
-			inv.income = inv.income.Add(
-				remainingAmount.Mul(data.Price),
-			)
+			value := remainingAmount.Mul(data.Price)
+			data.Profit = value
+			inv.income = inv.income.Add(value)
+
 			toBalances = append(toBalances, &inventoryAccount{
 				amount:   remainingAmount,
 				acqPrice: data.Price,
@@ -104,8 +167,6 @@ func (inv *inventory) processEvent(
 		inv.accounts[fromAccountId] = fromBalances
 		inv.accounts[toAccountId] = toBalances
 	case *db.EventTransfer:
-		accountId := inventoryAccountId{event.Network, data.Account, data.Token}
-		balances := inv.accounts[accountId]
 
 		switch data.Direction {
 		case db.EventTransferIncoming:
@@ -114,59 +175,48 @@ func (inv *inventory) processEvent(
 				data.Profit = data.Value
 			}
 
-			balances = append(balances, &inventoryAccount{
-				amount:   data.Amount,
-				acqPrice: data.Price,
-			})
+			accountId := inventoryAccountId{event.Network, data.Account, data.Token}
+			inv.accounts[accountId] = append(
+				inv.accounts[accountId],
+				&inventoryAccount{
+					amount:   data.Amount,
+					acqPrice: data.Price,
+				},
+			)
 		case db.EventTransferOutgoing:
-			remainingAmount := data.Amount
-
-			for len(balances) > 0 && remainingAmount.GreaterThan(decimal.Zero) {
-				acqPrice := balances[0].acqPrice
-
-				var movedAmount decimal.Decimal
-				remainingAmount, movedAmount = invSubBalance(
-					&balances,
-					remainingAmount,
-				)
-
-				// TODO: should burn increase profits?
-				if event.Type == db.EventTypeTransfer {
-					disposal := movedAmount.Mul(data.Price)
-					acquisition := movedAmount.Mul(acqPrice)
-
-					data.Profit = disposal.Sub(acquisition)
-					inv.disposal = inv.disposal.Add(disposal)
-					inv.acquisition = inv.acquisition.Add(acquisition)
-				}
-			}
-
-			if remainingAmount.GreaterThan(decimal.Zero) {
-				appendErrUnique(
-					errors,
-					&db.ParserError{
-						TxId:     event.TxId,
-						IxIdx:    event.IxIdx,
-						EventIdx: event.Idx,
-						Type:     db.ParserErrorTypeAccountBalanceMismatch,
-						Data: &db.ParserErrorAccountBalanceMismatch{
-							AccountAddress: data.Account,
-							Token:          data.Token,
-							Expected:       decimal.Zero,
-							Real:           remainingAmount,
-						},
-					},
-					data.Account,
-				)
-
-				inv.income = inv.income.Add(
-					remainingAmount.Mul(data.Price),
-				)
-			}
+			invSubFromAccount(
+				inv,
+				data.Account, data.Token,
+				event,
+				data.Amount, data.Price, &data.Profit,
+				event.Type == db.EventTypeTransfer,
+				errors,
+			)
 		default:
 			assert.True(false, "invalid direction: %d", data.Direction)
 		}
 
-		inv.accounts[accountId] = balances
+	case *db.EventSwap:
+		for _, transfer := range data.Outgoing {
+			invSubFromAccount(
+				inv,
+				transfer.Account, transfer.Token,
+				event,
+				transfer.Amount, transfer.Price, &transfer.Profit,
+				true,
+				errors,
+			)
+		}
+
+		for _, transfer := range data.Incoming {
+			inv.income = inv.income.Add(transfer.Value)
+			transfer.Profit = transfer.Value
+
+			accountId := inventoryAccountId{event.Network, transfer.Account, transfer.Token}
+			inv.accounts[accountId] = append(inv.accounts[accountId], &inventoryAccount{
+				amount:   transfer.Amount,
+				acqPrice: transfer.Price,
+			})
+		}
 	}
 }

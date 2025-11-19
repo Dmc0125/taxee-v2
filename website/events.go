@@ -58,112 +58,6 @@ type eventsPageData struct {
 	Rows    []eventTableRowComponentData
 }
 
-const eventsPage = `<!-- html -->
-{{ define "events_page" }}
-<div class="w-[80%] mx-auto mt-10">
-	<header class="w-full flex items-center justify-between text-gray-800">
-		<h1 class="font-semibold text-2xl">Events</h1>
-		<a href="{{ .NextUrl }}" class="">
-			Next
-		</a>
-	</header>
-
-	<div class="w-full mt-10 overflow-x-auto">
-		<ul class="w-fit min-w-full flex flex-col gap-y-4 relative">
-			<!-- header -->
-			<!-- TODO: sticky -->
-			<li class="
-				w-full py-2 pl-4 top-2
-				grid grid-cols-[150px_1fr]
-				bg-gray-50 border border-gray-200 rounded-lg text-gray-800
-			">
-				<span>Date</span>
-				<div class="w-full px-4 grid grid-cols-[300px_repeat(2,minmax(350px,1fr))_150px]">
-					<span>App</span>
-					<div class="flex">
-						<span class="w-1/2">Outgoing</span>
-						<span>Disposal</span>
-					</div>
-					<div class="flex">
-						<span class="w-1/2">Incoming</span>
-						<span>Acquisition</span>
-					</div>
-					<span>Profit</span>
-				</div>
-			</li>
-
-			{{ range .Rows }}
-				{{ if eq .Type 0 }}
-					<li class="w-full py-1 px-4 bg-crossed rounded-lg">
-						<span class="text-sm text-gray-800">{{ formatDate .Timestamp }}</span>
-					</li>
-				{{ else }}
-					<!-- Timestamp + explorer -->
-					<li class="w-full pl-4 grid grid-cols-[150px_1fr] gap-y-4">
-						<div class="flex flex-col col-[1/2]">
-							<a
-								href="{{ .ExplorerUrl }}"
-								target="_blank"
-								class="text-gray-800"
-							>{{ .TxId }}</a>
-							<span class="text-sm text-gray-700">{{ formatTime .Timestamp }}</span>
-						</div>
-
-						<!-- event data -->
-						
-						{{ if .Events }}
-							{{ range .Events }}
-								<div class="
-									w-full col-[2/-1] border border-gray-200 rounded-lg
-								">
-									{{ template "event_component" . }}
-								</div>
-							{{ end }}
-						{{ else }}
-							<div class="
-								w-full col-[2/-1] min-h-14 relative
-								flex items-center justify-center 
-								border border-gray-200 rounded-lg text-gray-600
-							">
-								{{ template "events_network_component" .NetworkImgUrl }}
-
-								This transaction does not have any events	
-							</div>
-						{{ end }}
-
-						{{ if .HasErrors }}
-							<div class="
-								w-full col-[2/-1] grid grid-cols-[repeat(2,1fr)]
-								border border-gray-200 rounded-lg 
-							">
-								{{ template "event_error_group_component" .PreprocessErrors }}
-								{{ template "event_error_group_component" .ProcessErrors }}
-							</div>
-						{{ end }}
-					</li>
-				{{ end }}
-			{{ end }}
-		</ul>
-	</div>
-</div>
-{{ end }}
-`
-
-const eventsNetworkImgComponent = `<!-- html -->
-{{ define "events_network_component" }}
-<div class="
-	w-5 h-5 p-0.5 absolute top-0 left-0 -translate-y-1/3 -translate-x-1/3
-	rounded-full bg-gray-100 border border-gray-200
-	overflow-hidden
-">
-	<img 
-		src="{{ . }}" 
-		class="w-full h-full"
-	/>
-</div>
-{{ end }}
-`
-
 type eventComponentData struct {
 	NetworkImgUrl string
 	EventType     string
@@ -173,50 +67,6 @@ type eventComponentData struct {
 	IncomingTransfers *eventTransfersComponentData
 	Profits           []*eventFiatAmountComponentData
 }
-
-const eventComponent = `<!-- html -->
-{{ define "event_component" }}
-<div class="
-	w-full px-4 py-2 grid grid-cols-[300px_repeat(2,minmax(350px,1fr))_150px] relative
-">
-	{{ template "events_network_component" .NetworkImgUrl }}
-
-	<!-- App img, network img, event type, onchain method -->
-	<div class="flex">
-		<div class="w-10 h-10 rounded-full bg-gray-200">
-			
-		</div>
-
-		<div class="flex flex-col ml-4">
-			<span class="text-gray-800 font-medium">{{ .EventType }}</span>
-			<span class="text-gray-600 text-sm">{{ .Method }}</span>
-		</div>
-	</div>
-
-	<!-- Outgoing -->
-	{{ template "event_transfers_component" .OutgoingTransfers }}
-
-	<!-- Incoming -->
-	{{ template "event_transfers_component" .IncomingTransfers }}
-
-	{{ if .Profits }}
-		<div class="w-full flex flex-col gap-y-1">
-			<div class="opacity-0 h-[1em] text-sm"></div>
-			<div class="mt-1">
-				{{ range .Profits }}
-					{{ template "event_fiat_amount_component" . }}
-				{{ end }}
-			</div>
-		</div>
-	{{ else }}
-		<div class="w-full flex flex-col gap-y-1">
-			<div class="opacity-0 h-[1em] text-sm"></div>
-			<div class="mt-1">-</div>
-		</div>
-	{{ end }}
-</div>
-{{ end }}
-`
 
 type eventErrorComponentData struct {
 	Address  string
@@ -230,113 +80,11 @@ type eventErrorGroupComponentData struct {
 	Errors []eventErrorComponentData
 }
 
-const eventErrorGroupComponent = `<!-- html -->
-{{ define "event_error_group_component" }}
-<div class="px-4 py-4 flex flex-col border-r border-gray-200">
-	<div class="w-full flex items-center justify-between">
-		<span class="text-gray-600 text-sm">
-		{{ if eq .Type 0 }}
-			Preprocess errors 
-		{{ else }}
-			Process errors
-		{{ end }}
-		</span>
-
-		{{ if .Errors }}
-			<span class="
-				w-5 h-5 rounded-full text-xs bg-red-700/20 text-red-700
-				flex items-center justify-center flex-shrink-0
-			">{{ len .Errors }}</span>
-		{{ end }}
-	</div> 
-
-	{{ if .Errors }}
-		<ul class="
-			w-full mt-2 gap-y-4
-			grid grid-cols-[20%_repeat(3,1fr)]
-		">
-			<li class="
-				w-full py-1 col-[1/-1] grid grid-cols-subgrid
-				text-gray-600 border-b border-gray-200 text-sm
-			">
-				<span>Account</span>
-				<span>Type</span>
-				<span>Real</span>
-				<span>Expected</span>
-			</li>
-			{{ range .Errors }}
-				<li class="col-[1/-1] grid grid-cols-subgrid text-gray-800 text-sm">
-					<span>{{ shorten .Address 4 4 }} </span>
-					{{ if eq .Type 0 }}
-						<span>Missing account</span>
-						<span>-</span>
-						<span>-</span>
-					{{ else if eq .Type 1 }}
-						<span>Balance mismatch</span>
-						<span>{{ .Had }}</span>
-						<span>{{ .Expected }}</span>
-					{{ else if eq .Type 2 }}
-						<span>Data mismatch</span>
-						<span>{{ .Had }}</span>
-						<span>{{ .Expected }}</span>
-					{{ end }}
-				</li>
-			{{ end }}
-		</ul>
-	{{ else }}
-		<div class="w-full h-full mt-2 flex items-center justify-center">
-			<span class="text-gray-600">
-				No errors of this kind
-			</span>
-		</div>
-	{{ end }}
-</div>
-{{ end }}
-`
-
 type eventTransfersComponentData struct {
 	Wallet string
 	Tokens []*eventTokenAmountComponentData
 	Fiats  []*eventFiatAmountComponentData
 }
-
-const eventTransfersComponent = `<!-- html -->
-{{ define "event_transfers_component" }}
-<div class="w-full flex flex-col gap-y-1">
-	<div class="w-full text-sm h-[1em]">
-		<span class="text-gray-500 font-medium">
-			{{ if . }}
-				{{ .Wallet }}
-			{{ end }}
-		</span>
-	</div>
-
-	<div class="flex items-center mt-1">
-		<!-- Token amounts -->
-		<div class="w-1/2">
-			{{ if . }}
-				{{ range .Tokens }}
-					{{ template "event_token_amount_component" . }}
-				{{ end }}
-			{{ else }}
-				<div class="mt-1">-</div>
-			{{ end }}
-		</div>
-
-		<!-- Fiat amounts -->
-		<div>
-			{{ if . }}
-				{{ range .Fiats }}
-					{{ template "event_fiat_amount_component" . }}
-				{{ end }}
-			{{ else }}
-				<div class="mt-1">-</div>
-			{{ end }}
-		</div>
-	</div>
-</div>
-{{ end }}
-`
 
 type eventTokenAmountComponentData struct {
 	ImgUrl string
@@ -344,65 +92,15 @@ type eventTokenAmountComponentData struct {
 	Symbol string
 }
 
-// renders token img + amount + symbol
-const eventTokenAmountComponent = `<!-- html -->
-{{ define "event_token_amount_component" }}
-<div class="w-fit flex items-center gap-2">
-	<div class="
-		w-5 h-5 
-		rounded-full overflow-hidden
-	">
-		{{ if .ImgUrl }}
-			<img src="{{ .ImgUrl }}" class="w-5 h-5 rounded-full" />
-		{{ else }}
-			<div class="
-				w-full h-full flex items-center justify-center
-				text-sm text-gray-600 bg-gray-200
-			">
-				?
-			</div>
-		{{ end }}
-	</div>
-
-	<span class="text-gray-800 text-sm">{{ .Amount }} {{ upper .Symbol }}</span>
-</div>
-{{ end }}
-`
-
 type eventFiatAmountComponentData struct {
 	Amount   string
 	Currency string
+	Price    string
 	Zero     bool
 	Missing  bool
 	Sign     int
+	IsProfit bool
 }
-
-const eventFiatAmountComponent = `<!-- html -->
-{{ define "event_fiat_amount_component" }}
-<div class="h-5 flex items-center gap-x-2">
-{{ if .Zero }}
-	{{ if .Missing }}
-		<div class="w-full flex items-center gap-x-1">
-			<span class="
-				w-5 h-5 rounded-full text-xs bg-red-700/20 text-red-700
-				flex items-center justify-center flex-shrink-0
-			">!</span>
-			<span class="
-				w-full px-2 py-1 text-sm text-red-800
-			">Missing price</span>
-		</div>
-	{{ else }}
-		<span class="text-gray-800 text-sm">-</span>
-	{{ end }}
-{{ else }}
-	<span class="
-		text-sm
-		{{ tern (eq .Sign 0) "text-gray-800" (eq .Sign -1) "text-red-800" "text-green-800" }}
-	">{{ .Amount }} {{ upper .Currency }}</span>
-{{ end }}
-</div>
-{{ end }}
-`
 
 type fetchTokenMetadataQueued struct {
 	coingeckoId string
@@ -426,6 +124,7 @@ func eventsRenderTokenAmounts(
 	fiatData = &eventFiatAmountComponentData{
 		Amount:   value.StringFixed(2),
 		Currency: "eur",
+		Price:    price.StringFixed(2),
 		Sign:     value.Sign(),
 		Missing:  price.Equal(decimal.Zero),
 		Zero:     value.Equal(decimal.Zero),
@@ -435,6 +134,7 @@ func eventsRenderTokenAmounts(
 		Currency: "eur",
 		Sign:     profit.Sign(),
 		Zero:     profit.Equal(decimal.Zero),
+		IsProfit: true,
 	}
 
 	appendTokenToQueue := func(coingeckoId string) {
@@ -462,9 +162,9 @@ func eventsRenderTokenAmounts(
 			select
 				symbol, image_url
 			from
-				coingecko_token_data 
+				coingecko_token_data
 			where
-				coingecko_id = $1	
+				coingecko_id = $1
 		`
 		q := getTokensMetaBatch.Queue(
 			getTokenMetaByCoingeckoId,
@@ -557,14 +257,6 @@ func eventsHandler(
 	pool *pgxpool.Pool,
 	templates *template.Template,
 ) http.HandlerFunc {
-	loadTemplate(templates, eventsPage)
-	loadTemplate(templates, eventComponent)
-	loadTemplate(templates, eventTransfersComponent)
-	loadTemplate(templates, eventTokenAmountComponent)
-	loadTemplate(templates, eventFiatAmountComponent)
-	loadTemplate(templates, eventErrorGroupComponent)
-	loadTemplate(templates, eventsNetworkImgComponent)
-
 	return func(w http.ResponseWriter, r *http.Request) {
 		/////////////
 		// parse query
@@ -645,8 +337,8 @@ func eventsHandler(
 			inner join
 				tx on tx.id = tx_ref.tx_id
 			left join
-				event e on 
-					e.tx_id = tx_ref.tx_id and 
+				event e on
+					e.tx_id = tx_ref.tx_id and
 					e.user_account_id = tx_ref.user_account_id
 			left join
 				parser_error pe on
@@ -660,7 +352,7 @@ func eventsHandler(
 				-- global ordering
 				tx.timestamp asc,
 				-- network specific ordering in case of timestamps conflicts
-				-- solana 
+				-- solana
 				(tx.data->>'slot')::bigint asc,
 				(tx.data->>'blockIndex')::integer asc,
 				-- evm
@@ -705,7 +397,7 @@ func eventsHandler(
 							(
 								tx.network = 'solana' and (
 									(tx.data->>'slot')::bigint > $3 or (
-										(tx.data->>'slot')::bigint = $3 and 
+										(tx.data->>'slot')::bigint = $3 and
 										(tx.data->>'blockIndex')::integer > $4
 									)
 								)
@@ -901,6 +593,53 @@ func eventsHandler(
 							Wallet: shorten(data.ToWallet, 4, 4),
 							Tokens: []*eventTokenAmountComponentData{tokenData},
 							Fiats:  []*eventFiatAmountComponentData{fiatData},
+						}
+					case *db.EventSwap:
+						outgoing := eventTransfersComponentData{
+							Wallet: shorten(data.Wallet, 4, 4),
+						}
+						eventComponentData.OutgoingTransfers = &outgoing
+						incoming := eventTransfersComponentData{
+							Wallet: shorten(data.Wallet, 4, 4),
+						}
+						eventComponentData.IncomingTransfers = &incoming
+
+						for _, swap := range data.Outgoing {
+							tokenData, fiatData, profitData := eventsRenderTokenAmounts(
+								swap.Amount,
+								swap.Value,
+								swap.Profit,
+								swap.Price,
+								swap.Token,
+								network,
+								swap.TokenSource,
+								&getTokensMetaBatch,
+								&fetchTokensMetadataQueue,
+							)
+
+							eventComponentData.Profits = append(
+								eventComponentData.Profits,
+								profitData,
+							)
+
+							outgoing.Tokens = append(outgoing.Tokens, tokenData)
+							outgoing.Fiats = append(outgoing.Fiats, fiatData)
+						}
+
+						for _, swap := range data.Incoming {
+							tokenData, fiatData, _ := eventsRenderTokenAmounts(
+								swap.Amount,
+								swap.Value,
+								swap.Profit,
+								swap.Price,
+								swap.Token,
+								network,
+								swap.TokenSource,
+								&getTokensMetaBatch,
+								&fetchTokensMetadataQueue,
+							)
+							incoming.Tokens = append(incoming.Tokens, tokenData)
+							incoming.Fiats = append(incoming.Fiats, fiatData)
 						}
 					}
 				}

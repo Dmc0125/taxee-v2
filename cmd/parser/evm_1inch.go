@@ -168,7 +168,7 @@ func evmProcess1InchVUknownTx(
 		amounts := make(map[string]decimal.Decimal)
 
 		if !tx.Value.Equal(decimal.Zero) {
-			amounts["ethereum"] = tx.Value
+			amounts["ethereum"] = tx.Value.Neg()
 		}
 
 		// native amount
@@ -201,7 +201,7 @@ func evmProcess1InchVUknownTx(
 			t := db.EventSwapTransfer{
 				Account:     sender,
 				Token:       token,
-				Amount:      amount,
+				Amount:      amount.Abs(),
 				TokenSource: uint16(ctx.network),
 			}
 			if token == "ethereum" {
@@ -209,9 +209,9 @@ func evmProcess1InchVUknownTx(
 			}
 
 			if amount.LessThan(decimal.Zero) {
-				swapData.Outgoing = append(swapData.Outgoing, t)
+				swapData.Outgoing = append(swapData.Outgoing, &t)
 			} else if amount.GreaterThan(decimal.Zero) {
-				swapData.Incoming = append(swapData.Incoming, t)
+				swapData.Incoming = append(swapData.Incoming, &t)
 			}
 		}
 
