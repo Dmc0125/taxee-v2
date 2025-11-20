@@ -140,6 +140,7 @@ const (
 
 type Event struct {
 	TxId         string
+	Idx          int
 	IxIdx        int32
 	Timestamp    time.Time
 	Network      Network

@@ -47,8 +47,8 @@ func invSubBalance(
 func invSubFromAccount(
 	inv *inventory,
 	account, token string,
+	tokenSource uint16,
 	event *db.Event,
-	eventIdx int,
 	amount, price decimal.Decimal,
 	profit *decimal.Decimal,
 	increaseProfits bool,
@@ -82,12 +82,13 @@ func invSubFromAccount(
 		err := db.ParserError{
 			TxId:     event.TxId,
 			IxIdx:    event.IxIdx,
-			EventIdx: int32(eventIdx),
+			EventIdx: int32(event.Idx),
 			Type:     db.ParserErrorTypeMissingBalance,
 			Data: &db.ParserErrorMissingBalance{
 				AccountAddress: account,
 				Token:          token,
 				Amount:         remainingAmount,
+				TokenSource:    tokenSource,
 			},
 		}
 		appendParserError(
@@ -108,7 +109,6 @@ func invSubFromAccount(
 
 func (inv *inventory) processEvent(
 	event *db.Event,
-	eventIdx int,
 	missingBalancesErrorsContainer *errorsContainer,
 ) {
 	switch data := event.Data.(type) {
@@ -140,12 +140,13 @@ func (inv *inventory) processEvent(
 			err := db.ParserError{
 				TxId:     event.TxId,
 				IxIdx:    event.IxIdx,
-				EventIdx: int32(eventIdx),
+				EventIdx: int32(event.Idx),
 				Type:     db.ParserErrorTypeMissingBalance,
 				Data: &db.ParserErrorMissingBalance{
 					AccountAddress: data.FromAccount,
 					Token:          data.Token,
 					Amount:         remainingAmount,
+					TokenSource:    data.TokenSource,
 				},
 			}
 			appendParserError(
@@ -185,9 +186,8 @@ func (inv *inventory) processEvent(
 		case db.EventTransferOutgoing:
 			invSubFromAccount(
 				inv,
-				data.Account, data.Token,
+				data.Account, data.Token, data.TokenSource,
 				event,
-				eventIdx,
 				data.Amount, data.Price, &data.Profit,
 				event.Type == db.EventTypeTransfer,
 				missingBalancesErrorsContainer,
@@ -200,9 +200,8 @@ func (inv *inventory) processEvent(
 		for _, transfer := range data.Outgoing {
 			invSubFromAccount(
 				inv,
-				transfer.Account, transfer.Token,
+				transfer.Account, transfer.Token, transfer.TokenSource,
 				event,
-				eventIdx,
 				transfer.Amount, transfer.Price, &transfer.Profit,
 				true,
 				missingBalancesErrorsContainer,

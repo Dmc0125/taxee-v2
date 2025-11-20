@@ -775,7 +775,10 @@ func Parse(
 
 		if len(eventsGroup) > 0 {
 			groupedEvents[tx.Id] = eventsGroup
-			events = append(events, eventsGroup...)
+			for _, event := range eventsGroup {
+				event.Idx = len(events)
+				events = append(events, event)
+			}
 		}
 	}
 
@@ -786,17 +789,17 @@ func Parse(
 
 		const insertErrorQuery = `
 				insert into parser_error (
-					user_account_id, tx_id, ix_idx, event_idx, 
+					user_account_id, tx_id, ix_idx, 
 					origin, type, data
 				) values (
-					$1, $2, $3, $4, $5, $6, $7
+					$1, $2, $3, $4, $5, $6
 				)
 			`
 		batch.Queue(
 			insertErrorQuery,
 			// args
 			userAccountId,
-			error.TxId, error.IxIdx, error.EventIdx,
+			error.TxId, error.IxIdx,
 			db.ErrOriginProcess, error.Type, data,
 		)
 	}
@@ -824,7 +827,7 @@ func Parse(
 	batch = pgx.Batch{}
 
 	for _, tx := range txs {
-		events, ok := groupedEvents[tx.Id]
+		txEvents, ok := groupedEvents[tx.Id]
 		if !ok {
 			continue
 		}
@@ -835,8 +838,8 @@ func Parse(
 			processEventsErrors[tx.Network] = errors
 		}
 
-		for eventIdx, event := range events {
-			inv.processEvent(event, eventIdx, errors)
+		for _, event := range txEvents {
+			inv.processEvent(event, errors)
 
 			eventData, err := json.Marshal(event.Data)
 			assert.NoErr(err, "unable to marshal event data")
@@ -853,7 +856,7 @@ func Parse(
 				userAccountId,
 				event.TxId,
 				event.IxIdx,
-				eventIdx,
+				event.Idx,
 				event.UiAppName,
 				event.UiMethodName,
 				event.Type,
@@ -889,6 +892,7 @@ func Parse(
 						TxId: tx.Id,
 						Type: db.ParserErrorTypeAccountBalanceMismatch,
 						Data: &db.ParserErrorAccountBalanceMismatch{
+							Wallet:         account,
 							AccountAddress: account,
 							Token:          SOL_MINT_ADDRESS,
 							External:       expectedBalance,
@@ -929,6 +933,7 @@ func Parse(
 							TxId: tx.Id,
 							Type: db.ParserErrorTypeAccountBalanceMismatch,
 							Data: &db.ParserErrorAccountBalanceMismatch{
+								Wallet:         balance.Owner,
 								AccountAddress: account,
 								Token:          token.Token,
 								External:       expectedAmount,

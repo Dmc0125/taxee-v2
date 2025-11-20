@@ -48,6 +48,7 @@ type ParserErrorMissingAccount struct {
 
 // NOTE: balance validation after preprocess / process
 type ParserErrorAccountBalanceMismatch struct {
+	Wallet         string          `json:"wallet"`
 	AccountAddress string          `json:"accountAddress"`
 	Token          string          `json:"token"`
 	External       decimal.Decimal `json:"external"`
@@ -63,6 +64,7 @@ type ParserErrorMissingBalance struct {
 	AccountAddress string          `json:"accountAddresss"`
 	Token          string          `json:"token"`
 	Amount         decimal.Decimal `json:"amount"`
+	TokenSource    uint16          `json:"tokenSource"`
 }
 
 type ParserErrorType uint8

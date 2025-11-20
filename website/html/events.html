@@ -75,8 +75,8 @@
 								w-full col-[2/-1] grid grid-cols-[repeat(2,1fr)]
 								border border-gray-200 rounded-lg 
 							">
-								{{ template "event_error_group_component" .PreprocessErrors }}
-								{{ template "event_error_group_component" .ProcessErrors }}
+                                {{ template "event_error_group_component" .PreprocessErrors }}
+                                {{ template "event_error_group_component" .ProcessErrors }}
 							</div>
 						{{ end }}
 					</li>
@@ -101,106 +101,156 @@
 {{ end }}
 
 {{ define "event_component" }}
-<div class="
-	w-full px-4 py-2 grid grid-cols-[300px_repeat(2,minmax(350px,1fr))_150px] relative
-">
-	{{ template "events_network_component" .NetworkImgUrl }}
+    <div class="
+        w-full px-4 py-2 grid grid-cols-[300px_repeat(2,minmax(350px,1fr))_150px] relative
+    ">
+        {{ template "events_network_component" .NetworkImgUrl }}
 
-	<!-- App img, network img, event type, onchain method -->
-	<div class="flex">
-		<div class="w-10 h-10 rounded-full bg-gray-200">
-			
-		</div>
+        <!-- App img, network img, event type, onchain method -->
+        <div class="flex">
+            <div class="w-10 h-10 rounded-full bg-gray-200">
+                
+            </div>
 
-		<div class="flex flex-col ml-4">
-			<span class="text-gray-800 font-medium">{{ .EventType }}</span>
-			<span class="text-gray-600 text-sm">{{ .Method }}</span>
-		</div>
-	</div>
+            <div class="flex flex-col ml-4">
+                <span class="text-gray-800 font-medium">{{ .EventType }}</span>
+                <span class="text-gray-600 text-sm">{{ .Method }}</span>
+            </div>
+        </div>
 
-	<!-- Outgoing -->
-	{{ template "event_transfers_component" .OutgoingTransfers }}
+        <!-- Outgoing -->
+        {{ template "event_transfers_component" .OutgoingTransfers }}
 
-	<!-- Incoming -->
-	{{ template "event_transfers_component" .IncomingTransfers }}
+        <!-- Incoming -->
+        {{ template "event_transfers_component" .IncomingTransfers }}
 
-	{{ if .Profits }}
-		<div class="w-full flex flex-col gap-y-1">
-			<div class="opacity-0 h-[1em] text-sm"></div>
-			<div class="mt-1">
-				{{ range .Profits }}
-					{{ template "event_fiat_amount_component" . }}
-				{{ end }}
-			</div>
-		</div>
-	{{ else }}
-		<div class="w-full flex flex-col gap-y-1">
-			<div class="opacity-0 h-[1em] text-sm"></div>
-			<div class="mt-1">-</div>
-		</div>
-	{{ end }}
-</div>
+        {{ if .Profits }}
+            <div class="w-full flex flex-col gap-y-1">
+                <div class="opacity-0 h-[1em] text-sm"></div>
+                <div class="mt-1">
+                    {{ range .Profits }}
+                        {{ template "event_fiat_amount_component" . }}
+                    {{ end }}
+                </div>
+            </div>
+        {{ else }}
+            <div class="w-full flex flex-col gap-y-1">
+                <div class="opacity-0 h-[1em] text-sm"></div>
+                <div class="mt-1">-</div>
+            </div>
+        {{ end }}
+    </div>
+
+    {{ if .MissingBalances }}
+        <div class="w-full px-4 py-2 bg-red-100 rounded-b-[.45rem]">
+            {{ range .MissingBalances }}
+                <div class="flex items-center gap-2">
+                    <span class="
+                        w-4 h-4 rounded-full text-xs bg-red-700/20 text-red-700
+                        flex items-center justify-center flex-shrink-0
+                    ">!</span>
+                    <span class="text-gray-700 text-sm flex items-center gap-2">
+                        Missing balance
+                        {{ template "event_token_amount_component" . }}
+                    </span>
+                </div>
+            {{ end }}
+        </div>
+    {{ end }}
 {{ end }}
 
 {{ define "event_error_group_component" }}
-<div class="px-4 py-4 flex flex-col border-r border-gray-200">
-	<div class="w-full flex items-center justify-between">
-		<span class="text-gray-600 text-sm">
-		{{ if eq .Type 0 }}
-			Preprocess errors 
-		{{ else }}
-			Process errors
-		{{ end }}
-		</span>
+<div class="
+    w-full p-4 border-gray-200 flex flex-col
+    {{ tern (.Type | eq 0) "border-r" "" }}
+">
+    <span class="text-gray-600 text-sm">
+        {{ if eq .Type 0 }}
+            Preprocess
+        {{ else }}
+            Process
+        {{ end }}
+        errors
+    </span>
 
-		{{ if .Errors }}
-			<span class="
-				w-5 h-5 rounded-full text-xs bg-red-700/20 text-red-700
-				flex items-center justify-center flex-shrink-0
-			">{{ len .Errors }}</span>
-		{{ end }}
-	</div> 
+    {{ if .MissingAccounts | or .BalanceMismatches | or .DataMismatches }}
+        <ul class="mt-2 flex flex-col gap-3">
+            {{ if .MissingAccounts }}
+                <li class="-mx-2 px-2 py-0.5 text-sm text-gray-800 bg-red-100 rounded-lg">
+                    Missing accounts
+                </li>
 
-	{{ if .Errors }}
-		<ul class="
-			w-full mt-2 gap-y-4
-			grid grid-cols-[20%_repeat(3,1fr)]
-		">
-			<li class="
-				w-full py-1 col-[1/-1] grid grid-cols-subgrid
-				text-gray-600 border-b border-gray-200 text-sm
-			">
-				<span>Account</span>
-				<span>Type</span>
-				<span>Real</span>
-				<span>Expected</span>
-			</li>
-			{{ range .Errors }}
-				<li class="col-[1/-1] grid grid-cols-subgrid text-gray-800 text-sm">
-					<span>{{ shorten .Address 4 4 }} </span>
-					{{ if eq .Type 0 }}
-						<span>Missing account</span>
-						<span>-</span>
-						<span>-</span>
-					{{ else if eq .Type 1 }}
-						<span>Balance mismatch</span>
-						<span>{{ .Had }}</span>
-						<span>{{ .Expected }}</span>
-					{{ else if eq .Type 2 }}
-						<span>Data mismatch</span>
-						<span>{{ .Had }}</span>
-						<span>{{ .Expected }}</span>
-					{{ end }}
-				</li>
-			{{ end }}
-		</ul>
-	{{ else }}
-		<div class="w-full h-full mt-2 flex items-center justify-center">
-			<span class="text-gray-600">
-				No errors of this kind
-			</span>
-		</div>
-	{{ end }}
+                {{ range .MissingAccounts }}
+                    <li class="text-sm text-gray-700 flex items-center justify-between">
+                        <span>{{ shorten .Account 4 4 }}</span>
+                        <span>Ix: {{ .IxIdx }}</span>
+                    </li>
+                {{ end }}
+            {{ end }}
+
+            {{ if .BalanceMismatches }}
+                <li class="
+                    -mx-2 px-2 py-0.5 grid grid-cols-[20%_20%_2fr_1fr_1fr]
+                    text-sm text-gray-800 bg-red-100 rounded-lg
+                ">
+                    <span class="col-[1/4]">Balance mismatches</span>
+                    
+                    <span class="text-gray-600">Local</span>
+                    <span class="text-gray-600">External</span>
+                </li>
+                
+                {{ range .BalanceMismatches }}
+                    <li class="text-sm text-gray-700 grid grid-cols-[20%_20%_2fr_1fr_1fr]">
+                        <span>{{ shorten .Wallet 4 4 }}</span>
+                        <span>{{ shorten .Account 4 4 }}</span>
+                        <span class="flex gap-2 items-center">
+                            {{ template "event_token_img" .ImgUrl }}
+                            {{ upper .Token }}
+                        </span>
+                        <span id="hoverable">
+                            {{ if .LocalZero }}
+                                -
+                            {{ else }}
+                                {{ .LocalAmount }}
+                                <div id="floating">
+                                    {{ .LocalAmountLong }}
+                                </div>
+                            {{ end }}
+                        </span>
+                        <span id="hoverable">
+                            {{ if .ExternalZero }}
+                                -
+                            {{ else }}
+                                {{ .ExternalAmount }}
+                                <div id="floating">
+                                    {{ .ExternalAmountLong }}
+                                </div>
+                            {{ end }}
+                        </span>
+                    </li>
+                {{ end }}
+            {{ end }}
+
+            {{ if .DataMismatches }}
+                <li class="-mx-2 px-2 py-0.5 text-sm text-gray-800 bg-red-100 rounded-lg">
+                    Data mismatches
+                </li>
+
+                {{ range .DataMismatches }}
+                    <li class="text-sm text-gray-700 grid grid-cols-[20%_20%_1fr_auto]">
+                        <span>{{ shorten .Wallet 4 4 }}</span>
+                        <span>{{ shorten .Account 4 4 }}</span>
+                        <span>{{ .Message }}</span>
+                        <span>Ix: {{ .IxIdx }}</span>
+                    </li>
+                {{ end }}
+            {{ end }}
+        </ul>
+    {{ else }}
+        <div class="w-full mt-2 text-gray-600 text-sm flex-grow flex items-center justify-center">
+            No errors of this kind
+        </div>
+    {{ end }}
 </div>
 {{ end }}
 
@@ -240,23 +290,27 @@
 </div>
 {{ end }}
 
+{{ define "event_token_img" }}
+<div class="
+    w-5 h-5 
+    rounded-full overflow-hidden
+">
+    {{ if . }}
+        <img src="{{ . }}" class="w-5 h-5 rounded-full" />
+    {{ else }}
+        <div class="
+            w-full h-full flex items-center justify-center
+            text-sm text-gray-600 bg-gray-200
+        ">
+            ?
+        </div>
+    {{ end }}
+</div>
+{{ end }}
+
 {{ define "event_token_amount_component" }}
 <div class="w-fit flex items-center gap-2 relative">
-	<div class="
-		w-5 h-5 
-		rounded-full overflow-hidden
-	">
-		{{ if .ImgUrl }}
-			<img src="{{ .ImgUrl }}" class="w-5 h-5 rounded-full" />
-		{{ else }}
-			<div class="
-				w-full h-full flex items-center justify-center
-				text-sm text-gray-600 bg-gray-200
-			">
-				?
-			</div>
-		{{ end }}
-	</div>
+    {{ template "event_token_img" .ImgUrl }}
 
 	<span
         id="hoverable"
@@ -268,9 +322,6 @@
             {{ .LongAmount }} {{ upper .Symbol }}
         </div>
     </span>
-
-
-    
 </div>
 {{ end }}
 
@@ -280,7 +331,7 @@
 	{{ if .Missing }}
 		<div class="w-full flex items-center gap-x-1">
 			<span class="
-				w-5 h-5 rounded-full text-xs bg-red-700/20 text-red-700
+				w-4 h-4 rounded-full text-xs bg-red-700/20 text-red-700
 				flex items-center justify-center flex-shrink-0
 			">!</span>
 			<span class="

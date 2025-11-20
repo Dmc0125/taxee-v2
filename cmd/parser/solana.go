@@ -8,8 +8,6 @@ import (
 	"taxee/pkg/assert"
 	"taxee/pkg/db"
 	"time"
-
-	"github.com/shopspring/decimal"
 )
 
 type relatedAccounts interface {
@@ -124,26 +122,6 @@ func solNewErrMissingAccount(ctx *solanaContext, address string) *db.ParserError
 		},
 	}
 	return &e
-}
-
-func solNewErrAccountBalanceMismatch(
-	ctx *solanaContext,
-	address, token string,
-	expected, had decimal.Decimal,
-) *db.ParserError {
-	d := db.ParserErrorAccountBalanceMismatch{
-		AccountAddress: address,
-		Token:          token,
-		External:       expected,
-		Local:          had,
-	}
-
-	return &db.ParserError{
-		TxId:  ctx.txId,
-		IxIdx: int32(ctx.ixIdx),
-		Type:  db.ParserErrorTypeAccountBalanceMismatch,
-		Data:  d,
-	}
 }
 
 func (ctx *solanaContext) init(address string, owned bool, data any) {
@@ -314,13 +292,22 @@ nativeBalancesLoop:
 			lt := accountLifetimes[i]
 			if lt.PreparseOpen && lt.Owned {
 				if nativeBalance.Post != lt.Balance {
-					expected := newDecimalFromRawAmount(nativeBalance.Post, 9)
-					had := newDecimalFromRawAmount(lt.Balance, 9)
-					err := solNewErrAccountBalanceMismatch(
-						ctx,
-						address, SOL_MINT_ADDRESS,
-						expected, had,
-					)
+					errData := db.ParserErrorAccountBalanceMismatch{
+						Wallet:         address,
+						AccountAddress: address,
+						Token:          SOL_MINT_ADDRESS,
+						External:       newDecimalFromRawAmount(nativeBalance.Post, 9),
+						Local:          newDecimalFromRawAmount(lt.Balance, 9),
+					}
+					if isTokenAccount {
+						errData.Wallet = tokens.Owner
+					}
+					err := &db.ParserError{
+						TxId:  ctx.txId,
+						IxIdx: int32(ctx.ixIdx),
+						Type:  db.ParserErrorTypeAccountBalanceMismatch,
+						Data:  &errData,
+					}
 					appendParserError(
 						&ctx.preprocessErrors.count,
 						&ctx.preprocessErrors.errors,

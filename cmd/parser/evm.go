@@ -340,7 +340,6 @@ type evmContext struct {
 	wallets       []string
 	network       db.Network
 	decimals      map[string]uint8
-	processErrors *errorsContainer
 
 	// different for each tx
 	timestamp time.Time

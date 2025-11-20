@@ -59,6 +59,8 @@ type eventsPageData struct {
 }
 
 type eventComponentData struct {
+	Idx int
+
 	NetworkImgUrl string
 	EventType     string
 	Method        string
@@ -66,18 +68,32 @@ type eventComponentData struct {
 	OutgoingTransfers *eventTransfersComponentData
 	IncomingTransfers *eventTransfersComponentData
 	Profits           []*eventFiatAmountComponentData
+
+	MissingBalances []*eventTokenAmountComponentData
 }
 
 type eventErrorComponentData struct {
-	Address  string
-	Type     int
-	Had      any
-	Expected any
+	Wallet  string
+	Account string
+	IxIdx   int
+
+	ImgUrl             string
+	Token              string
+	LocalZero          bool
+	LocalAmount        string
+	LocalAmountLong    string
+	ExternalZero       bool
+	ExternalAmount     string
+	ExternalAmountLong string
+
+	Message string
 }
 
 type eventErrorGroupComponentData struct {
-	Type   int
-	Errors []eventErrorComponentData
+	Type              int
+	MissingAccounts   []*eventErrorComponentData
+	BalanceMismatches []*eventErrorComponentData
+	DataMismatches    []*eventErrorComponentData
 }
 
 type eventTransfersComponentData struct {
@@ -105,46 +121,23 @@ type eventFiatAmountComponentData struct {
 
 type fetchTokenMetadataQueued struct {
 	coingeckoId string
-	tokensData  []*eventTokenAmountComponentData
+	imgUrls     []*string
 }
 
-func eventsRenderTokenAmounts(
-	amount,
-	value,
-	profit,
-	price decimal.Decimal,
+func getTokenSymbolAndImg(
 	token string,
-	network db.Network,
 	tokenSource uint16,
-	getTokensMetaBatch *pgx.Batch,
+	network db.Network,
+	symbolPtr, imgUrlPtr *string,
 	tokensQueue *[]*fetchTokenMetadataQueued,
-) (tokenData *eventTokenAmountComponentData, fiatData, profitData *eventFiatAmountComponentData) {
-	tokenData = &eventTokenAmountComponentData{
-		Amount:     amount.StringFixed(2),
-		LongAmount: amount.String(),
-	}
-	fiatData = &eventFiatAmountComponentData{
-		Amount:   value.StringFixed(2),
-		Currency: "eur",
-		Price:    price.StringFixed(2),
-		Sign:     value.Sign(),
-		Missing:  price.Equal(decimal.Zero),
-		Zero:     value.Equal(decimal.Zero),
-	}
-	profitData = &eventFiatAmountComponentData{
-		Amount:   profit.StringFixed(2),
-		Currency: "eur",
-		Sign:     profit.Sign(),
-		Zero:     profit.Equal(decimal.Zero),
-		IsProfit: true,
-	}
-
+	getTokensMetaBatch *pgx.Batch,
+) {
 	appendTokenToQueue := func(coingeckoId string) {
 		contains := false
 		for _, q := range *tokensQueue {
 			if q.coingeckoId == coingeckoId {
 				contains = true
-				q.tokensData = append(q.tokensData, tokenData)
+				q.imgUrls = append(q.imgUrls, imgUrlPtr)
 				break
 			}
 		}
@@ -152,9 +145,7 @@ func eventsRenderTokenAmounts(
 		if !contains {
 			*tokensQueue = append(*tokensQueue, &fetchTokenMetadataQueued{
 				coingeckoId: coingeckoId,
-				tokensData: []*eventTokenAmountComponentData{
-					tokenData,
-				},
+				imgUrls:     []*string{imgUrlPtr},
 			})
 		}
 	}
@@ -175,14 +166,14 @@ func eventsRenderTokenAmounts(
 		q.QueryRow(func(row pgx.Row) error {
 			var imgUrl pgtype.Text
 			err := row.Scan(
-				&tokenData.Symbol,
+				symbolPtr,
 				&imgUrl,
 			)
 			if err != nil {
 				return err
 			}
 			if imgUrl.Valid {
-				tokenData.ImgUrl = imgUrl.String
+				*imgUrlPtr = imgUrl.String
 			} else {
 				appendTokenToQueue(token)
 			}
@@ -209,21 +200,61 @@ func eventsRenderTokenAmounts(
 			var imgUrl pgtype.Text
 			var coingeckoId string
 			err := row.Scan(
-				&tokenData.Symbol,
+				symbolPtr,
 				&imgUrl,
 				&coingeckoId,
 			)
 			if errors.Is(err, pgx.ErrNoRows) {
-				tokenData.Symbol = shorten(token, 3, 2)
+				*symbolPtr = shorten(token, 3, 2)
 				return nil
 			}
 			if imgUrl.Valid {
-				tokenData.ImgUrl = imgUrl.String
+				*imgUrlPtr = imgUrl.String
 			} else {
 				appendTokenToQueue(coingeckoId)
 			}
 			return err
 		})
+	}
+}
+
+func eventsRenderTokenAmounts(
+	amount,
+	value,
+	profit,
+	price decimal.Decimal,
+	token string,
+	network db.Network,
+	tokenSource uint16,
+	getTokensMetaBatch *pgx.Batch,
+	tokensQueue *[]*fetchTokenMetadataQueued,
+) (tokenData *eventTokenAmountComponentData, fiatData, profitData *eventFiatAmountComponentData) {
+	tokenData = &eventTokenAmountComponentData{
+		Amount:     amount.StringFixed(2),
+		LongAmount: amount.String(),
+	}
+
+	getTokenSymbolAndImg(
+		token, tokenSource, network,
+		&tokenData.Symbol, &tokenData.ImgUrl,
+		tokensQueue,
+		getTokensMetaBatch,
+	)
+
+	fiatData = &eventFiatAmountComponentData{
+		Amount:   value.StringFixed(2),
+		Currency: "eur",
+		Price:    price.StringFixed(2),
+		Sign:     value.Sign(),
+		Missing:  price.Equal(decimal.Zero),
+		Zero:     value.Equal(decimal.Zero),
+	}
+	profitData = &eventFiatAmountComponentData{
+		Amount:   profit.StringFixed(2),
+		Currency: "eur",
+		Sign:     profit.Sign(),
+		Zero:     profit.Equal(decimal.Zero),
+		IsProfit: true,
 	}
 
 	return
@@ -312,8 +343,6 @@ func eventsHandler(
 		// 	// TODO: Auth
 		// }
 
-		fmt.Println(r.URL.RawQuery)
-
 		var (
 			limit  = urlParam[int32]{value: 50, set: true}
 			offset eventsPagination
@@ -327,13 +356,10 @@ func eventsHandler(
 			modeQueryVal   = query.Get("mode")
 		)
 
-		fmt.Println(offsetQueryVal)
-
 		if v, err := strconv.Atoi(limitQueryVal); err == nil {
 			limit.value = int32(v)
 		}
 		if offsetQueryVal != "" {
-			fmt.Println("Hey")
 			if err := offset.deserialize([]byte(offsetQueryVal)); err != nil {
 				renderError(w, 400, "invalid pagination: %s", err)
 				return
@@ -343,8 +369,6 @@ func eventsHandler(
 			mode.value = modeQueryVal
 			mode.set = true
 		}
-
-		fmt.Println(offset)
 
 		/////////////
 		// get events
@@ -358,46 +382,45 @@ func eventsHandler(
 				(tx.data->>'blockIndex')::integer as solana_block_index,
 				(tx.data->>'block')::bigint as evm_block,
 				(tx.data->>'txIdx')::integer as evm_block_index,
-				coalesce(
-					jsonb_agg(
-						jsonb_build_object(
-							'IxIdx', e.ix_idx,
-							'UiAppName', e.ui_app_name,
-							'UiMethodName', e.ui_method_name,
-							'Type', e.type,
-							'Data', e.data
-						) order by e.idx asc
-					) filter (where e.tx_id is not null),
-					'[]'::jsonb
-				) as events,
-				coalesce(
-					jsonb_agg(
-						jsonb_build_object(
-							'IxIdx', pe.ix_idx,
-							'EventId', pe.event_idx,
-							'Origin', pe.origin,
-							'Type', pe.type,
-							'Data', pe.data
-						) order by pe.origin asc
-					) filter (where pe.id is not null),
-					'[]'::jsonb
-				) as errors
+				coalesce(events.events, '[]'::jsonb) as events,
+				coalesce(errors.errors,	'[]'::jsonb) as errors
 			from
 				tx_ref
 			inner join
 				tx on tx.id = tx_ref.tx_id
-			left join
-				event e on
-					e.tx_id = tx_ref.tx_id and
-					e.user_account_id = tx_ref.user_account_id
-			left join
-				parser_error pe on
-					pe.tx_id = tx_ref.tx_id and
-					pe.user_account_id = tx_ref.user_account_id
+			left join lateral (
+				select jsonb_agg(
+					jsonb_build_object(
+						'Idx', e.idx,
+						'IxIdx', e.ix_idx,
+						'UiAppName', e.ui_app_name,
+						'UiMethodName', e.ui_method_name,
+						'Type', e.type,
+						'Data', e.data
+					) order by e.idx asc
+				) as events 
+				from 
+					event e
+				where
+					e.tx_id = tx_ref.tx_id and e.user_account_id = tx_ref.user_account_id
+			) events on true
+			left join lateral (
+				select jsonb_agg(
+					jsonb_build_object(
+						'IxIdx', pe.ix_idx,
+						'EventIdx', pe.event_idx,
+						'Origin', pe.origin,
+						'Type', pe.type,
+						'Data', pe.data
+					) order by pe.origin asc
+				) as errors
+				from 
+					parser_error pe
+				where 
+					pe.tx_id = tx_ref.tx_id and pe.user_account_id = tx_ref.user_account_id
+			) errors on true
 		`
 		const getEventsQuerySelectAfter = `
-			group by
-				tx.id
 			order by
 				-- global ordering
 				tx.timestamp asc,
@@ -410,12 +433,12 @@ func eventsHandler(
 				(tx.data->>'txIdx')::integer asc
 		`
 
-		var eventsRows pgx.Rows
+		var transactionsRows pgx.Rows
 		var err error
 
 		var filterEmptyTxs string
 		if mode.value != "dev" {
-			filterEmptyTxs = "(e.tx_id is not null or pe.id is not null) and"
+			filterEmptyTxs = "(events.events is not null or errors.errors is not null) and"
 		}
 
 		switch {
@@ -429,7 +452,7 @@ func eventsHandler(
 				getEventsQuerySelect,
 				getEventsQuerySelectAfter,
 			)
-			eventsRows, err = pool.Query(
+			transactionsRows, err = pool.Query(
 				ctx,
 				getEventByTxId,
 				userAccountId,
@@ -468,7 +491,7 @@ func eventsHandler(
 				filterEmptyTxs,
 				getEventsQuerySelectAfter,
 			)
-			eventsRows, err = pool.Query(
+			transactionsRows, err = pool.Query(
 				ctx,
 				getEventsQuery,
 				// args
@@ -489,7 +512,7 @@ func eventsHandler(
 		fetchTokensMetadataQueue := make([]*fetchTokenMetadataQueued, 0)
 		var prevDateUnix int64
 
-		for eventsRows.Next() {
+		for transactionsRows.Next() {
 			var (
 				txId                                   string
 				network                                db.Network
@@ -499,7 +522,7 @@ func eventsHandler(
 				eventsMarshaled, parserErrorsMarshaled json.RawMessage
 			)
 
-			if err := eventsRows.Scan(
+			if err := transactionsRows.Scan(
 				&txId, &network, &timestamp,
 				&solanaSlot, &solanaBlockIndex,
 				&evmBlock, &evmBlockIndex,
@@ -570,9 +593,11 @@ func eventsHandler(
 					}
 
 					eventComponentData := &eventComponentData{
-						NetworkImgUrl: networkGlobals.imgUrl,
-						EventType:     toTitle(string(e.UiMethodName)),
-						Method:        toTitle(string(e.UiAppName)),
+						Idx:             e.Idx,
+						NetworkImgUrl:   networkGlobals.imgUrl,
+						EventType:       toTitle(string(e.UiMethodName)),
+						Method:          toTitle(string(e.UiAppName)),
+						MissingBalances: make([]*eventTokenAmountComponentData, 0),
 					}
 					rowData.Events = append(rowData.Events, eventComponentData)
 
@@ -697,22 +722,60 @@ func eventsHandler(
 
 			if len(parserErrorsMarshaled) != 2 {
 				var errors []*struct {
-					IxIdx   int32
-					EventId pgtype.Int4
-					Origin  db.ErrOrigin
-					Type    db.ParserErrorType
-					Data    json.RawMessage
+					IxIdx    int32
+					EventIdx pgtype.Int4
+					Origin   db.ErrOrigin
+					Type     db.ParserErrorType
+					Data     json.RawMessage
 				}
 				if err := json.Unmarshal(parserErrorsMarshaled, &errors); err != nil {
 					renderError(w, 500, "unable to unmarshal parser errors: %s", err)
 					return
 				}
 
-				rowData.HasErrors = true
-
 				for _, err := range errors {
-					var errorComponentData eventErrorComponentData
-					errorComponentData.Type = int(err.Type)
+					if err.Type == db.ParserErrorTypeMissingBalance {
+						var data db.ParserErrorMissingBalance
+						if err := json.Unmarshal(err.Data, &data); err != nil {
+							renderError(w, 500, "unable to unmarshal parser error: %s", err)
+							return
+						}
+
+						for _, event := range rowData.Events {
+							if event.Idx == int(err.EventIdx.Int32) {
+								tokenData := &eventTokenAmountComponentData{
+									Amount:     data.Amount.String(),
+									LongAmount: data.Amount.String(),
+								}
+
+								getTokenSymbolAndImg(
+									data.Token, data.TokenSource, network,
+									&tokenData.Symbol, &tokenData.ImgUrl,
+									&fetchTokensMetadataQueue,
+									&getTokensMetaBatch,
+								)
+
+								event.MissingBalances = append(
+									event.MissingBalances,
+									tokenData,
+								)
+								break
+							}
+						}
+						continue
+					}
+
+					rowData.HasErrors = true
+
+					var errors *eventErrorGroupComponentData
+					switch err.Origin {
+					case db.ErrOriginPreprocess:
+						errors = &rowData.PreprocessErrors
+					case db.ErrOriginProcess:
+						errors = &rowData.ProcessErrors
+					default:
+						assert.True(false, "invalid error origin: %d", err.Origin)
+					}
 
 					switch err.Type {
 					case db.ParserErrorTypeMissingAccount:
@@ -721,38 +784,61 @@ func eventsHandler(
 							renderError(w, 500, "unable to unmarshal parser error: %s", err)
 							return
 						}
-						errorComponentData.Address = data.AccountAddress
+
+						errors.MissingAccounts = append(
+							errors.MissingAccounts,
+							&eventErrorComponentData{
+								Account: data.AccountAddress,
+								IxIdx:   int(err.IxIdx),
+							},
+						)
 					case db.ParserErrorTypeAccountBalanceMismatch:
 						var data db.ParserErrorAccountBalanceMismatch
 						if err := json.Unmarshal(err.Data, &data); err != nil {
 							renderError(w, 500, "unable to unmarshal parser error: %s", err)
 							return
 						}
-						errorComponentData.Address = data.AccountAddress
-						errorComponentData.Had = data.Real.StringFixed(2)
-						errorComponentData.Expected = data.Expected.StringFixed(2)
+
+						errComponentData := eventErrorComponentData{
+							Wallet:             data.Wallet,
+							Account:            data.AccountAddress,
+							LocalZero:          data.Local.Equal(decimal.Zero),
+							LocalAmount:        data.Local.StringFixed(2),
+							LocalAmountLong:    data.Local.String(),
+							ExternalZero:       data.External.Equal(decimal.Zero),
+							ExternalAmount:     data.External.StringFixed(2),
+							ExternalAmountLong: data.External.String(),
+							Token:              "USDC",
+						}
+
+						getTokenSymbolAndImg(
+							data.Token, uint16(network), network,
+							&errComponentData.Token, &errComponentData.ImgUrl,
+							&fetchTokensMetadataQueue,
+							&getTokensMetaBatch,
+						)
+
+						errors.BalanceMismatches = append(
+							errors.BalanceMismatches,
+							&errComponentData,
+						)
 					case db.ParserErrorTypeAccountDataMismatch:
-						var data db.ParserErrorMissingAccount
+						var data db.ParserErrorAccountDataMismatch
 						if err := json.Unmarshal(err.Data, &data); err != nil {
 							renderError(w, 500, "unable to unmarshal parser error: %s", err)
 							return
 						}
-						errorComponentData.Address = data.AccountAddress
+
+						errors.DataMismatches = append(
+							errors.DataMismatches,
+							&eventErrorComponentData{
+								Account: data.AccountAddress,
+								IxIdx:   int(err.IxIdx),
+								Message: data.Message,
+							},
+						)
 					default:
 						assert.True(false, "invalid parser error: %d", err.Type)
-					}
-
-					switch err.Origin {
-					case db.ErrOriginPreprocess:
-						rowData.PreprocessErrors.Errors = append(
-							rowData.PreprocessErrors.Errors,
-							errorComponentData,
-						)
-					case db.ErrOriginProcess:
-						rowData.ProcessErrors.Errors = append(
-							rowData.ProcessErrors.Errors,
-							errorComponentData,
-						)
 					}
 				}
 			}
@@ -776,8 +862,8 @@ func eventsHandler(
 		for _, queued := range fetchTokensMetadataQueue {
 			meta, err := coingecko.GetCoinMetadata(queued.coingeckoId)
 			if err == nil {
-				for _, tokenData := range queued.tokensData {
-					tokenData.ImgUrl = meta.Image.Small
+				for _, imgUrlPtr := range queued.imgUrls {
+					*imgUrlPtr = meta.Image.Small
 				}
 
 				const insertTokenImgUrl = `
