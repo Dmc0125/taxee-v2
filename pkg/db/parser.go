@@ -123,7 +123,7 @@ type EventSwapTransfer struct {
 }
 
 type EventSwap struct {
-	Wallet   string              `json:"wallet"`
+	Wallet   string               `json:"wallet"`
 	Outgoing []*EventSwapTransfer `json:"outgoing"`
 	Incoming []*EventSwapTransfer `json:"incoming"`
 }
@@ -141,7 +141,6 @@ const (
 type Event struct {
 	TxId         string
 	IxIdx        int32
-	Idx          int32
 	Timestamp    time.Time
 	Network      Network
 	UiAppName    string

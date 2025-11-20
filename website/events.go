@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"taxee/pkg/assert"
 	"taxee/pkg/coingecko"
 	"taxee/pkg/db"
@@ -120,7 +120,7 @@ func eventsRenderTokenAmounts(
 	tokensQueue *[]*fetchTokenMetadataQueued,
 ) (tokenData *eventTokenAmountComponentData, fiatData, profitData *eventFiatAmountComponentData) {
 	tokenData = &eventTokenAmountComponentData{
-		Amount: amount.StringFixed(2),
+		Amount:     amount.StringFixed(2),
 		LongAmount: amount.String(),
 	}
 	fiatData = &eventFiatAmountComponentData{
@@ -229,6 +229,11 @@ func eventsRenderTokenAmounts(
 	return
 }
 
+type urlParam[T any] struct {
+	value T
+	set   bool
+}
+
 type eventsPagination struct {
 	SolanaSlot         int64
 	SolanaBlockIndex   int32
@@ -237,20 +242,50 @@ type eventsPagination struct {
 }
 
 func (p *eventsPagination) serialize() string {
-	serialized, err := json.Marshal(p)
-	assert.NoErr(err, "unable to serialize events pagination")
-	return hex.EncodeToString(serialized)
+	q := strings.Builder{}
+
+	q.WriteString(fmt.Sprintf("%d_", p.SolanaSlot))
+	q.WriteString(fmt.Sprintf("%d_", p.SolanaBlockIndex))
+	q.WriteString(fmt.Sprintf("%d_", p.ArbitrumBlock))
+	q.WriteString(fmt.Sprintf("%d", p.ArbitrumBlockIndex))
+
+	return q.String()
 }
 
 func (p *eventsPagination) deserialize(src []byte) error {
-	parsed, err := hex.DecodeString(string(src))
-	if err != nil {
-		return fmt.Errorf("unable to parse pagination: %w", err)
+	setOffsets := func(block *int64, blockIndex *int32, serializedBlock, serializedIndex string) error {
+		if serializedBlock != "" {
+			b, err := strconv.ParseInt(serializedBlock, 10, 64)
+			if err != nil {
+				return fmt.Errorf("invalid network block: %s", serializedBlock)
+			}
+			*block = b
+		}
+
+		if serializedIndex != "" {
+			i, err := strconv.ParseInt(serializedIndex, 10, 32)
+			if err != nil {
+				return fmt.Errorf("invalid network block index: %s", serializedIndex)
+			}
+			*blockIndex = int32(i)
+		}
+
+		return nil
 	}
-	err = json.Unmarshal(parsed, p)
-	if err != nil {
-		return fmt.Errorf("unable to deserialize pagination: %w", err)
+
+	offsets := strings.Split(string(src), "_")
+	if len(offsets) != 4 {
+		return fmt.Errorf("invalid networks offsets: %s", string(src))
 	}
+
+	var err error
+	if err = setOffsets(&p.SolanaSlot, &p.SolanaBlockIndex, offsets[0], offsets[1]); err != nil {
+		return err
+	}
+	if err = setOffsets(&p.ArbitrumBlock, &p.ArbitrumBlockIndex, offsets[2], offsets[2]); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -277,26 +312,39 @@ func eventsHandler(
 		// 	// TODO: Auth
 		// }
 
-		var (
-			limit = int32(50)
+		fmt.Println(r.URL.RawQuery)
 
-			offset        = query.Get("offset")
-			limitQueryVal = query.Get("limit")
-			txId          = query.Get("tx_id")
-			mode          = query.Get("mode")
+		var (
+			limit  = urlParam[int32]{value: 50, set: true}
+			offset eventsPagination
+			mode   = urlParam[string]{}
 		)
 
-		if v, err := strconv.Atoi(limitQueryVal); err == nil {
-			limit = int32(v)
-		}
+		var (
+			offsetQueryVal = query.Get("offset")
+			limitQueryVal  = query.Get("limit")
+			txIdQueryVal   = query.Get("tx_id")
+			modeQueryVal   = query.Get("mode")
+		)
 
-		var eventsOffset eventsPagination
-		if offset != "" {
-			if err := eventsOffset.deserialize([]byte(offset)); err != nil {
+		fmt.Println(offsetQueryVal)
+
+		if v, err := strconv.Atoi(limitQueryVal); err == nil {
+			limit.value = int32(v)
+		}
+		if offsetQueryVal != "" {
+			fmt.Println("Hey")
+			if err := offset.deserialize([]byte(offsetQueryVal)); err != nil {
 				renderError(w, 400, "invalid pagination: %s", err)
 				return
 			}
 		}
+		if modeQueryVal == "dev" {
+			mode.value = modeQueryVal
+			mode.set = true
+		}
+
+		fmt.Println(offset)
 
 		/////////////
 		// get events
@@ -366,12 +414,12 @@ func eventsHandler(
 		var err error
 
 		var filterEmptyTxs string
-		if mode != "dev" {
+		if mode.value != "dev" {
 			filterEmptyTxs = "(e.tx_id is not null or pe.id is not null) and"
 		}
 
 		switch {
-		case txId != "":
+		case txIdQueryVal != "":
 			getEventByTxId := fmt.Sprintf(`
 					%s
 					where
@@ -385,7 +433,7 @@ func eventsHandler(
 				ctx,
 				getEventByTxId,
 				userAccountId,
-				txId,
+				txIdQueryVal,
 			)
 		default:
 			getEventsQuery := fmt.Sprintf(`
@@ -425,9 +473,9 @@ func eventsHandler(
 				getEventsQuery,
 				// args
 				userAccountId,
-				limit,
-				eventsOffset.SolanaSlot, eventsOffset.SolanaBlockIndex,
-				eventsOffset.ArbitrumBlock, eventsOffset.ArbitrumBlockIndex,
+				limit.value,
+				offset.SolanaSlot, offset.SolanaBlockIndex,
+				offset.ArbitrumBlock, offset.ArbitrumBlockIndex,
 			)
 		}
 
@@ -463,11 +511,11 @@ func eventsHandler(
 
 			switch network {
 			case db.NetworkSolana:
-				eventsOffset.SolanaSlot = solanaSlot.Int64
-				eventsOffset.SolanaBlockIndex = solanaBlockIndex.Int32
+				offset.SolanaSlot = solanaSlot.Int64
+				offset.SolanaBlockIndex = solanaBlockIndex.Int32
 			case db.NetworkArbitrum:
-				eventsOffset.ArbitrumBlock = evmBlock.Int64
-				eventsOffset.ArbitrumBlockIndex = evmBlockIndex.Int32
+				offset.ArbitrumBlock = evmBlock.Int64
+				offset.ArbitrumBlockIndex = evmBlockIndex.Int32
 			}
 
 			const daySecs = 60 * 60 * 24
@@ -523,7 +571,7 @@ func eventsHandler(
 
 					eventComponentData := &eventComponentData{
 						NetworkImgUrl: networkGlobals.imgUrl,
-						EventType:     toTitle(string(e.Type)),
+						EventType:     toTitle(string(e.UiMethodName)),
 						Method:        toTitle(string(e.UiAppName)),
 					}
 					rowData.Events = append(rowData.Events, eventComponentData)
@@ -752,8 +800,26 @@ func eventsHandler(
 			return
 		}
 
+		nextUrl := strings.Builder{}
+		nextUrl.WriteString("/events?")
+
+		if txIdQueryVal == "" {
+			nextUrl.WriteString("offset=")
+			nextUrl.WriteString(offset.serialize())
+
+			if limit.set {
+				nextUrl.WriteString("&limit=")
+				nextUrl.WriteString(fmt.Sprintf("%d", limit.value))
+			}
+
+			if mode.set {
+				nextUrl.WriteString("&mode=")
+				nextUrl.WriteString(mode.value)
+			}
+		}
+
 		eventsPageData := eventsPageData{
-			NextUrl: fmt.Sprintf("/events?offset=%s", eventsOffset.serialize()),
+			NextUrl: nextUrl.String(),
 			Rows:    eventsTableRows,
 		}
 

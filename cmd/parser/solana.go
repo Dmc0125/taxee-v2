@@ -70,8 +70,8 @@ type solanaContext struct {
 	wallets  []string
 	accounts map[string][]accountLifetime
 
-	preprocessErrors map[string][]*db.ParserError
-	processErrors    map[string][]*db.ParserError
+	preprocessErrors *errorsContainer
+	processErrors    *errorsContainer
 
 	// volatile for each tx/ix
 	txId           string
@@ -134,8 +134,8 @@ func solNewErrAccountBalanceMismatch(
 	d := db.ParserErrorAccountBalanceMismatch{
 		AccountAddress: address,
 		Token:          token,
-		Expected:       expected,
-		Real:           had,
+		External:       expected,
+		Local:          had,
 	}
 
 	return &db.ParserError{
@@ -150,14 +150,22 @@ func (ctx *solanaContext) init(address string, owned bool, data any) {
 	lifetimes, ok := ctx.accounts[address]
 	if !ok || len(lifetimes) == 0 {
 		err := solNewErrMissingAccount(ctx, address)
-		appendErrUnique(ctx.preprocessErrors, err, address)
+		appendParserError(
+			&ctx.preprocessErrors.count,
+			&ctx.preprocessErrors.errors,
+			err,
+		)
 		return
 	}
 
 	acc := &lifetimes[len(lifetimes)-1]
 	if !acc.PreparseOpen {
 		err := solNewErrMissingAccount(ctx, address)
-		appendErrUnique(ctx.preprocessErrors, err, address)
+		appendParserError(
+			&ctx.preprocessErrors.count,
+			&ctx.preprocessErrors.errors,
+			err,
+		)
 		return
 	}
 
@@ -170,14 +178,22 @@ func (ctx *solanaContext) close(closedAddress, receiverAddress string) {
 	lifetimes, ok := ctx.accounts[closedAddress]
 	if !ok || len(lifetimes) == 0 {
 		err := solNewErrMissingAccount(ctx, closedAddress)
-		appendErrUnique(ctx.preprocessErrors, err, closedAddress)
+		appendParserError(
+			&ctx.preprocessErrors.count,
+			&ctx.preprocessErrors.errors,
+			err,
+		)
 		return
 	}
 
 	acc := &lifetimes[len(lifetimes)-1]
 	if !acc.PreparseOpen {
 		err := solNewErrMissingAccount(ctx, closedAddress)
-		appendErrUnique(ctx.preprocessErrors, err, closedAddress)
+		appendParserError(
+			&ctx.preprocessErrors.count,
+			&ctx.preprocessErrors.errors,
+			err,
+		)
 		return
 	}
 
@@ -282,7 +298,11 @@ nativeBalancesLoop:
 			// token account
 			if !accountExists && nativeBalance.Post > 0 {
 				err := solNewErrMissingAccount(ctx, address)
-				appendErrUnique(ctx.preprocessErrors, err, address)
+				appendParserError(
+					&ctx.preprocessErrors.count,
+					&ctx.preprocessErrors.errors,
+					err,
+				)
 				continue
 			}
 		}
@@ -301,13 +321,17 @@ nativeBalancesLoop:
 						address, SOL_MINT_ADDRESS,
 						expected, had,
 					)
-					appendErrUnique(ctx.preprocessErrors, err, address)
+					appendParserError(
+						&ctx.preprocessErrors.count,
+						&ctx.preprocessErrors.errors,
+						err,
+					)
 				}
 
 				if isTokenAccount {
 					data, ok := lt.Data.(*SolTokenAccountData)
 					if !ok {
-						parserErr := &db.ParserError{
+						err := &db.ParserError{
 							TxId:  ctx.txId,
 							IxIdx: int32(ctx.ixIdx),
 							Type:  db.ParserErrorTypeAccountDataMismatch,
@@ -316,7 +340,11 @@ nativeBalancesLoop:
 								Message:        "Not a token account",
 							},
 						}
-						appendErrUnique(ctx.preprocessErrors, parserErr, address)
+						appendParserError(
+							&ctx.preprocessErrors.count,
+							&ctx.preprocessErrors.errors,
+							err,
+						)
 						continue nativeBalancesLoop
 					}
 
@@ -328,7 +356,7 @@ nativeBalancesLoop:
 						}
 					}
 					if !found {
-						parserErr := &db.ParserError{
+						err := &db.ParserError{
 							TxId:  ctx.txId,
 							IxIdx: int32(ctx.ixIdx),
 							Type:  db.ParserErrorTypeAccountDataMismatch,
@@ -337,7 +365,11 @@ nativeBalancesLoop:
 								Message:        "Invalid token account mint",
 							},
 						}
-						appendErrUnique(ctx.preprocessErrors, parserErr, address)
+						appendParserError(
+							&ctx.preprocessErrors.count,
+							&ctx.preprocessErrors.errors,
+							err,
+						)
 						continue nativeBalancesLoop
 					}
 				}

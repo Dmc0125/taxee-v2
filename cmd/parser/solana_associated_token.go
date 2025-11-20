@@ -123,7 +123,7 @@ func solProcessAssociatedTokenIx(
 		owner        = ix.Accounts[2]
 	)
 
-	fromInternal, toInternal := ctx.walletOwned(owner), ctx.walletOwned(payer)
+	fromInternal, toInternal := ctx.walletOwned(payer), ctx.walletOwned(owner)
 
 	if !fromInternal && !toInternal {
 		return

@@ -48,10 +48,11 @@ func invSubFromAccount(
 	inv *inventory,
 	account, token string,
 	event *db.Event,
+	eventIdx int,
 	amount, price decimal.Decimal,
 	profit *decimal.Decimal,
 	increaseProfits bool,
-	errors map[string][]*db.ParserError,
+	missingBalancesErrorsContainer *errorsContainer,
 ) {
 	accountId := inventoryAccountId{event.Network, account, token}
 	balances := inv.accounts[accountId]
@@ -78,22 +79,21 @@ func invSubFromAccount(
 	}
 
 	if remainingAmount.GreaterThan(decimal.Zero) {
-		// TODO: missing amount error
-		appendErrUnique(
-			errors,
-			&db.ParserError{
-				TxId:     event.TxId,
-				IxIdx:    event.IxIdx,
-				EventIdx: event.Idx,
-				Type:     db.ParserErrorTypeAccountBalanceMismatch,
-				Data: &db.ParserErrorAccountBalanceMismatch{
-					AccountAddress: account,
-					Token:          token,
-					Expected:       decimal.Zero,
-					Real:           remainingAmount,
-				},
+		err := db.ParserError{
+			TxId:     event.TxId,
+			IxIdx:    event.IxIdx,
+			EventIdx: int32(eventIdx),
+			Type:     db.ParserErrorTypeMissingBalance,
+			Data: &db.ParserErrorMissingBalance{
+				AccountAddress: account,
+				Token:          token,
+				Amount:         remainingAmount,
 			},
-			account,
+		}
+		appendParserError(
+			&missingBalancesErrorsContainer.count,
+			&missingBalancesErrorsContainer.errors,
+			&err,
 		)
 
 		if increaseProfits {
@@ -108,7 +108,8 @@ func invSubFromAccount(
 
 func (inv *inventory) processEvent(
 	event *db.Event,
-	errors map[string][]*db.ParserError,
+	eventIdx int,
+	missingBalancesErrorsContainer *errorsContainer,
 ) {
 	switch data := event.Data.(type) {
 	case *db.EventTransferInternal:
@@ -136,22 +137,21 @@ func (inv *inventory) processEvent(
 		}
 
 		if remainingAmount.GreaterThan(decimal.Zero) {
-			// TODO: missing amount error
-			appendErrUnique(
-				errors,
-				&db.ParserError{
-					TxId:     event.TxId,
-					IxIdx:    event.IxIdx,
-					EventIdx: event.Idx,
-					Type:     db.ParserErrorTypeAccountBalanceMismatch,
-					Data: &db.ParserErrorAccountBalanceMismatch{
-						AccountAddress: data.FromAccount,
-						Token:          data.Token,
-						Expected:       decimal.Zero,
-						Real:           remainingAmount,
-					},
+			err := db.ParserError{
+				TxId:     event.TxId,
+				IxIdx:    event.IxIdx,
+				EventIdx: int32(eventIdx),
+				Type:     db.ParserErrorTypeMissingBalance,
+				Data: &db.ParserErrorMissingBalance{
+					AccountAddress: data.FromAccount,
+					Token:          data.Token,
+					Amount:         remainingAmount,
 				},
-				data.FromAccount,
+			}
+			appendParserError(
+				&missingBalancesErrorsContainer.count,
+				&missingBalancesErrorsContainer.errors,
+				&err,
 			)
 
 			value := remainingAmount.Mul(data.Price)
@@ -167,7 +167,6 @@ func (inv *inventory) processEvent(
 		inv.accounts[fromAccountId] = fromBalances
 		inv.accounts[toAccountId] = toBalances
 	case *db.EventTransfer:
-
 		switch data.Direction {
 		case db.EventTransferIncoming:
 			if event.Type == db.EventTypeTransfer {
@@ -188,9 +187,10 @@ func (inv *inventory) processEvent(
 				inv,
 				data.Account, data.Token,
 				event,
+				eventIdx,
 				data.Amount, data.Price, &data.Profit,
 				event.Type == db.EventTypeTransfer,
-				errors,
+				missingBalancesErrorsContainer,
 			)
 		default:
 			assert.True(false, "invalid direction: %d", data.Direction)
@@ -202,9 +202,10 @@ func (inv *inventory) processEvent(
 				inv,
 				transfer.Account, transfer.Token,
 				event,
+				eventIdx,
 				transfer.Amount, transfer.Price, &transfer.Profit,
 				true,
-				errors,
+				missingBalancesErrorsContainer,
 			)
 		}
 

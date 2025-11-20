@@ -263,6 +263,8 @@ func fetchSolanaAccount(
 						TokenBalances:  *(*tokenBalances)(unsafe.Pointer(&tx.TokenBalances)),
 						TokenDecimals:  tx.TokenDecimals,
 						BlockIndex:     -1,
+						Signer:         tx.Accounts[0],
+						Accounts:       tx.Accounts,
 					}
 
 					if !account.related && !tx.Err {

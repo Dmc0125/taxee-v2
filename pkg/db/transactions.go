@@ -261,6 +261,8 @@ type SolanaTransactionData struct {
 	TokenBalances  map[string]*SolanaTokenBalances `json:"tokenBalances"`
 	TokenDecimals  map[string]uint8                `json:"tokenDecimals"`
 	BlockIndex     int32                           `json:"blockIndex"`
+	Signer         string                          `json:"string"`
+	Accounts       []string                        `json:"accounts"`
 }
 
 type EvmTransactionEvent struct {

@@ -79,47 +79,77 @@ func setEventTransfer(
 	}
 }
 
-func appendErrUnique(
-	errors map[string][]*db.ParserError,
-	n *db.ParserError,
-	address string,
-) {
-	accountErrors, ok := errors[address]
-
-	isEq := func(e1, e2 any) bool {
-		if d1, ok := e1.(*db.ParserErrorMissingAccount); ok {
-			if d2, ok := e2.(*db.ParserErrorMissingAccount); ok {
-				return d1.AccountAddress == d2.AccountAddress
-			}
-			return false
+func errsEq(e1, e2 any) (bool, bool) {
+	if d1, ok := e1.(*db.ParserErrorMissingAccount); ok {
+		if d2, ok := e2.(*db.ParserErrorMissingAccount); ok {
+			return true, d1.AccountAddress == d2.AccountAddress
 		}
-
-		if d1, ok := e1.(*db.ParserErrorAccountBalanceMismatch); ok {
-			if d2, ok := e2.(*db.ParserErrorAccountBalanceMismatch); ok {
-				return d1.AccountAddress == d2.AccountAddress &&
-					d1.Expected.Equal(d2.Expected) &&
-					d1.Real.Equal(d2.Real)
-			}
-			return false
-		}
-
-		if d1, ok := e1.(*db.ParserErrorAccountDataMismatch); ok {
-			if d2, ok := e2.(*db.ParserErrorAccountDataMismatch); ok {
-				return d1.AccountAddress == d2.AccountAddress &&
-					d1.Message == d2.Message
-			}
-			return false
-		}
-
-		return false
+		return false, false
 	}
 
-	if !ok && len(accountErrors) == 0 {
-		errors[address] = append(errors[address], n)
-	} else {
-		l := accountErrors[len(accountErrors)-1]
-		if !isEq(n.Data, l.Data) {
-			errors[address] = append(errors[address], n)
+	if d1, ok := e1.(*db.ParserErrorAccountBalanceMismatch); ok {
+		if d2, ok := e2.(*db.ParserErrorAccountBalanceMismatch); ok {
+			return true, d1.AccountAddress == d2.AccountAddress &&
+				d1.External.Equal(d2.External) &&
+				d1.Local.Equal(d2.Local)
+		}
+		return false, false
+	}
+
+	if d1, ok := e1.(*db.ParserErrorAccountDataMismatch); ok {
+		if d2, ok := e2.(*db.ParserErrorAccountDataMismatch); ok {
+			return true, d1.AccountAddress == d2.AccountAddress &&
+				d1.Message == d2.Message
+		}
+		return false, false
+	}
+
+	if d1, ok := e1.(*db.ParserErrorMissingBalance); ok {
+		if d2, ok := e2.(*db.ParserErrorMissingBalance); ok {
+			return true, d1.AccountAddress == d2.AccountAddress &&
+				d1.Token == d2.Token &&
+				d1.Amount.Equal(d2.Amount)
+		}
+	}
+
+	return false, false
+}
+
+type errorsContainer struct {
+	count  int
+	errors []*db.ParserError
+}
+
+func appendParserError(
+	count *int,
+	errors *[]*db.ParserError,
+	n *db.ParserError,
+) {
+	if errors == nil {
+		a := make([]*db.ParserError, 0)
+		errors = &a
+	}
+
+	if *count == 0 {
+		*errors = append(*errors, n)
+		*count += 1
+		return
+	}
+
+	for i := len(*errors) - 1; i >= 0; i-- {
+		e := (*errors)[i]
+
+		sameType, sameData := errsEq(e.Data, n.Data)
+
+		if sameData {
+			*count += 1
+			return
+		}
+
+		if sameType && !sameData {
+			*count += 1
+			*errors = append(*errors, n)
+			return
 		}
 	}
 }
@@ -142,248 +172,13 @@ func devDeleteEvents(
 	return nil
 }
 
-func fetchCoingeckoTokens(
+func fetchDecimalsAndPrices(
 	ctx context.Context,
 	pool *pgxpool.Pool,
-) {
-	coins, err := coingecko.GetCoins()
-	assert.NoErr(err, "unable to get coingecko coins")
-
-	batch := pgx.Batch{}
-
-	for _, coin := range coins {
-		const insertCoingeckoTokenData = `
-			insert into coingecko_token_data (
-				coingecko_id, symbol, name
-			) values (
-				$1, $2, $3
-			) on conflict (coingecko_id) do nothing
-		`
-		batch.Queue(
-			insertCoingeckoTokenData,
-			coin.Id,
-			coin.Symbol,
-			coin.Name,
-		)
-
-		for platform, mint := range coin.Platforms {
-			var network db.Network
-			switch platform {
-			case "solana":
-				network = db.NetworkSolana
-			case "arbitrum-one":
-				network = db.NetworkArbitrum
-			case "avalanche":
-				network = db.NetworkAvaxC
-			case "ethereum":
-				network = db.NetworkEthereum
-			case "binance-smart-chain":
-				network = db.NetworkBsc
-			case "cosmos", "osmosis":
-				continue
-			default:
-				continue
-			}
-
-			const insertCoingeckoToken = `
-				insert into coingecko_token (
-					coingecko_id, network, address
-				) values (
-					$1, $2, $3
-				) on conflict (network, address) do nothing
-			`
-			batch.Queue(
-				insertCoingeckoToken,
-				coin.Id,
-				network,
-				mint,
-			)
-		}
-	}
-
-	qr := pool.SendBatch(ctx, &batch)
-	err = qr.Close()
-	assert.NoErr(err, "unable to insert coingecko tokens")
-}
-
-func Parse(
-	ctx context.Context,
-	pool *pgxpool.Pool,
+	events []*db.Event,
 	evmClient *evm.Client,
-	userAccountId int32,
-	fresh bool,
+	evmContexts map[db.Network]*evmContext,
 ) {
-	if os.Getenv("MEM_PROF") == "1" {
-		var wg sync.WaitGroup
-		wg.Add(1)
-		defer wg.Wait()
-
-		go func() {
-			defer wg.Done()
-			fmt.Println("Pprof available at: http://localhost:6060/debug/pprof")
-			err := http.ListenAndServe("localhost:6060", nil)
-			assert.NoErr(err, "")
-		}()
-	}
-
-	logger.Info("Update congecko tokens")
-	fetchCoingeckoTokens(ctx, pool)
-
-	if fresh {
-		err := devDeleteEvents(ctx, pool, userAccountId)
-		assert.NoErr(err, "")
-	}
-
-	/////////////////
-	// Init
-
-	logger.Info("Init parser state")
-	solCtx := solanaContext{
-		accounts:         make(map[string][]accountLifetime),
-		preprocessErrors: make(map[string][]*db.ParserError),
-		processErrors:    make(map[string][]*db.ParserError),
-	}
-	evmContexts := make(map[db.Network]*evmContext)
-
-	for i := db.NetworkEvmStart + 1; i < db.NetworksCount; i += 1 {
-		evmContexts[i] = &evmContext{
-			contracts:     make(map[string][]evmContractImplementation),
-			network:       i,
-			decimals:      make(map[string]uint8),
-			processErrors: make(map[string][]*db.ParserError),
-		}
-	}
-
-	wallets, err := db.GetWallets(ctx, pool, userAccountId)
-	assert.NoErr(err, "")
-
-	for _, w := range wallets {
-		switch {
-		case w.Network == db.NetworkSolana:
-			solCtx.wallets = append(solCtx.wallets, w.Address)
-		case w.Network > db.NetworkEvmStart:
-			ctx, ok := evmContexts[w.Network]
-			assert.True(ok, "missing evm context %s", w.Network.String())
-			ctx.wallets = append(ctx.wallets, w.Address)
-		}
-	}
-
-	// TODO:
-	// pagination ??
-	// 700 txs ~= 6.4mb of allocations
-
-	txs, err := db.GetTransactions(ctx, pool, userAccountId)
-	assert.NoErr(err, "")
-
-	///////////////////
-	// preprocess txs
-	logger.Info("Preprocess txs")
-
-	evmAddresses := make(map[db.Network]map[string][]uint64)
-
-	for _, tx := range txs {
-		if tx.Err {
-			continue
-		}
-
-		switch txData := tx.Data.(type) {
-		case *db.SolanaTransactionData:
-			solCtx.txId = tx.Id
-			solCtx.timestamp = tx.Timestamp
-			solCtx.slot = txData.Slot
-			solCtx.nativeBalances = txData.NativeBalances
-			solCtx.tokenBalances = txData.TokenBalances
-
-			solPreprocessTx(&solCtx, txData.Instructions)
-		case *db.EvmTransactionData:
-			addresses, ok := evmAddresses[tx.Network]
-			if !ok {
-				addresses = make(map[string][]uint64)
-			}
-
-			addresses[txData.To] = append(addresses[txData.To], txData.Block)
-			for _, itx := range txData.InternalTxs {
-				addresses[itx.To] = append(addresses[itx.To], txData.Block)
-			}
-
-			evmAddresses[tx.Network] = addresses
-		}
-	}
-
-	logger.Info("Identify EVM contracts")
-	for network, addresses := range evmAddresses {
-		ctx, ok := evmContexts[network]
-		assert.True(ok, "missing evm context %s", network.String())
-		evmIdentifyContracts(
-			evmClient,
-			network,
-			addresses,
-			ctx,
-		)
-	}
-
-	///////////////////
-	// insert preprocess errors
-	insertErrorsBatch := pgx.Batch{}
-	for _, preprocessErrs := range solCtx.preprocessErrors {
-		for _, preprocessErr := range preprocessErrs {
-			dataSerialized, err := json.Marshal(preprocessErr.Data)
-			assert.NoErr(err, "unable to marshal preprocess error data")
-
-			const insertErrorQuery = `
-				insert into parser_error (
-					user_account_id, tx_id, ix_idx, origin, type, data
-				) values (
-					$1, $2, $3, $4, $5, $6
-				)
-			`
-			insertErrorsBatch.Queue(
-				insertErrorQuery,
-				userAccountId,
-				preprocessErr.TxId,
-				preprocessErr.IxIdx,
-				db.ErrOriginPreprocess,
-				preprocessErr.Type,
-				dataSerialized,
-			)
-		}
-	}
-	br := pool.SendBatch(ctx, &insertErrorsBatch)
-	err = br.Close()
-	assert.NoErr(err, "unable to insert preprocess errors")
-
-	///////////////////
-	// process txs
-	logger.Info("Process txs")
-
-	events := make([]*db.Event, 0)
-
-	for _, tx := range txs {
-		if tx.Err {
-			continue
-		}
-
-		switch txData := tx.Data.(type) {
-		case *db.SolanaTransactionData:
-			solCtx.txId = tx.Id
-			solCtx.timestamp = tx.Timestamp
-			solCtx.slot = txData.Slot
-			solCtx.tokensDecimals = txData.TokenDecimals
-
-			for ixIdx, ix := range txData.Instructions {
-				solCtx.ixIdx = uint32(ixIdx)
-				solProcessIx(&events, &solCtx, ix)
-			}
-		case *db.EvmTransactionData:
-			ctx, ok := evmContexts[tx.Network]
-			assert.True(ok, "missing evm context %s", tx.Network.String())
-			ctx.timestamp = tx.Timestamp
-			ctx.txId = tx.Id
-
-			evmProcessTx(ctx, &events, txData)
-		}
-	}
-
 	///////////////
 	// fetch evm decimals
 	logger.Info("Fetch EVM tokens decimals")
@@ -628,8 +423,8 @@ func Parse(
 		}
 	}
 
-	br = pool.SendBatch(ctx, &queryPricesBatch)
-	err = br.Close()
+	br := pool.SendBatch(ctx, &queryPricesBatch)
+	err := br.Close()
 	assert.NoErr(err, "unable to query prices")
 
 	type coingeckoTokenPriceId struct {
@@ -691,6 +486,331 @@ func Parse(
 		*token.price = price
 		*token.value = price.Mul(*token.amount)
 	}
+}
+
+func fetchCoingeckoTokens(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+) {
+	coins, err := coingecko.GetCoins()
+	assert.NoErr(err, "unable to get coingecko coins")
+
+	batch := pgx.Batch{}
+
+	for _, coin := range coins {
+		const insertCoingeckoTokenData = `
+			insert into coingecko_token_data (
+				coingecko_id, symbol, name
+			) values (
+				$1, $2, $3
+			) on conflict (coingecko_id) do nothing
+		`
+		batch.Queue(
+			insertCoingeckoTokenData,
+			coin.Id,
+			coin.Symbol,
+			coin.Name,
+		)
+
+		for platform, mint := range coin.Platforms {
+			var network db.Network
+			switch platform {
+			case "solana":
+				network = db.NetworkSolana
+			case "arbitrum-one":
+				network = db.NetworkArbitrum
+			case "avalanche":
+				network = db.NetworkAvaxC
+			case "ethereum":
+				network = db.NetworkEthereum
+			case "binance-smart-chain":
+				network = db.NetworkBsc
+			case "cosmos", "osmosis":
+				continue
+			default:
+				continue
+			}
+
+			const insertCoingeckoToken = `
+				insert into coingecko_token (
+					coingecko_id, network, address
+				) values (
+					$1, $2, $3
+				) on conflict (network, address) do nothing
+			`
+			batch.Queue(
+				insertCoingeckoToken,
+				coin.Id,
+				network,
+				mint,
+			)
+		}
+	}
+
+	qr := pool.SendBatch(ctx, &batch)
+	err = qr.Close()
+	assert.NoErr(err, "unable to insert coingecko tokens")
+}
+
+func Parse(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	evmClient *evm.Client,
+	userAccountId int32,
+	fresh bool,
+) {
+	if os.Getenv("MEM_PROF") == "1" {
+		var wg sync.WaitGroup
+		wg.Add(1)
+		defer wg.Wait()
+
+		go func() {
+			defer wg.Done()
+			fmt.Println("Pprof available at: http://localhost:6060/debug/pprof")
+			err := http.ListenAndServe("localhost:6060", nil)
+			assert.NoErr(err, "")
+		}()
+	}
+
+	logger.Info("Update coingecko tokens")
+	fetchCoingeckoTokens(ctx, pool)
+
+	if fresh {
+		err := devDeleteEvents(ctx, pool, userAccountId)
+		assert.NoErr(err, "")
+	}
+
+	/////////////////
+	// Init
+
+	logger.Info("Init parser state")
+	solCtx := solanaContext{
+		accounts:         make(map[string][]accountLifetime),
+		preprocessErrors: new(errorsContainer),
+		processErrors:    new(errorsContainer),
+	}
+	evmContexts := make(map[db.Network]*evmContext)
+
+	for i := db.NetworkEvmStart + 1; i < db.NetworksCount; i += 1 {
+		evmContexts[i] = &evmContext{
+			contracts: make(map[string][]evmContractImplementation),
+			network:   i,
+			decimals:  make(map[string]uint8),
+		}
+	}
+
+	wallets, err := db.GetWallets(ctx, pool, userAccountId)
+	assert.NoErr(err, "")
+
+	for _, w := range wallets {
+		switch {
+		case w.Network == db.NetworkSolana:
+			solCtx.wallets = append(solCtx.wallets, w.Address)
+		case w.Network > db.NetworkEvmStart:
+			ctx, ok := evmContexts[w.Network]
+			assert.True(ok, "missing evm context %s", w.Network.String())
+			ctx.wallets = append(ctx.wallets, w.Address)
+		}
+	}
+
+	// TODO:
+	// pagination ??
+	// 700 txs ~= 6.4mb of allocations
+
+	txs, err := db.GetTransactions(ctx, pool, userAccountId)
+	assert.NoErr(err, "")
+
+	///////////////////
+	// preprocess txs
+	logger.Info("Preprocess txs")
+
+	evmAddresses := make(map[db.Network]map[string][]uint64)
+
+	for _, tx := range txs {
+		if tx.Err {
+			continue
+		}
+
+		switch txData := tx.Data.(type) {
+		case *db.SolanaTransactionData:
+			solCtx.txId = tx.Id
+			solCtx.timestamp = tx.Timestamp
+			solCtx.slot = txData.Slot
+			solCtx.nativeBalances = txData.NativeBalances
+			solCtx.tokenBalances = txData.TokenBalances
+
+			solPreprocessTx(&solCtx, txData.Instructions)
+		case *db.EvmTransactionData:
+			addresses, ok := evmAddresses[tx.Network]
+			if !ok {
+				addresses = make(map[string][]uint64)
+			}
+
+			addresses[txData.To] = append(addresses[txData.To], txData.Block)
+			for _, itx := range txData.InternalTxs {
+				addresses[itx.To] = append(addresses[itx.To], txData.Block)
+			}
+
+			evmAddresses[tx.Network] = addresses
+		}
+	}
+
+	logger.Info("Identify EVM contracts")
+	for network, addresses := range evmAddresses {
+		ctx, ok := evmContexts[network]
+		assert.True(ok, "missing evm context %s", network.String())
+		evmIdentifyContracts(
+			evmClient,
+			network,
+			addresses,
+			ctx,
+		)
+	}
+
+	///////////////////
+	// insert preprocess errors
+	batch := pgx.Batch{}
+	for _, preprocessErr := range solCtx.preprocessErrors.errors {
+		dataSerialized, err := json.Marshal(preprocessErr.Data)
+		assert.NoErr(err, "unable to marshal preprocess error data")
+
+		const insertErrorQuery = `
+				insert into parser_error (
+					user_account_id, tx_id, ix_idx, origin, type, data
+				) values (
+					$1, $2, $3, $4, $5, $6
+				)
+			`
+		batch.Queue(
+			insertErrorQuery,
+			userAccountId,
+			preprocessErr.TxId,
+			preprocessErr.IxIdx,
+			db.ErrOriginPreprocess,
+			preprocessErr.Type,
+			dataSerialized,
+		)
+	}
+	br := pool.SendBatch(ctx, &batch)
+	err = br.Close()
+	assert.NoErr(err, "unable to insert preprocess errors")
+
+	///////////////////
+	// process txs
+	logger.Info("Process txs")
+
+	events := make([]*db.Event, 0)
+	groupedEvents := make(map[string][]*db.Event)
+
+	for _, tx := range txs {
+		eventsGroup := make([]*db.Event, 0)
+
+		switch txData := tx.Data.(type) {
+		case *db.SolanaTransactionData:
+			if txData.Fee.GreaterThan(decimal.Zero) && solCtx.walletOwned(txData.Signer) {
+				event := &db.Event{
+					TxId:         tx.Id,
+					IxIdx:        -1,
+					Timestamp:    tx.Timestamp,
+					Network:      tx.Network,
+					UiAppName:    "native",
+					UiMethodName: "fee",
+					Type:         db.EventTypeTransfer,
+					Data: &db.EventTransfer{
+						Direction: db.EventTransferOutgoing,
+						Wallet:    txData.Signer,
+						Account:   txData.Signer,
+						// not using coingecko solana because in inventory we are not
+						// differentiating between wrapped and unwrapped sol
+						Token:       SOL_MINT_ADDRESS,
+						Amount:      txData.Fee,
+						TokenSource: uint16(db.NetworkSolana),
+					},
+				}
+				eventsGroup = append(eventsGroup, event)
+			}
+
+			if !tx.Err {
+				solCtx.txId = tx.Id
+				solCtx.timestamp = tx.Timestamp
+				solCtx.slot = txData.Slot
+				solCtx.tokensDecimals = txData.TokenDecimals
+
+				for ixIdx, ix := range txData.Instructions {
+					solCtx.ixIdx = uint32(ixIdx)
+					solProcessIx(&eventsGroup, &solCtx, ix)
+				}
+			}
+		case *db.EvmTransactionData:
+			ctx, ok := evmContexts[tx.Network]
+			assert.True(ok, "missing evm context %s", tx.Network.String())
+
+			if txData.Fee.GreaterThan(decimal.Zero) && evmWalletOwned(ctx, txData.From) {
+				event := &db.Event{
+					TxId:         tx.Id,
+					Timestamp:    tx.Timestamp,
+					Network:      tx.Network,
+					UiAppName:    "native",
+					UiMethodName: "fee",
+					Type:         db.EventTypeTransfer,
+					Data: &db.EventTransfer{
+						Direction:   db.EventTransferOutgoing,
+						Wallet:      txData.From,
+						Account:     txData.From,
+						Token:       "ethereum",
+						Amount:      txData.Fee,
+						TokenSource: tokenSourceCoingecko,
+					},
+				}
+				eventsGroup = append(eventsGroup, event)
+			}
+
+			if !tx.Err {
+				ctx.timestamp = tx.Timestamp
+				ctx.txId = tx.Id
+
+				evmProcessTx(ctx, &eventsGroup, txData)
+			}
+		}
+
+		if len(eventsGroup) > 0 {
+			groupedEvents[tx.Id] = eventsGroup
+			events = append(events, eventsGroup...)
+		}
+	}
+
+	batch = pgx.Batch{}
+	for _, error := range solCtx.processErrors.errors {
+		data, err := json.Marshal(error.Data)
+		assert.NoErr(err, "unable to marshal error data")
+
+		const insertErrorQuery = `
+				insert into parser_error (
+					user_account_id, tx_id, ix_idx, event_idx, 
+					origin, type, data
+				) values (
+					$1, $2, $3, $4, $5, $6, $7
+				)
+			`
+		batch.Queue(
+			insertErrorQuery,
+			// args
+			userAccountId,
+			error.TxId, error.IxIdx, error.EventIdx,
+			db.ErrOriginProcess, error.Type, data,
+		)
+	}
+	br = pool.SendBatch(ctx, &batch)
+	err = br.Close()
+	assert.NoErr(err, "unable to insert process events")
+
+	fetchDecimalsAndPrices(
+		ctx,
+		pool,
+		events,
+		evmClient,
+		evmContexts,
+	)
 
 	///////////////
 	// process events
@@ -699,72 +819,174 @@ func Parse(
 	inv := inventory{
 		accounts: make(map[inventoryAccountId][]*inventoryAccount),
 	}
-	eventsBatch := pgx.Batch{}
-	for _, event := range events {
-		switch {
-		case event.Network == db.NetworkSolana:
-			inv.processEvent(event, solCtx.processErrors)
-		case event.Network > db.NetworkEvmStart:
-			ctx := evmContexts[event.Network]
-			inv.processEvent(event, ctx.processErrors)
+	processEventsErrors := make(map[db.Network]*errorsContainer)
+
+	batch = pgx.Batch{}
+
+	for _, tx := range txs {
+		events, ok := groupedEvents[tx.Id]
+		if !ok {
+			continue
 		}
 
-		eventData, err := json.Marshal(event.Data)
-		assert.NoErr(err, "unable to marshal event data")
-		const insertEventQuery = `
-			insert into event (
-				user_account_id, tx_id, ix_idx, idx,
-				ui_app_name, ui_method_name, type, data
-			) values (
-				$1, $2, $3, $4, $5, $6, $7, $8
+		errors := processEventsErrors[tx.Network]
+		if errors == nil {
+			errors = new(errorsContainer)
+			processEventsErrors[tx.Network] = errors
+		}
+
+		for eventIdx, event := range events {
+			inv.processEvent(event, eventIdx, errors)
+
+			eventData, err := json.Marshal(event.Data)
+			assert.NoErr(err, "unable to marshal event data")
+			const insertEventQuery = `
+				insert into event (
+					user_account_id, tx_id, ix_idx, idx,
+					ui_app_name, ui_method_name, type, data
+				) values (
+					$1, $2, $3, $4, $5, $6, $7, $8
+				)
+			`
+			batch.Queue(
+				insertEventQuery,
+				userAccountId,
+				event.TxId,
+				event.IxIdx,
+				eventIdx,
+				event.UiAppName,
+				event.UiMethodName,
+				event.Type,
+				eventData,
 			)
-		`
-		eventsBatch.Queue(
-			insertEventQuery,
-			userAccountId,
-			event.TxId,
-			event.IxIdx,
-			event.Idx,
-			event.UiAppName,
-			event.UiMethodName,
-			event.Type,
-			eventData,
-		)
+		}
+
+		/////////////////
+		// validate sol balances
+
+		switch tx.Data.(type) {
+		case *db.SolanaTransactionData:
+			txData, ok := tx.Data.(*db.SolanaTransactionData)
+			assert.True(ok, "invalid transaction data: %T", tx.Data)
+
+			for account, balance := range txData.NativeBalances {
+				if !solCtx.walletOwned(account) {
+					continue
+				}
+
+				invAccountId := inventoryAccountId{db.NetworkSolana, account, SOL_MINT_ADDRESS}
+				accountBalances := inv.accounts[invAccountId]
+
+				sum := decimal.Zero
+				for _, b := range accountBalances {
+					sum = sum.Add(b.amount)
+				}
+
+				expectedBalance := newDecimalFromRawAmount(balance.Post, 9)
+
+				if !expectedBalance.Equal(sum) {
+					err := db.ParserError{
+						TxId: tx.Id,
+						Type: db.ParserErrorTypeAccountBalanceMismatch,
+						Data: &db.ParserErrorAccountBalanceMismatch{
+							AccountAddress: account,
+							Token:          SOL_MINT_ADDRESS,
+							External:       expectedBalance,
+							Local:          sum,
+						},
+					}
+
+					appendParserError(
+						&errors.count,
+						&errors.errors,
+						&err,
+					)
+				}
+			}
+
+			for account, balance := range txData.TokenBalances {
+				for _, token := range balance.Tokens {
+					if token.Token == SOL_MINT_ADDRESS {
+						continue
+					}
+					if !solCtx.walletOwned(balance.Owner) {
+						continue
+					}
+
+					invAccountId := inventoryAccountId{db.NetworkSolana, account, token.Token}
+					accountBalances := inv.accounts[invAccountId]
+
+					sum := decimal.Zero
+					for _, b := range accountBalances {
+						sum = sum.Add(b.amount)
+					}
+
+					decimals := txData.TokenDecimals[token.Token]
+					expectedAmount := newDecimalFromRawAmount(token.Post, decimals)
+
+					if !expectedAmount.Equal(sum) {
+						err := db.ParserError{
+							TxId: tx.Id,
+							Type: db.ParserErrorTypeAccountBalanceMismatch,
+							Data: &db.ParserErrorAccountBalanceMismatch{
+								AccountAddress: account,
+								Token:          token.Token,
+								External:       expectedAmount,
+								Local:          sum,
+							},
+						}
+						appendParserError(
+							&errors.count,
+							&errors.errors,
+							&err,
+						)
+					}
+				}
+			}
+		}
 	}
 
-	batchAppendErrors := func(errors []*db.ParserError) {
-		for _, error := range errors {
+	for _, container := range processEventsErrors {
+		for _, error := range container.errors {
 			data, err := json.Marshal(error.Data)
 			assert.NoErr(err, "unable to marshal error data")
 
-			const insertErrorQuery = `
-				insert into parser_error (
-					user_account_id, tx_id, ix_idx, event_idx, 
-					origin, type, data
-				) values (
-					$1, $2, $3, $4, $5, $6, $7
+			switch error.Type {
+			case db.ParserErrorTypeMissingBalance:
+				const insertErrorQuery = `
+					insert into parser_error (
+						user_account_id, tx_id, event_idx,
+						origin, type, data
+					) values (
+						$1, $2, $3, $4, $5, $6
+					)
+				`
+				batch.Queue(
+					insertErrorQuery,
+					// args
+					userAccountId, error.TxId, error.EventIdx,
+					db.ErrOriginProcess, error.Type, data,
 				)
-			`
-			eventsBatch.Queue(
-				insertErrorQuery,
-				// args
-				userAccountId,
-				error.TxId, error.IxIdx, error.EventIdx,
-				db.ErrOriginProcess, error.Type, data,
-			)
+			case db.ParserErrorTypeAccountBalanceMismatch:
+				const insertErrorQuery = `
+					insert into parser_error (
+						user_account_id, tx_id,
+						origin, type, data
+					) values (
+						$1, $2, $3, $4, $5
+					)
+				`
+				batch.Queue(
+					insertErrorQuery,
+					// args
+					userAccountId, error.TxId,
+					db.ErrOriginProcess, error.Type, data,
+				)
+			}
 		}
 	}
 
-	for _, errors := range solCtx.processErrors {
-		batchAppendErrors(errors)
-	}
-	for _, ctx := range evmContexts {
-		for _, errors := range ctx.processErrors {
-			batchAppendErrors(errors)
-		}
-	}
-
-	br = pool.SendBatch(ctx, &eventsBatch)
+	br = pool.SendBatch(ctx, &batch)
 	err = br.Close()
 	assert.NoErr(err, "unable to insert events")
 }
