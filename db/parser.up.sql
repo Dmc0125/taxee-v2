@@ -26,14 +26,6 @@ create table pricepoint (
     primary key (coingecko_id, timestamp)
 );
 
-create type event_type as enum (
-    'transfer',
-    'transfer_internal',
-    'mint',
-    'burn',
-    'swap'
-);
-
 create table event (
     user_account_id integer not null,
     tx_id varchar not null,
@@ -48,7 +40,7 @@ create table event (
 
     ui_app_name varchar not null,
     ui_method_name varchar not null,
-    type event_type not null,
+    type smallint not null,
     data jsonb not null
 );
 

@@ -103,6 +103,7 @@ type eventTransfersComponentData struct {
 }
 
 type eventTokenAmountComponentData struct {
+	Account    string
 	ImgUrl     string
 	Amount     string
 	Symbol     string
@@ -223,13 +224,14 @@ func eventsRenderTokenAmounts(
 	value,
 	profit,
 	price decimal.Decimal,
-	token string,
+	token, account string,
 	network db.Network,
 	tokenSource uint16,
 	getTokensMetaBatch *pgx.Batch,
 	tokensQueue *[]*fetchTokenMetadataQueued,
 ) (tokenData *eventTokenAmountComponentData, fiatData, profitData *eventFiatAmountComponentData) {
 	tokenData = &eventTokenAmountComponentData{
+		Account:    account,
 		Amount:     amount.StringFixed(2),
 		LongAmount: amount.String(),
 	}
@@ -607,11 +609,8 @@ func eventsHandler(
 					switch data := e.Data.(type) {
 					case *db.EventTransfer:
 						tokenData, fiatData, profitData := eventsRenderTokenAmounts(
-							data.Amount,
-							data.Value,
-							data.Profit,
-							data.Price,
-							data.Token,
+							data.Amount, data.Value, data.Profit, data.Price,
+							data.Token, data.Account,
 							network,
 							data.TokenSource,
 							&getTokensMetaBatch,
@@ -641,18 +640,16 @@ func eventsHandler(
 					case *db.EventTransferInternal:
 						// NOTE: profit can exist event on internal transfers
 						// in case of missing balances
-						tokenData, fiatData, profitData := eventsRenderTokenAmounts(
-							data.Amount,
-							data.Value,
-							data.Profit,
-							data.Price,
-							data.Token,
+						fromTokenData, fiatData, profitData := eventsRenderTokenAmounts(
+							data.Amount, data.Value, data.Profit, data.Price,
+							data.Token, data.FromAccount,
 							network,
 							data.TokenSource,
 							&getTokensMetaBatch,
 							&fetchTokensMetadataQueue,
 						)
 						fiatData.Sign = 0
+						fiatData.Missing = false
 
 						eventComponentData.Profits = append(
 							eventComponentData.Profits,
@@ -661,12 +658,15 @@ func eventsHandler(
 
 						eventComponentData.OutgoingTransfers = &eventTransfersComponentData{
 							Wallet: shorten(data.FromWallet, 4, 4),
-							Tokens: []*eventTokenAmountComponentData{tokenData},
+							Tokens: []*eventTokenAmountComponentData{fromTokenData},
 							Fiats:  []*eventFiatAmountComponentData{fiatData},
 						}
+
+						toTokenData := *fromTokenData
+						toTokenData.Account = data.ToAccount
 						eventComponentData.IncomingTransfers = &eventTransfersComponentData{
 							Wallet: shorten(data.ToWallet, 4, 4),
-							Tokens: []*eventTokenAmountComponentData{tokenData},
+							Tokens: []*eventTokenAmountComponentData{&toTokenData},
 							Fiats:  []*eventFiatAmountComponentData{fiatData},
 						}
 					case *db.EventSwap:
@@ -681,11 +681,8 @@ func eventsHandler(
 
 						for _, swap := range data.Outgoing {
 							tokenData, fiatData, profitData := eventsRenderTokenAmounts(
-								swap.Amount,
-								swap.Value,
-								swap.Profit,
-								swap.Price,
-								swap.Token,
+								swap.Amount, swap.Value, swap.Profit, swap.Price,
+								swap.Token, swap.Account,
 								network,
 								swap.TokenSource,
 								&getTokensMetaBatch,
@@ -703,11 +700,8 @@ func eventsHandler(
 
 						for _, swap := range data.Incoming {
 							tokenData, fiatData, _ := eventsRenderTokenAmounts(
-								swap.Amount,
-								swap.Value,
-								swap.Profit,
-								swap.Price,
-								swap.Token,
+								swap.Amount, swap.Value, swap.Profit, swap.Price,
+								swap.Token, swap.Account,
 								network,
 								swap.TokenSource,
 								&getTokensMetaBatch,
@@ -744,6 +738,7 @@ func eventsHandler(
 						for _, event := range rowData.Events {
 							if event.Idx == int(err.EventIdx.Int32) {
 								tokenData := &eventTokenAmountComponentData{
+									Account:    data.AccountAddress,
 									Amount:     data.Amount.String(),
 									LongAmount: data.Amount.String(),
 								}

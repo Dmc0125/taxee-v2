@@ -62,7 +62,7 @@ func solAssociatedTokenIxRelatedAccounts(
 	}
 }
 
-func solPreprocessAssociatedTokenIx(ctx *solanaContext, ix *db.SolanaInstruction) {
+func solPreprocessAssociatedTokenIx(ctx *solContext, ix *db.SolanaInstruction) {
 	ixType, ok := solAssociatedTokenIxFromData(ix.Data)
 	if !ok {
 		return
@@ -91,7 +91,7 @@ func solPreprocessAssociatedTokenIx(ctx *solanaContext, ix *db.SolanaInstruction
 		amount := binary.LittleEndian.Uint64(transferIx.Data[4:])
 		ctx.receiveSol(tokenAccount, amount)
 
-		data := SolTokenAccountData{
+		data := solTokenAccountData{
 			Mint:  mint,
 			Owner: owner,
 		}
@@ -101,7 +101,7 @@ func solPreprocessAssociatedTokenIx(ctx *solanaContext, ix *db.SolanaInstruction
 }
 
 func solProcessAssociatedTokenIx(
-	ctx *solanaContext,
+	ctx *solContext,
 	ix *db.SolanaInstruction,
 	events *[]*db.Event,
 ) {

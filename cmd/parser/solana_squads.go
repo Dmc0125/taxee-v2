@@ -78,7 +78,15 @@ type solSquadsV4CompiledTxAccountData struct {
 	lookups     []solSquadsV4Lookup
 }
 
+func (_ solSquadsV4CompiledTxAccountData) name() string {
+	return "squadsV4_comp_transaction_account"
+}
+
 type solSquadsV4DecompiledTxAccountData []*db.SolanaInstruction
+
+func (_ solSquadsV4DecompiledTxAccountData) name() string {
+	return "squadsV4_decomp_transaction_account"
+}
 
 func (acc *solSquadsV4CompiledTxAccountData) initFromData(data []byte) {
 	// https://github.com/Squads-Protocol/v4/blob/main/programs/squads_multisig_program/src/instructions/vault_transaction_create.rs
@@ -149,7 +157,7 @@ func (acc *solSquadsV4CompiledTxAccountData) initFromData(data []byte) {
 
 // implemented based on:
 // https://github.com/Squads-Protocol/v4/blob/main/programs/squads_multisig_program
-func solPreprocessSquadsV4Ix(ctx *solanaContext, ix *db.SolanaInstruction) {
+func solPreprocessSquadsV4Ix(ctx *solContext, ix *db.SolanaInstruction) {
 	ixType, _, ok := solSquadsV4IxFromData(ix.Data)
 	if !ok {
 		return
@@ -178,7 +186,14 @@ func solPreprocessSquadsV4Ix(ctx *solanaContext, ix *db.SolanaInstruction) {
 			transaction, ctx.txId,
 		)
 
-		squadsTxAccountData := solAccountDataMust[solSquadsV4CompiledTxAccountData](transactionAccount)
+		squadsTxAccountData, ok := solAccountDataMust[solSquadsV4CompiledTxAccountData](
+			ctx,
+			transactionAccount,
+			transaction,
+		)
+		if !ok {
+			return
+		}
 
 		// `remaining_accounts` must include the following accounts in the exact order:
 		// 1. AddressLookupTable accounts in the order they appear in `message.address_table_lookups`.
@@ -303,7 +318,7 @@ func solPreprocessSquadsV4Ix(ctx *solanaContext, ix *db.SolanaInstruction) {
 }
 
 func solProcessSquadsV4Ix(
-	ctx *solanaContext,
+	ctx *solContext,
 	ix *db.SolanaInstruction,
 	events *[]*db.Event,
 ) {
@@ -336,9 +351,14 @@ func solProcessSquadsV4Ix(
 			transaction, ctx.txId,
 		)
 
-		squadsInstructions := solAccountDataMust[solSquadsV4DecompiledTxAccountData](
+		squadsInstructions, ok := solAccountDataMust[solSquadsV4DecompiledTxAccountData](
+			ctx,
 			transactionAccount,
+			transaction,
 		)
+		if !ok {
+			return
+		}
 
 		for _, squadsIx := range *squadsInstructions {
 			solProcessIx(events, ctx, squadsIx)

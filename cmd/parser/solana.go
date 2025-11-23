@@ -8,6 +8,8 @@ import (
 	"taxee/pkg/assert"
 	"taxee/pkg/db"
 	"time"
+
+	"github.com/shopspring/decimal"
 )
 
 type relatedAccounts interface {
@@ -64,12 +66,11 @@ func (acc *accountLifetime) open(slot uint64, ixIdx uint32) bool {
 	return acc.MinSlot < slot && slot < acc.MaxSlot
 }
 
-type solanaContext struct {
+type solContext struct {
 	wallets  []string
 	accounts map[string][]accountLifetime
 
-	preprocessErrors *errorsContainer
-	processErrors    *errorsContainer
+	errors []*db.ParserError
 
 	// volatile for each tx/ix
 	txId           string
@@ -81,11 +82,11 @@ type solanaContext struct {
 	tokenBalances  map[string]*db.SolanaTokenBalances
 }
 
-func (ctx *solanaContext) walletOwned(other string) bool {
+func (ctx *solContext) walletOwned(other string) bool {
 	return slices.Contains(ctx.wallets, other)
 }
 
-func (ctx *solanaContext) receiveSol(address string, amount uint64) {
+func (ctx *solContext) receiveSol(address string, amount uint64) {
 	lifetimes, ok := ctx.accounts[address]
 
 	if !ok {
@@ -112,7 +113,7 @@ func (ctx *solanaContext) receiveSol(address string, amount uint64) {
 	ctx.accounts[address] = lifetimes
 }
 
-func solNewErrMissingAccount(ctx *solanaContext, address string) *db.ParserError {
+func solNewErrMissingAccount(ctx *solContext, address string) *db.ParserError {
 	e := db.ParserError{
 		TxId:  ctx.txId,
 		IxIdx: int32(ctx.ixIdx),
@@ -124,26 +125,18 @@ func solNewErrMissingAccount(ctx *solanaContext, address string) *db.ParserError
 	return &e
 }
 
-func (ctx *solanaContext) init(address string, owned bool, data any) {
+func (ctx *solContext) init(address string, owned bool, data any) {
 	lifetimes, ok := ctx.accounts[address]
 	if !ok || len(lifetimes) == 0 {
 		err := solNewErrMissingAccount(ctx, address)
-		appendParserError(
-			&ctx.preprocessErrors.count,
-			&ctx.preprocessErrors.errors,
-			err,
-		)
+		appendParserError(&ctx.errors, err)
 		return
 	}
 
 	acc := &lifetimes[len(lifetimes)-1]
 	if !acc.PreparseOpen {
 		err := solNewErrMissingAccount(ctx, address)
-		appendParserError(
-			&ctx.preprocessErrors.count,
-			&ctx.preprocessErrors.errors,
-			err,
-		)
+		appendParserError(&ctx.errors, err)
 		return
 	}
 
@@ -152,26 +145,18 @@ func (ctx *solanaContext) init(address string, owned bool, data any) {
 	ctx.accounts[address] = lifetimes
 }
 
-func (ctx *solanaContext) close(closedAddress, receiverAddress string) {
+func (ctx *solContext) close(closedAddress, receiverAddress string) {
 	lifetimes, ok := ctx.accounts[closedAddress]
 	if !ok || len(lifetimes) == 0 {
 		err := solNewErrMissingAccount(ctx, closedAddress)
-		appendParserError(
-			&ctx.preprocessErrors.count,
-			&ctx.preprocessErrors.errors,
-			err,
-		)
+		appendParserError(&ctx.errors, err)
 		return
 	}
 
 	acc := &lifetimes[len(lifetimes)-1]
 	if !acc.PreparseOpen {
 		err := solNewErrMissingAccount(ctx, closedAddress)
-		appendParserError(
-			&ctx.preprocessErrors.count,
-			&ctx.preprocessErrors.errors,
-			err,
-		)
+		appendParserError(&ctx.errors, err)
 		return
 	}
 
@@ -187,7 +172,7 @@ func (ctx *solanaContext) close(closedAddress, receiverAddress string) {
 }
 
 // 0 -> not owned, 1 -> owned, 2 -> whatever
-func (ctx *solanaContext) find(
+func (ctx *solContext) find(
 	slot uint64,
 	ixIdx uint32,
 	address string,
@@ -214,7 +199,7 @@ func (ctx *solanaContext) find(
 	return nil
 }
 
-func (ctx *solanaContext) findOwned(
+func (ctx *solContext) findOwned(
 	slot uint64,
 	ixIdx uint32,
 	address string,
@@ -222,7 +207,7 @@ func (ctx *solanaContext) findOwned(
 	return ctx.find(slot, ixIdx, address, 1)
 }
 
-func solNewEvent(ctx *solanaContext) *db.Event {
+func solNewEvent(ctx *solContext) *db.Event {
 	return &db.Event{
 		Timestamp: ctx.timestamp,
 		Network:   db.NetworkSolana,
@@ -231,20 +216,60 @@ func solNewEvent(ctx *solanaContext) *db.Event {
 	}
 }
 
-// TODO: instead of assert, create an error
-func solAccountDataMust[T any](account *accountLifetime) *T {
-	data, ok := account.Data.(*T)
-	assert.True(ok, "invalid account data: %T", account.Data)
-	return data
+func solNewTxError(ctx *solContext) *db.ParserError {
+	return &db.ParserError{
+		TxId:  ctx.txId,
+		IxIdx: int32(ctx.ixIdx),
+	}
 }
 
-func solDecimalsMust(ctx *solanaContext, mint string) uint8 {
+type solAccountData interface {
+	name() string
+}
+
+// TODO: instead of assert, create an error
+func solAccountDataMust[T solAccountData](
+	ctx *solContext,
+	account *accountLifetime,
+	address string,
+) (*T, bool) {
+	data, ok := account.Data.(*T)
+	if !ok {
+		var temp T
+		err := db.ParserError{
+			TxId:  ctx.txId,
+			IxIdx: int32(ctx.ixIdx),
+			Type:  db.ParserErrorTypeAccountDataMismatch,
+			Data: &db.ParserErrorAccountDataMismatch{
+				AccountAddress: address,
+				Message:        fmt.Sprintf("Expected the data to be %s", temp.name()),
+			},
+		}
+		appendParserError(&ctx.errors, &err)
+		return nil, false
+	}
+	return data, true
+}
+
+func solDecimalsMust(ctx *solContext, mint string) uint8 {
+	// NOTE: this should **always** be ok, if it is not, RPC api changed and
+	// we want to know that
 	decimals, ok := ctx.tokensDecimals[mint]
 	assert.True(ok, "missing decimals for: %s", mint)
 	return decimals
 }
 
-func solPreprocessIx(ctx *solanaContext, ix *db.SolanaInstruction) {
+func solAnchorDisc(data []byte) (disc [8]byte, ok bool) {
+	if len(data) < 8 {
+		return
+	}
+
+	copy(disc[:], data[:8])
+	ok = true
+	return
+}
+
+func solPreprocessIx(ctx *solContext, ix *db.SolanaInstruction) {
 	switch ix.ProgramAddress {
 	case SOL_SYSTEM_PROGRAM_ADDRESS:
 		solPreprocessSystemIx(ctx, ix)
@@ -254,11 +279,13 @@ func solPreprocessIx(ctx *solanaContext, ix *db.SolanaInstruction) {
 		solPreprocessAssociatedTokenIx(ctx, ix)
 	case SOL_SQUADS_V4_PROGRAM_ADDRESS:
 		solPreprocessSquadsV4Ix(ctx, ix)
+	case SOL_METEORA_FARMS_PROGRAM_ADDRESS:
+		solPreprocessMeteoraFarmsIx(ctx, ix)
 	}
 }
 
 func solPreprocessTx(
-	ctx *solanaContext,
+	ctx *solContext,
 	ixs []*db.SolanaInstruction,
 ) {
 	for ixIdx, ix := range ixs {
@@ -276,11 +303,7 @@ nativeBalancesLoop:
 			// token account
 			if !accountExists && nativeBalance.Post > 0 {
 				err := solNewErrMissingAccount(ctx, address)
-				appendParserError(
-					&ctx.preprocessErrors.count,
-					&ctx.preprocessErrors.errors,
-					err,
-				)
+				appendParserError(&ctx.errors, err)
 				continue
 			}
 		}
@@ -308,30 +331,12 @@ nativeBalancesLoop:
 						Type:  db.ParserErrorTypeAccountBalanceMismatch,
 						Data:  &errData,
 					}
-					appendParserError(
-						&ctx.preprocessErrors.count,
-						&ctx.preprocessErrors.errors,
-						err,
-					)
+					appendParserError(&ctx.errors, err)
 				}
 
 				if isTokenAccount {
-					data, ok := lt.Data.(*SolTokenAccountData)
+					data, ok := solAccountDataMust[solTokenAccountData](ctx, &lt, address)
 					if !ok {
-						err := &db.ParserError{
-							TxId:  ctx.txId,
-							IxIdx: int32(ctx.ixIdx),
-							Type:  db.ParserErrorTypeAccountDataMismatch,
-							Data: &db.ParserErrorAccountDataMismatch{
-								AccountAddress: address,
-								Message:        "Not a token account",
-							},
-						}
-						appendParserError(
-							&ctx.preprocessErrors.count,
-							&ctx.preprocessErrors.errors,
-							err,
-						)
 						continue nativeBalancesLoop
 					}
 
@@ -352,11 +357,7 @@ nativeBalancesLoop:
 								Message:        "Invalid token account mint",
 							},
 						}
-						appendParserError(
-							&ctx.preprocessErrors.count,
-							&ctx.preprocessErrors.errors,
-							err,
-						)
+						appendParserError(&ctx.errors, err)
 						continue nativeBalancesLoop
 					}
 				}
@@ -434,7 +435,7 @@ func solAnchorInitAccountValidate(
 // NOTE: implemented based on
 // https://github.com/solana-foundation/anchor/blob/master/lang/syn/src/codegen/accounts/constraints.rs#L1036
 func solProcessAnchorInitAccount(
-	ctx *solanaContext,
+	ctx *solContext,
 	innerIxs *solInnerIxIterator,
 ) (*db.Event, bool, error) {
 	from, to, amount, err := solAnchorInitAccountValidate(innerIxs)
@@ -461,9 +462,135 @@ func solProcessAnchorInitAccount(
 	return event, true, nil
 }
 
+func solParseTransfers(
+	ctx *solContext,
+	innerIxs []*db.SolanaInnerInstruction,
+) (wallet string, incomingTransfers, outgoingTransfers []*db.EventSwapTransfer) {
+	transfers := make(map[string]decimal.Decimal)
+	tokenAccounts := make(map[string]string)
+
+	// 1. token transfer - incoming / outgoing
+	// 2. token mint - incoming
+	// 3. token burn - outgoing
+
+	getTokenAccount := func(address, mint string) (validMint, owner string, ok bool) {
+		account := ctx.findOwned(ctx.slot, ctx.ixIdx, address)
+		if account != nil {
+			tokenAccountData, ok1 := solAccountDataMust[solTokenAccountData](
+				ctx, account, address,
+			)
+			if !ok1 {
+				return
+			}
+			if mint != "" && mint != tokenAccountData.Mint {
+				// TODO: invalid mint error
+				return
+			}
+			validMint = tokenAccountData.Mint
+			owner = tokenAccountData.Owner
+			ok = true
+		}
+		return
+	}
+
+	for _, innerIx := range innerIxs {
+		switch innerIx.ProgramAddress {
+		case SOL_TOKEN_PROGRAM_ADDRESS:
+			ixType, _, ok := solTokenIxFromByte(innerIx.Data[0])
+			if !ok {
+				continue
+			}
+
+			var amount uint64
+			var from, to, mint string
+
+			switch ixType {
+			case solTokenIxMint, solTokenIxMintChecked:
+				amount, to, mint = solParseTokenMint(innerIx.Accounts, innerIx.Data)
+			case solTokenIxBurn, solTokenIxBurnChecked:
+				amount, from, mint = solParseTokenBurn(innerIx.Accounts, innerIx.Data)
+			case solTokenIxTransfer:
+				amount, from, to = solParseTokenTransfer(innerIx.Accounts, innerIx.Data)
+			case solTokenIxTransferChecked:
+				amount, from, to = solParseTokenTransferChecked(innerIx.Accounts, innerIx.Data)
+			default:
+				continue
+			}
+
+			validMint, ok := "", false
+			if from != "" {
+				if validMint, wallet, ok = getTokenAccount(from, mint); ok {
+					decimals := solDecimalsMust(ctx, validMint)
+					transfers[validMint] = transfers[validMint].Sub(
+						newDecimalFromRawAmount(amount, decimals),
+					)
+					tokenAccounts[validMint] = from
+				}
+			}
+			if to != "" {
+				if validMint, wallet, ok = getTokenAccount(to, mint); ok {
+					decimals := solDecimalsMust(ctx, validMint)
+					transfers[validMint] = transfers[validMint].Add(
+						newDecimalFromRawAmount(amount, decimals),
+					)
+					tokenAccounts[validMint] = to
+				}
+			}
+		}
+	}
+
+	for mint, amount := range transfers {
+		if amount.Equal(decimal.Zero) {
+			continue
+		}
+
+		tokenAccount, ok := tokenAccounts[mint]
+		assert.True(ok, "missing token account for mint")
+
+		t := db.EventSwapTransfer{
+			Account:     tokenAccount,
+			Token:       mint,
+			Amount:      amount.Abs(),
+			TokenSource: uint16(db.NetworkSolana),
+		}
+
+		if amount.IsNegative() {
+			outgoingTransfers = append(outgoingTransfers, &t)
+		} else {
+			incomingTransfers = append(incomingTransfers, &t)
+		}
+	}
+
+	return
+}
+
+func solSwapEventFromTransfers(
+	ctx *solContext,
+	innerInstructions []*db.SolanaInnerInstruction,
+	events *[]*db.Event,
+	app, method string,
+	eventType db.EventType,
+) {
+	owner, incomingTransfers, outgoingTransfers := solParseTransfers(ctx, innerInstructions)
+
+	swapEventData := db.EventSwap{
+		Wallet:   owner,
+		Incoming: incomingTransfers,
+		Outgoing: outgoingTransfers,
+	}
+
+	event := solNewEvent(ctx)
+	event.UiAppName = app
+	event.UiMethodName = method
+	event.Type = eventType
+	event.Data = &swapEventData
+
+	*events = append(*events, event)
+}
+
 func solProcessIx(
 	events *[]*db.Event,
-	ctx *solanaContext,
+	ctx *solContext,
 	ix *db.SolanaInstruction,
 ) {
 	switch ix.ProgramAddress {
@@ -475,5 +602,13 @@ func solProcessIx(
 		solProcessAssociatedTokenIx(ctx, ix, events)
 	case SOL_SQUADS_V4_PROGRAM_ADDRESS:
 		solProcessSquadsV4Ix(ctx, ix, events)
+	case SOL_METEORA_POOLS_PROGRAM_ADDRESS:
+		solProcessMeteoraPoolsIx(ctx, ix, events)
+	case SOL_JUP_V6_PROGRAM_ADDRESS:
+		solProcessJupV6(ctx, ix, events)
+	case SOL_METEORA_FARMS_PROGRAM_ADDRESS:
+		solProcessMeteoraFarmsIx(ctx, ix, events)
+	case SOL_MERCURIAL_PROGRAM_ADDRESS:
+		solProcessMercurialIx(ctx, ix, events)
 	}
 }

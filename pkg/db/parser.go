@@ -128,14 +128,21 @@ type EventSwap struct {
 	Incoming []*EventSwapTransfer `json:"incoming"`
 }
 
-type EventType string
+type EventType int
 
 const (
-	EventTypeTransfer         EventType = "transfer"
-	EventTypeTransferInternal EventType = "transfer_internal"
-	EventTypeMint             EventType = "mint"
-	EventTypeBurn             EventType = "burn"
-	EventTypeSwap             EventType = "swap"
+	EventTypeTransferInternal EventType = iota
+
+	EventTypeTransfer
+	EventTypeMint
+	EventTypeBurn
+
+	EventTypeSwap
+
+	EventTypeAddLiquidity
+	EventTypeRemoveLiquidity
+
+	EventTypeStake
 )
 
 type Event struct {
@@ -151,26 +158,20 @@ type Event struct {
 }
 
 func (event *Event) UnmarshalData(src []byte) error {
+	var data any
 	switch event.Type {
 	case EventTypeTransferInternal:
-		data := new(EventTransferInternal)
-		if err := json.Unmarshal(src, data); err != nil {
-			return fmt.Errorf("unable to unmarshal %s event data: %w", event.Type, err)
-		}
-		event.Data = data
+		data = new(EventTransferInternal)
 	case EventTypeTransfer, EventTypeMint, EventTypeBurn:
-		data := new(EventTransfer)
-		if err := json.Unmarshal(src, data); err != nil {
-			return fmt.Errorf("unable to unmarshal %s event data: %w", event.Type, err)
-		}
-		event.Data = data
-	case EventTypeSwap:
-		data := new(EventSwap)
-		if err := json.Unmarshal(src, data); err != nil {
-			return fmt.Errorf("unable to unmarshal %s event data: %w", event.Type, err)
-		}
-		event.Data = data
+		data = new(EventTransfer)
+	case EventTypeSwap, EventTypeAddLiquidity, EventTypeRemoveLiquidity:
+		data = new(EventSwap)
 	}
 
+	if err := json.Unmarshal(src, data); err != nil {
+		return fmt.Errorf("unable to unmarshal %d event data: %w", event.Type, err)
+	}
+
+	event.Data = data
 	return nil
 }

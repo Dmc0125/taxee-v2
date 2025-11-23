@@ -30,3 +30,7 @@
     @apply hidden absolute w-fit px-4 py-2 -top-2 -translate-y-full left-1/2 -translate-x-1/2
         bg-white border border-gray-200 rounded-lg text-sm text-nowrap text-gray-800 shadow-xs;
 }
+
+#link {
+    @apply underline decoration-dotted;
+}

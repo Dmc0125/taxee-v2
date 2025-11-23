@@ -70,7 +70,7 @@ func solParseSystemIxSolTransfer(
 	return
 }
 
-func solPreprocessSystemIx(ctx *solanaContext, ix *db.SolanaInstruction) {
+func solPreprocessSystemIx(ctx *solContext, ix *db.SolanaInstruction) {
 	ixType, _, ok := solSystemIxFromData(ix.Data)
 	if !ok {
 		return
@@ -85,7 +85,7 @@ func solPreprocessSystemIx(ctx *solanaContext, ix *db.SolanaInstruction) {
 }
 
 func solProcessSystemIx(
-	ctx *solanaContext,
+	ctx *solContext,
 	ix *db.SolanaInstruction,
 	events *[]*db.Event,
 ) {

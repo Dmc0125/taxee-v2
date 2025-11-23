@@ -52,12 +52,13 @@ func invSubFromAccount(
 	amount, price decimal.Decimal,
 	profit *decimal.Decimal,
 	increaseProfits bool,
-	missingBalancesErrorsContainer *errorsContainer,
-) {
+	errors *[]*db.ParserError,
+) decimal.Decimal {
 	accountId := inventoryAccountId{event.Network, account, token}
 	balances := inv.accounts[accountId]
 
 	remainingAmount := amount
+	value := decimal.Zero
 
 	for len(balances) > 0 && remainingAmount.GreaterThan(decimal.Zero) {
 		acqPrice := balances[0].acqPrice
@@ -75,6 +76,8 @@ func invSubFromAccount(
 			*profit = disposal.Sub(acquisition)
 			inv.disposal = inv.disposal.Add(disposal)
 			inv.acquisition = inv.acquisition.Add(acquisition)
+
+			value = value.Add(disposal)
 		}
 	}
 
@@ -91,25 +94,25 @@ func invSubFromAccount(
 				TokenSource:    tokenSource,
 			},
 		}
-		appendParserError(
-			&missingBalancesErrorsContainer.count,
-			&missingBalancesErrorsContainer.errors,
-			&err,
-		)
+		appendParserError(errors, &err)
 
 		if increaseProfits {
-			value := remainingAmount.Mul(price)
-			*profit = value
-			inv.income = inv.income.Add(value)
+			remainingValue := remainingAmount.Mul(price)
+			*profit = remainingValue
+			inv.income = inv.income.Add(remainingValue)
+
+			value = value.Add(remainingValue)
 		}
 	}
 
 	inv.accounts[accountId] = balances
+
+	return value
 }
 
 func (inv *inventory) processEvent(
 	event *db.Event,
-	missingBalancesErrorsContainer *errorsContainer,
+	errors *[]*db.ParserError,
 ) {
 	switch data := event.Data.(type) {
 	case *db.EventTransferInternal:
@@ -149,11 +152,7 @@ func (inv *inventory) processEvent(
 					TokenSource:    data.TokenSource,
 				},
 			}
-			appendParserError(
-				&missingBalancesErrorsContainer.count,
-				&missingBalancesErrorsContainer.errors,
-				&err,
-			)
+			appendParserError(errors, &err)
 
 			value := remainingAmount.Mul(data.Price)
 			data.Profit = value
@@ -190,33 +189,81 @@ func (inv *inventory) processEvent(
 				event,
 				data.Amount, data.Price, &data.Profit,
 				event.Type == db.EventTypeTransfer,
-				missingBalancesErrorsContainer,
+				errors,
 			)
 		default:
 			assert.True(false, "invalid direction: %d", data.Direction)
 		}
-
 	case *db.EventSwap:
-		for _, transfer := range data.Outgoing {
-			invSubFromAccount(
-				inv,
-				transfer.Account, transfer.Token, transfer.TokenSource,
-				event,
-				transfer.Amount, transfer.Price, &transfer.Profit,
-				true,
-				missingBalancesErrorsContainer,
-			)
+		type queued struct {
+			incoming  bool
+			transfers []*db.EventSwapTransfer
+		}
+		queue := [2]queued{}
+
+		switch event.Type {
+		case db.EventTypeRemoveLiquidity:
+			assert.True(len(data.Outgoing) == 1, "multiple LP tokens in remove_liquidity")
+			queue[0] = queued{
+				incoming:  true,
+				transfers: data.Incoming,
+			}
+			queue[1] = queued{
+				incoming:  false,
+				transfers: data.Outgoing,
+			}
+		case db.EventTypeAddLiquidity:
+			assert.True(len(data.Incoming) == 1, "multiple LP tokens in add_liquidity")
+			fallthrough
+		default:
+			queue[0] = queued{
+				incoming:  false,
+				transfers: data.Outgoing,
+			}
+			queue[1] = queued{
+				incoming:  true,
+				transfers: data.Incoming,
+			}
 		}
 
-		for _, transfer := range data.Incoming {
-			inv.income = inv.income.Add(transfer.Value)
-			transfer.Profit = transfer.Value
+		tokensValue := decimal.Zero
 
-			accountId := inventoryAccountId{event.Network, transfer.Account, transfer.Token}
-			inv.accounts[accountId] = append(inv.accounts[accountId], &inventoryAccount{
-				amount:   transfer.Amount,
-				acqPrice: transfer.Price,
-			})
+		for _, q := range queue {
+			if q.incoming {
+				for _, t := range q.transfers {
+					if event.Type == db.EventTypeAddLiquidity && t.Value.IsZero() {
+						t.Value = tokensValue
+						t.Price = tokensValue.Div(t.Amount)
+					} else if event.Type == db.EventTypeRemoveLiquidity {
+						tokensValue = tokensValue.Add(t.Value)
+					}
+
+					accountId := inventoryAccountId{event.Network, t.Account, t.Token}
+					inv.accounts[accountId] = append(inv.accounts[accountId], &inventoryAccount{
+						amount:   t.Amount,
+						acqPrice: t.Price,
+					})
+				}
+			} else {
+				for _, t := range q.transfers {
+					if event.Type == db.EventTypeRemoveLiquidity && t.Value.IsZero() {
+						t.Value = tokensValue
+						t.Price = tokensValue.Div(t.Amount)
+					}
+
+					value := invSubFromAccount(
+						inv,
+						t.Account, t.Token, t.TokenSource,
+						event,
+						t.Amount, t.Price, &t.Profit,
+						true,
+						errors,
+					)
+					if event.Type == db.EventTypeAddLiquidity {
+						tokensValue = tokensValue.Add(value)
+					}
+				}
+			}
 		}
 	}
 }
