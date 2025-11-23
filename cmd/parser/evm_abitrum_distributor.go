@@ -8,7 +8,7 @@ import (
 const evmArbitrumDistributorContractAddress = "0x67a24ce4321ab3af51c2d0a4801c3e111d88c9d9"
 
 const (
-	evmArbitrumDistributorClaim             uint32 = 0x4e71d92d // claim()
+	evmArbitrumDistributorClaim uint32 = 0x4e71d92d // claim()
 	// evmArbitrumDistributorClaimPeriodStart  uint32 = 0x58c13b7e // claimPeriodStart()
 	// evmArbitrumDistributorClaimableTokens   uint32 = 0x84d24226 // claimableTokens(address)
 	// evmArbitrumDistributorRenounceOwnership uint32 = 0x715018a6 // renounceOwnership()
@@ -68,12 +68,12 @@ func evmProcessArbitrumDistributorTx(
 		amount := evmAmountFrom32Bytes(transferLog.Data[:32])
 
 		event.Data = &db.EventTransfer{
-			Direction:   db.EventTransferIncoming,
-			Wallet:      sender,
-			Account:     sender,
-			Token:       transferLog.Address,
-			Amount:      amount,
-			TokenSource: uint16(db.NetworkArbitrum),
+			Direction:    db.EventTransferIncoming,
+			OwnedWallet:  sender,
+			OwnedAccount: sender,
+			Token:        transferLog.Address,
+			Amount:       amount,
+			TokenSource:  uint16(db.NetworkArbitrum),
 		}
 
 		*events = append(*events, event)

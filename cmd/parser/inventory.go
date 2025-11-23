@@ -174,7 +174,7 @@ func (inv *inventory) processEvent(
 				data.Profit = data.Value
 			}
 
-			accountId := inventoryAccountId{event.Network, data.Account, data.Token}
+			accountId := inventoryAccountId{event.Network, data.OwnedAccount, data.Token}
 			inv.accounts[accountId] = append(
 				inv.accounts[accountId],
 				&inventoryAccount{
@@ -185,7 +185,7 @@ func (inv *inventory) processEvent(
 		case db.EventTransferOutgoing:
 			invSubFromAccount(
 				inv,
-				data.Account, data.Token, data.TokenSource,
+				data.OwnedAccount, data.Token, data.TokenSource,
 				event,
 				data.Amount, data.Price, &data.Profit,
 				event.Type == db.EventTypeTransfer,

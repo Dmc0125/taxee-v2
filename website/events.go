@@ -610,7 +610,7 @@ func eventsHandler(
 					case *db.EventTransfer:
 						tokenData, fiatData, profitData := eventsRenderTokenAmounts(
 							data.Amount, data.Value, data.Profit, data.Price,
-							data.Token, data.Account,
+							data.Token, data.OwnedAccount,
 							network,
 							data.TokenSource,
 							&getTokensMetaBatch,
@@ -622,7 +622,7 @@ func eventsHandler(
 							profitData,
 						)
 						transfersComponentData := eventTransfersComponentData{
-							Wallet: shorten(data.Wallet, 4, 4),
+							Wallet: shorten(data.OwnedWallet, 4, 4),
 							Tokens: []*eventTokenAmountComponentData{
 								tokenData,
 							},
@@ -662,6 +662,8 @@ func eventsHandler(
 							Fiats:  []*eventFiatAmountComponentData{fiatData},
 						}
 
+						// TODO: FIX, this copies all props, so symbol / img url is no longer
+						// updated once data is fetched
 						toTokenData := *fromTokenData
 						toTokenData.Account = data.ToAccount
 						eventComponentData.IncomingTransfers = &eventTransfersComponentData{

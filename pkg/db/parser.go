@@ -101,15 +101,19 @@ const (
 )
 
 type EventTransfer struct {
-	Direction   EventTransferDirection `json:"direction"`
-	Wallet      string                 `json:"wallet"`
-	Account     string                 `json:"account"`
-	Token       string                 `json:"token"`
-	Amount      decimal.Decimal        `json:"amount"`
-	TokenSource uint16                 `json:"tokenSource"`
-	Price       decimal.Decimal        `json:"price"`
-	Value       decimal.Decimal        `json:"value"`
-	Profit      decimal.Decimal        `json:"profit"`
+	Direction          EventTransferDirection `json:"direction"`
+	OwnedWallet        string                 `json:"wallet"`
+	OwnedAccount       string                 `json:"account"`
+	OtherWallet        string                 `json:"-"`
+	OtherAccount       string                 `json:"-"`
+	OwnedNativeBalance uint64                 `json:"-"`
+	OtherNativeBalance uint64                 `json:"-"`
+	Token              string                 `json:"token"`
+	Amount             decimal.Decimal        `json:"amount"`
+	TokenSource        uint16                 `json:"tokenSource"`
+	Price              decimal.Decimal        `json:"price"`
+	Value              decimal.Decimal        `json:"value"`
+	Profit             decimal.Decimal        `json:"profit"`
 }
 
 type EventSwapTransfer struct {

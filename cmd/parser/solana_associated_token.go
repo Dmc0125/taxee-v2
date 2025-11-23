@@ -62,44 +62,6 @@ func solAssociatedTokenIxRelatedAccounts(
 	}
 }
 
-func solPreprocessAssociatedTokenIx(ctx *solContext, ix *db.SolanaInstruction) {
-	ixType, ok := solAssociatedTokenIxFromData(ix.Data)
-	if !ok {
-		return
-	}
-
-	switch ixType {
-	case solAssociatedTokenIxCreateIdempotent:
-		if len(ix.InnerInstructions) == 0 {
-			return
-		}
-		fallthrough
-	case solAssociatedTokenIxCreate:
-		tokenAccount, owner, mint := ix.Accounts[1], ix.Accounts[2], ix.Accounts[3]
-
-		if !ctx.walletOwned(owner) {
-			return
-		}
-
-		// inner ixs
-		// https://github.com/solana-program/associated-token-account/blob/main/program/src/tools/account.rs#L19
-		//
-		// len 5 (account has enough lamports) -> transfer 2nd
-		// len 6 (account has lamports but not enough) -> transfer 2nd
-		// len 4 (account empty) -> transfer 2nd
-		transferIx := ix.InnerInstructions[1]
-		amount := binary.LittleEndian.Uint64(transferIx.Data[4:])
-		ctx.receiveSol(tokenAccount, amount)
-
-		data := solTokenAccountData{
-			Mint:  mint,
-			Owner: owner,
-		}
-		ctx.init(tokenAccount, true, &data)
-	case solAssociatedTokenIxRecoverNested:
-	}
-}
-
 func solProcessAssociatedTokenIx(
 	ctx *solContext,
 	ix *db.SolanaInstruction,
@@ -118,12 +80,12 @@ func solProcessAssociatedTokenIx(
 	}
 
 	var (
-		payer        = ix.Accounts[0]
-		tokenAccount = ix.Accounts[1]
-		owner        = ix.Accounts[2]
+		payerAddress        = ix.Accounts[0]
+		tokenAccountAddress = ix.Accounts[1]
+		ownerAddress        = ix.Accounts[2]
 	)
 
-	fromInternal, toInternal := ctx.walletOwned(payer), ctx.walletOwned(owner)
+	fromInternal, toInternal := ctx.walletOwned(payerAddress), ctx.walletOwned(ownerAddress)
 
 	if !fromInternal && !toInternal {
 		return
@@ -131,20 +93,65 @@ func solProcessAssociatedTokenIx(
 
 	transferIx := ix.InnerInstructions[1]
 	amount := binary.LittleEndian.Uint64(transferIx.Data[4:])
+	var toAccountBalance uint64
+
+	// NOTE: from is always native account, so only care about to
+	if toInternal {
+		tokenAccount := ctx.accounts[tokenAccountAddress]
+		if tokenAccount == nil {
+			tokenAccount = &solAccount{}
+		}
+		toAccountBalance = tokenAccount.balance
+		tokenAccount.balance += amount
+	}
 
 	event := solNewEvent(ctx)
 	event.UiAppName = "associated_token_program"
 	event.UiMethodName = "create"
 
+	// TODO: every system / SOL transfer needs to update the account balances
 	setEventTransfer(
 		event,
-		payer, owner,
-		payer, tokenAccount,
+		payerAddress, ownerAddress,
+		payerAddress, tokenAccountAddress,
 		fromInternal, toInternal,
+		0, toAccountBalance,
 		newDecimalFromRawAmount(amount, 9),
 		SOL_MINT_ADDRESS,
 		uint16(db.NetworkSolana),
 	)
-
 	*events = append(*events, event)
+
+	for i := len(*events) - 1; i >= 0; i -= 1 {
+		e := (*events)[i]
+
+		t, ok := e.Data.(*db.EventTransfer)
+		if !ok {
+			continue
+		}
+		transfer := *t
+
+		switch transfer.Direction {
+		case db.EventTransferIncoming:
+			// NOTE: incoming transfers do not exist, since that account
+			// is unknown
+		case db.EventTransferOutgoing:
+			if t.OtherAccount == tokenAccountAddress {
+				e.Type = db.EventTypeTransferInternal
+				e.Data = &db.EventTransferInternal{
+					FromWallet:  t.OwnedWallet,
+					ToWallet:    t.OtherWallet,
+					FromAccount: t.OwnedWallet,
+					ToAccount:   t.OtherAccount,
+					Token:       t.Token,
+					Amount:      t.Amount,
+					TokenSource: t.TokenSource,
+				}
+
+				if t.OtherNativeBalance == 0 {
+					break
+				}
+			}
+		}
+	}
 }

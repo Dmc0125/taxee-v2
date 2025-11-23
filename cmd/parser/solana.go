@@ -3,7 +3,6 @@ package parser
 import (
 	"errors"
 	"fmt"
-	"math"
 	"slices"
 	"taxee/pkg/assert"
 	"taxee/pkg/db"
@@ -33,44 +32,15 @@ func RelatedAccountsFromTx(
 	}
 }
 
-type accountLifetime struct {
-	MinSlot  uint64
-	MaxSlot  uint64
-	MinIxIdx uint32
-	MaxIxIdx uint32
-	// used in preparse to know if an account is still
-	// open inside one instruction
-	PreparseOpen bool
-	Owned        bool
-	Data         any
-	Balance      uint64
-}
-
-func newAccountLifetime(slot uint64, ixIdx uint32) accountLifetime {
-	return accountLifetime{
-		MinSlot:      slot,
-		MinIxIdx:     ixIdx,
-		MaxSlot:      math.MaxUint64,
-		MaxIxIdx:     math.MaxUint32,
-		PreparseOpen: true,
-	}
-}
-
-func (acc *accountLifetime) open(slot uint64, ixIdx uint32) bool {
-	if acc.MinSlot == slot && acc.MinIxIdx < ixIdx {
-		return true
-	}
-	if acc.MaxSlot == slot && acc.MaxIxIdx > ixIdx {
-		return true
-	}
-	return acc.MinSlot < slot && slot < acc.MaxSlot
+type solAccount struct {
+	balance uint64
+	data    any
 }
 
 type solContext struct {
 	wallets  []string
-	accounts map[string][]accountLifetime
-
-	errors []*db.ParserError
+	accounts map[string]*solAccount
+	errors   []*db.ParserError
 
 	// volatile for each tx/ix
 	txId           string
@@ -86,31 +56,30 @@ func (ctx *solContext) walletOwned(other string) bool {
 	return slices.Contains(ctx.wallets, other)
 }
 
-func (ctx *solContext) receiveSol(address string, amount uint64) {
-	lifetimes, ok := ctx.accounts[address]
-
+func solGetAccountData[T solAccountData](
+	ctx *solContext,
+	address string,
+	result *T,
+) bool {
+	account, ok := ctx.accounts[address]
 	if !ok {
-		lifetimes = make([]accountLifetime, 0)
+		// TODO: ERROR
+		return false
 	}
-	if len(lifetimes) == 0 {
-		acc := newAccountLifetime(ctx.slot, ctx.ixIdx)
-		acc.Balance = amount
-		lifetimes = append(lifetimes, acc)
-		ctx.accounts[address] = lifetimes
-		return
+	result, ok = account.data.(*T)
+	if !ok {
+		// TODO: ERROR
+		return false
 	}
+	return true
+}
 
-	account := &lifetimes[len(lifetimes)-1]
-
-	if account.PreparseOpen {
-		account.Balance += amount
-	} else {
-		acc := newAccountLifetime(ctx.slot, ctx.ixIdx)
-		acc.Balance = amount
-		lifetimes = append(lifetimes, acc)
+func solGetAccountBalance(ctx *solContext, address string) (uint64, bool) {
+	account, ok := ctx.accounts[address]
+	if !ok {
+		return 0, false
 	}
-
-	ctx.accounts[address] = lifetimes
+	return account.balance, true
 }
 
 func solNewErrMissingAccount(ctx *solContext, address string) *db.ParserError {
@@ -123,88 +92,6 @@ func solNewErrMissingAccount(ctx *solContext, address string) *db.ParserError {
 		},
 	}
 	return &e
-}
-
-func (ctx *solContext) init(address string, owned bool, data any) {
-	lifetimes, ok := ctx.accounts[address]
-	if !ok || len(lifetimes) == 0 {
-		err := solNewErrMissingAccount(ctx, address)
-		appendParserError(&ctx.errors, err)
-		return
-	}
-
-	acc := &lifetimes[len(lifetimes)-1]
-	if !acc.PreparseOpen {
-		err := solNewErrMissingAccount(ctx, address)
-		appendParserError(&ctx.errors, err)
-		return
-	}
-
-	acc.Data = data
-	acc.Owned = owned
-	ctx.accounts[address] = lifetimes
-}
-
-func (ctx *solContext) close(closedAddress, receiverAddress string) {
-	lifetimes, ok := ctx.accounts[closedAddress]
-	if !ok || len(lifetimes) == 0 {
-		err := solNewErrMissingAccount(ctx, closedAddress)
-		appendParserError(&ctx.errors, err)
-		return
-	}
-
-	acc := &lifetimes[len(lifetimes)-1]
-	if !acc.PreparseOpen {
-		err := solNewErrMissingAccount(ctx, closedAddress)
-		appendParserError(&ctx.errors, err)
-		return
-	}
-
-	closedBalance := acc.Balance
-
-	acc.PreparseOpen = false
-	acc.MaxSlot = ctx.slot
-	acc.MaxIxIdx = ctx.ixIdx
-	acc.Balance = 0
-	ctx.accounts[closedAddress] = lifetimes
-
-	ctx.receiveSol(receiverAddress, closedBalance)
-}
-
-// 0 -> not owned, 1 -> owned, 2 -> whatever
-func (ctx *solContext) find(
-	slot uint64,
-	ixIdx uint32,
-	address string,
-	owned uint8,
-) *accountLifetime {
-	isValid := func(lt *accountLifetime, o uint8) bool {
-		return o == 2 ||
-			(o == 1 && lt.Owned) ||
-			(o == 0 && !lt.Owned)
-	}
-
-	lifetimes, ok := ctx.accounts[address]
-	if !ok || len(lifetimes) == 0 {
-		return nil
-	}
-
-	for i := 0; i < len(lifetimes); i += 1 {
-		lt := &lifetimes[i]
-		if lt.open(slot, ixIdx) && isValid(lt, owned) {
-			return lt
-		}
-	}
-
-	return nil
-}
-
-func (ctx *solContext) findOwned(
-	slot uint64,
-	ixIdx uint32,
-	address string,
-) *accountLifetime {
-	return ctx.find(slot, ixIdx, address, 1)
 }
 
 func solNewEvent(ctx *solContext) *db.Event {
@@ -227,13 +114,12 @@ type solAccountData interface {
 	name() string
 }
 
-// TODO: instead of assert, create an error
 func solAccountDataMust[T solAccountData](
 	ctx *solContext,
-	account *accountLifetime,
+	account *solAccount,
 	address string,
 ) (*T, bool) {
-	data, ok := account.Data.(*T)
+	data, ok := account.data.(*T)
 	if !ok {
 		var temp T
 		err := db.ParserError{
@@ -267,105 +153,6 @@ func solAnchorDisc(data []byte) (disc [8]byte, ok bool) {
 	copy(disc[:], data[:8])
 	ok = true
 	return
-}
-
-func solPreprocessIx(ctx *solContext, ix *db.SolanaInstruction) {
-	switch ix.ProgramAddress {
-	case SOL_SYSTEM_PROGRAM_ADDRESS:
-		solPreprocessSystemIx(ctx, ix)
-	case SOL_TOKEN_PROGRAM_ADDRESS:
-		solPreprocessTokenIx(ctx, ix)
-	case SOL_ASSOCIATED_TOKEN_PROGRAM_ADDRESS:
-		solPreprocessAssociatedTokenIx(ctx, ix)
-	case SOL_SQUADS_V4_PROGRAM_ADDRESS:
-		solPreprocessSquadsV4Ix(ctx, ix)
-	case SOL_METEORA_FARMS_PROGRAM_ADDRESS:
-		solPreprocessMeteoraFarmsIx(ctx, ix)
-	}
-}
-
-func solPreprocessTx(
-	ctx *solContext,
-	ixs []*db.SolanaInstruction,
-) {
-	for ixIdx, ix := range ixs {
-		ctx.ixIdx = uint32(ixIdx)
-		solPreprocessIx(ctx, ix)
-	}
-
-	// NOTE: can only validate native balances, since we only keep track of those
-nativeBalancesLoop:
-	for address, nativeBalance := range ctx.nativeBalances {
-		accountLifetimes, accountExists := ctx.accounts[address]
-		tokens, isTokenAccount := ctx.tokenBalances[address]
-		if isTokenAccount && ctx.walletOwned(tokens.Owner) {
-			// NOTE: account has to exist if it is owned and it is opened
-			// token account
-			if !accountExists && nativeBalance.Post > 0 {
-				err := solNewErrMissingAccount(ctx, address)
-				appendParserError(&ctx.errors, err)
-				continue
-			}
-		}
-
-		// NOTE: accounts can be created/closed multiple times during single tx
-		// so it's only possible to validate the balance of the last one that
-		// is opened
-		for i := len(accountLifetimes) - 1; i >= 0; i -= 1 {
-			lt := accountLifetimes[i]
-			if lt.PreparseOpen && lt.Owned {
-				if nativeBalance.Post != lt.Balance {
-					errData := db.ParserErrorAccountBalanceMismatch{
-						Wallet:         address,
-						AccountAddress: address,
-						Token:          SOL_MINT_ADDRESS,
-						External:       newDecimalFromRawAmount(nativeBalance.Post, 9),
-						Local:          newDecimalFromRawAmount(lt.Balance, 9),
-					}
-					if isTokenAccount {
-						errData.Wallet = tokens.Owner
-					}
-					err := &db.ParserError{
-						TxId:  ctx.txId,
-						IxIdx: int32(ctx.ixIdx),
-						Type:  db.ParserErrorTypeAccountBalanceMismatch,
-						Data:  &errData,
-					}
-					appendParserError(&ctx.errors, err)
-				}
-
-				if isTokenAccount {
-					data, ok := solAccountDataMust[solTokenAccountData](ctx, &lt, address)
-					if !ok {
-						continue nativeBalancesLoop
-					}
-
-					found := false
-					for _, t := range tokens.Tokens {
-						if t.Token == data.Mint {
-							found = true
-							break
-						}
-					}
-					if !found {
-						err := &db.ParserError{
-							TxId:  ctx.txId,
-							IxIdx: int32(ctx.ixIdx),
-							Type:  db.ParserErrorTypeAccountDataMismatch,
-							Data: &db.ParserErrorAccountDataMismatch{
-								AccountAddress: address,
-								Message:        "Invalid token account mint",
-							},
-						}
-						appendParserError(&ctx.errors, err)
-						continue nativeBalancesLoop
-					}
-				}
-
-				continue nativeBalancesLoop
-			}
-		}
-	}
 }
 
 type solInnerIxIterator struct {
@@ -474,7 +261,8 @@ func solParseTransfers(
 	// 3. token burn - outgoing
 
 	getTokenAccount := func(address, mint string) (validMint, owner string, ok bool) {
-		account := ctx.findOwned(ctx.slot, ctx.ixIdx, address)
+		// TOOD:
+		account := ctx.accounts[address]
 		if account != nil {
 			tokenAccountData, ok1 := solAccountDataMust[solTokenAccountData](
 				ctx, account, address,
@@ -597,18 +385,18 @@ func solProcessIx(
 	case SOL_SYSTEM_PROGRAM_ADDRESS:
 		solProcessSystemIx(ctx, ix, events)
 	case SOL_TOKEN_PROGRAM_ADDRESS:
-		solProcessTokenIx(ctx, ix, events)
+		// solProcessTokenIx(ctx, ix, events)
 	case SOL_ASSOCIATED_TOKEN_PROGRAM_ADDRESS:
 		solProcessAssociatedTokenIx(ctx, ix, events)
 	case SOL_SQUADS_V4_PROGRAM_ADDRESS:
-		solProcessSquadsV4Ix(ctx, ix, events)
+	// 	solProcessSquadsV4Ix(ctx, ix, events)
 	case SOL_METEORA_POOLS_PROGRAM_ADDRESS:
-		solProcessMeteoraPoolsIx(ctx, ix, events)
+		// solProcessMeteoraPoolsIx(ctx, ix, events)
 	case SOL_JUP_V6_PROGRAM_ADDRESS:
-		solProcessJupV6(ctx, ix, events)
+		// solProcessJupV6(ctx, ix, events)
 	case SOL_METEORA_FARMS_PROGRAM_ADDRESS:
-		solProcessMeteoraFarmsIx(ctx, ix, events)
+		// solProcessMeteoraFarmsIx(ctx, ix, events)
 	case SOL_MERCURIAL_PROGRAM_ADDRESS:
-		solProcessMercurialIx(ctx, ix, events)
+		// solProcessMercurialIx(ctx, ix, events)
 	}
 }

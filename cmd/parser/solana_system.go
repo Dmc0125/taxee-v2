@@ -70,19 +70,19 @@ func solParseSystemIxSolTransfer(
 	return
 }
 
-func solPreprocessSystemIx(ctx *solContext, ix *db.SolanaInstruction) {
-	ixType, _, ok := solSystemIxFromData(ix.Data)
-	if !ok {
-		return
-	}
-
-	_, to, amount, ok := solParseSystemIxSolTransfer(ixType, ix.Accounts, ix.Data)
-	if !ok {
-		return
-	}
-
-	ctx.receiveSol(to, amount)
-}
+// func solPreprocessSystemIx(ctx *solContext, ix *db.SolanaInstruction) {
+// 	ixType, _, ok := solSystemIxFromData(ix.Data)
+// 	if !ok {
+// 		return
+// 	}
+//
+// 	_, to, amount, ok := solParseSystemIxSolTransfer(ixType, ix.Accounts, ix.Data)
+// 	if !ok {
+// 		return
+// 	}
+//
+// 	ctx.receiveSol(to, amount)
+// }
 
 func solProcessSystemIx(
 	ctx *solContext,
@@ -100,9 +100,21 @@ func solProcessSystemIx(
 	}
 
 	fromInternal := ctx.walletOwned(from)
-	toInternal := ctx.walletOwned(to) ||
-		ctx.findOwned(ctx.slot, ctx.ixIdx, to) != nil
 
+	// NOTE: if toAccount is not a wallet, increment it's balance
+	toInternalWallet := ctx.walletOwned(to)
+	toAccount, toInternalAccount := ctx.accounts[to]
+	var toAccountBalance uint64
+
+	if !toInternalWallet {
+		if toAccount == nil {
+			toAccount = &solAccount{}
+		}
+		toAccountBalance = toAccountBalance
+		toAccount.balance += amount
+	}
+
+	toInternal := fromInternal && (toInternalWallet || toInternalAccount)
 	if !fromInternal && !toInternal {
 		return
 	}
@@ -116,6 +128,7 @@ func solProcessSystemIx(
 		from, to,
 		from, to,
 		fromInternal, toInternal,
+		0, toAccountBalance,
 		newDecimalFromRawAmount(amount, 9),
 		SOL_MINT_ADDRESS,
 		uint16(db.NetworkSolana),

@@ -40,12 +40,12 @@ func setEventTransfer(
 	fromWallet, toWallet,
 	from, to string,
 	fromInternal, toInternal bool,
+	fromNativeBalance, toNativeBalance uint64,
 	amount decimal.Decimal,
 	token string,
 	tokenSource uint16,
 ) {
-	switch {
-	case fromInternal && toInternal:
+	if fromInternal && toInternal {
 		event.Type = db.EventTypeTransferInternal
 		event.Data = &db.EventTransferInternal{
 			FromWallet:  fromWallet,
@@ -56,27 +56,33 @@ func setEventTransfer(
 			Amount:      amount,
 			TokenSource: tokenSource,
 		}
-	case fromInternal:
-		event.Type = db.EventTypeTransfer
-		event.Data = &db.EventTransfer{
-			Direction:   db.EventTransferOutgoing,
-			Wallet:      fromWallet,
-			Account:     from,
-			Token:       token,
-			Amount:      amount,
-			TokenSource: tokenSource,
-		}
-	case toInternal:
-		event.Type = db.EventTypeTransfer
-		event.Data = &db.EventTransfer{
-			Direction:   db.EventTransferIncoming,
-			Wallet:      toWallet,
-			Account:     to,
-			Token:       token,
-			Amount:      amount,
-			TokenSource: tokenSource,
-		}
 	}
+
+	transfer := db.EventTransfer{
+		Token:       token,
+		Amount:      amount,
+		TokenSource: tokenSource,
+	}
+
+	switch {
+	case fromInternal:
+		transfer.Direction = db.EventTransferOutgoing
+		transfer.OwnedWallet, transfer.OwnedAccount = fromWallet, from
+		transfer.OtherWallet, transfer.OtherAccount = toWallet, to
+		transfer.OwnedNativeBalance = fromNativeBalance
+		transfer.OtherNativeBalance = toNativeBalance
+	case toInternal:
+		transfer.Direction = db.EventTransferIncoming
+		transfer.OwnedWallet, transfer.OwnedAccount = toWallet, to
+		transfer.OtherWallet, transfer.OtherAccount = fromWallet, from
+		transfer.OwnedNativeBalance = toNativeBalance
+		transfer.OtherNativeBalance = fromNativeBalance
+	default:
+		return
+	}
+
+	event.Type = db.EventTypeTransfer
+	event.Data = &transfer
 }
 
 func errsEq(e1, e2 any) (bool, bool) {
@@ -607,7 +613,7 @@ func Parse(
 
 	logger.Info("Init parser state")
 	solCtx := solContext{
-		accounts: make(map[string][]accountLifetime),
+		accounts: make(map[string]*solAccount),
 		errors:   make([]*db.ParserError, 0),
 	}
 	evmContexts := make(map[db.Network]*evmContext)
@@ -654,13 +660,13 @@ func Parse(
 
 		switch txData := tx.Data.(type) {
 		case *db.SolanaTransactionData:
-			solCtx.txId = tx.Id
-			solCtx.timestamp = tx.Timestamp
-			solCtx.slot = txData.Slot
-			solCtx.nativeBalances = txData.NativeBalances
-			solCtx.tokenBalances = txData.TokenBalances
-
-			solPreprocessTx(&solCtx, txData.Instructions)
+			// solCtx.txId = tx.Id
+			// solCtx.timestamp = tx.Timestamp
+			// solCtx.slot = txData.Slot
+			// solCtx.nativeBalances = txData.NativeBalances
+			// solCtx.tokenBalances = txData.TokenBalances
+			//
+			// solPreprocessTx(&solCtx, txData.Instructions)
 		case *db.EvmTransactionData:
 			addresses, ok := evmAddresses[tx.Network]
 			if !ok {
@@ -740,9 +746,9 @@ func Parse(
 					UiMethodName: "fee",
 					Type:         db.EventTypeTransfer,
 					Data: &db.EventTransfer{
-						Direction: db.EventTransferOutgoing,
-						Wallet:    txData.Signer,
-						Account:   txData.Signer,
+						Direction:    db.EventTransferOutgoing,
+						OwnedWallet:  txData.Signer,
+						OwnedAccount: txData.Signer,
 						// not using coingecko solana because in inventory we are not
 						// differentiating between wrapped and unwrapped sol
 						Token:       SOL_MINT_ADDRESS,
@@ -777,12 +783,12 @@ func Parse(
 					UiMethodName: "fee",
 					Type:         db.EventTypeTransfer,
 					Data: &db.EventTransfer{
-						Direction:   db.EventTransferOutgoing,
-						Wallet:      txData.From,
-						Account:     txData.From,
-						Token:       "ethereum",
-						Amount:      txData.Fee,
-						TokenSource: tokenSourceCoingecko,
+						Direction:    db.EventTransferOutgoing,
+						OwnedWallet:  txData.From,
+						OwnedAccount: txData.From,
+						Token:        "ethereum",
+						Amount:       txData.Fee,
+						TokenSource:  tokenSourceCoingecko,
 					},
 				}
 				eventsGroup = append(eventsGroup, event)

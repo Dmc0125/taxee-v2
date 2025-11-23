@@ -50,27 +50,28 @@ func solProcessMeteoraPoolsIx(
 
 var solMeteoraFarmsIxInitAccount = [8]uint8{108, 227, 130, 130, 252, 109, 75, 218}
 
-func solPreprocessMeteoraFarmsIx(ctx *solContext, ix *db.SolanaInstruction) {
-	disc, ok := solAnchorDisc(ix.Data)
-	if !ok {
-		return
-	}
-
-	switch disc {
-	case solMeteoraFarmsIxInitAccount:
-		owner := ix.Accounts[2]
-		if !ctx.walletOwned(owner) {
-			return
-		}
-
-		innerIxIter := solInnerIxIterator{innerIxs: ix.InnerInstructions}
-		_, to, amount, err := solAnchorInitAccountValidate(&innerIxIter)
-		assert.NoErr(err, "")
-
-		ctx.receiveSol(to, amount)
-		ctx.init(to, true, nil)
-	}
-}
+//
+// func solPreprocessMeteoraFarmsIx(ctx *solContext, ix *db.SolanaInstruction) {
+// 	disc, ok := solAnchorDisc(ix.Data)
+// 	if !ok {
+// 		return
+// 	}
+//
+// 	switch disc {
+// 	case solMeteoraFarmsIxInitAccount:
+// 		owner := ix.Accounts[2]
+// 		if !ctx.walletOwned(owner) {
+// 			return
+// 		}
+//
+// 		innerIxIter := solInnerIxIterator{innerIxs: ix.InnerInstructions}
+// 		_, to, amount, err := solAnchorInitAccountValidate(&innerIxIter)
+// 		assert.NoErr(err, "")
+//
+// 		ctx.receiveSol(to, amount)
+// 		ctx.init(to, true, nil)
+// 	}
+// }
 
 func solMeteoraFarmsNewStakingEvent(
 	ctx *solContext,
@@ -80,7 +81,8 @@ func solMeteoraFarmsNewStakingEvent(
 	tokenAccountAddress, stakeAccountAddress string,
 	stake bool,
 ) {
-	tokenAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, tokenAccountAddress)
+	// tokenAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, tokenAccountAddress)
+	tokenAccount := ctx.accounts[tokenAccountAddress]
 	if tokenAccount == nil {
 		return
 	}
@@ -91,7 +93,8 @@ func solMeteoraFarmsNewStakingEvent(
 		return
 	}
 
-	stakeAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, stakeAccountAddress)
+	// stakeAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, stakeAccountAddress)
+	stakeAccount := ctx.accounts[stakeAccountAddress]
 	if stakeAccount == nil {
 		err := solNewTxError(ctx)
 		err.Type = db.ParserErrorTypeMissingAccount
@@ -188,7 +191,8 @@ func solProcessMeteoraFarmsIx(
 			transferIx.Data,
 		)
 
-		toAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, to)
+		// toAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, to)
+		toAccount := ctx.accounts[to]
 		if toAccount == nil {
 			return
 		}
@@ -206,12 +210,12 @@ func solProcessMeteoraFarmsIx(
 		event.UiMethodName = "claim"
 		event.Type = db.EventTypeTransfer
 		event.Data = &db.EventTransfer{
-			Direction:   db.EventTransferIncoming,
-			Wallet:      toAccountData.Owner,
-			Account:     to,
-			Token:       toAccountData.Mint,
-			Amount:      newDecimalFromRawAmount(amount, decimals),
-			TokenSource: uint16(db.NetworkSolana),
+			Direction:    db.EventTransferIncoming,
+			OwnedWallet:  toAccountData.Owner,
+			OwnedAccount: to,
+			Token:        toAccountData.Mint,
+			Amount:       newDecimalFromRawAmount(amount, decimals),
+			TokenSource:  uint16(db.NetworkSolana),
 		}
 
 		*events = append(*events, event)
