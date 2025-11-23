@@ -252,7 +252,5 @@ func main() {
 		etherscanClient := evm.NewClient(alchemyReqTimer)
 
 		parser.Parse(context.Background(), pool, etherscanClient, 1, true)
-	case "parse-server":
-		// long running server
 	}
 }

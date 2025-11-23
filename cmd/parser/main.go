@@ -7,12 +7,9 @@ import (
 	"fmt"
 	"math"
 	"math/big"
-	"net/http"
 	_ "net/http/pprof"
-	"os"
 	"slices"
 	"strconv"
-	"sync"
 	"taxee/cmd/fetcher/evm"
 	"taxee/pkg/assert"
 	"taxee/pkg/coingecko"
@@ -581,19 +578,6 @@ func Parse(
 	userAccountId int32,
 	fresh bool,
 ) {
-	if os.Getenv("MEM_PROF") == "1" {
-		var wg sync.WaitGroup
-		wg.Add(1)
-		defer wg.Wait()
-
-		go func() {
-			defer wg.Done()
-			fmt.Println("Pprof available at: http://localhost:6060/debug/pprof")
-			err := http.ListenAndServe("localhost:6060", nil)
-			assert.NoErr(err, "")
-		}()
-	}
-
 	logger.Info("Update coingecko tokens")
 	fetchCoingeckoTokens(ctx, pool)
 
