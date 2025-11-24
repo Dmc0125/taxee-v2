@@ -143,6 +143,27 @@ func toTitle(s string) string {
 	return t.String()
 }
 
+// usage:
+// {{ tern <condition> <value if true> <value if false> }}
+//
+// can be nested
+// {{ tern <condition> <value if true> <condition> <value if true> <value if false> }}
+func tern(pairs ...any) any {
+	assert.True(len(pairs) >= 3, "invalid ternary")
+	cond, ok := pairs[0].(bool)
+	assert.True(ok, "expected bool")
+	if cond {
+		return pairs[1]
+	}
+
+	falseVal := pairs[2]
+	if _, ok := falseVal.(bool); ok {
+		return tern(pairs[2:]...)
+	}
+
+	return falseVal
+}
+
 func main() {
 	appEnv := os.Getenv("APP_ENV")
 	prod := true
@@ -168,19 +189,7 @@ func main() {
 		},
 		"shorten": shorten,
 		"toTitle": toTitle,
-		"tern": func(pairs ...any) any {
-			assert.True(len(pairs)%2 != 0, "invalid pairs len")
-
-			for i := 0; i < len(pairs)-1; i += 2 {
-				cond, ok := pairs[i].(bool)
-				assert.True(ok, "expected bool")
-				if cond {
-					return pairs[i+1]
-				}
-			}
-
-			return pairs[len(pairs)-1]
-		},
+		"tern":    tern,
 	}
 	var templates *template.Template = template.New("root").Funcs(templateFuncs)
 	loadTemplate(templates, pageLayoutComponent)
@@ -200,6 +209,10 @@ func main() {
 	http.HandleFunc(
 		"/transactions",
 		transactionsHandler(context.Background(), pool, templates),
+	)
+	http.HandleFunc(
+		"/sync_request",
+		syncRequestHandler(pool, templates),
 	)
 
 	fmt.Println("Listening at: http://localhost:8888")

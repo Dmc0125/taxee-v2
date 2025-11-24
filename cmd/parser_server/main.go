@@ -34,6 +34,47 @@ import (
 //
 // at one point there can only be **one** request from a single user
 
+// getSyncRequestQuery
+//
+//	select user_account_id, type from
+//		sync_request
+//	where
+//		status = 0 and (type != $1)
+//	order by
+//		timestamp asc
+//	limit
+//		1
+const getSyncRequestQuery string = `
+	select id, user_account_id, type from 
+		sync_request
+	where
+		status = 0
+	order by
+		timestamp asc
+	limit
+		1
+`
+
+// updateSyncRequestStatusQuery
+//
+//	update sync_request set
+//		status = $2
+//	where
+//		id = $1
+const updateSyncRequestStatusQuery string = `
+	update sync_request set
+		status = $2
+	where
+		id = $1
+`
+
+// deleteSyncRequestQuery
+//
+//	delete from sync_request where id = $1
+const deleteSyncRequestQuery string = `
+	delete from sync_request where id = $1
+`
+
 func main() {
 	appEnv := os.Getenv("APP_ENV")
 	if appEnv != "prod" {
@@ -57,76 +98,77 @@ func main() {
 
 	userAccountId := int32(-1)
 	var ctxCancel context.CancelFunc
+	_ = ctxCancel
 
 	ticker := time.NewTicker(1 * time.Second)
 	for {
 		<-ticker.C
 
 		var (
-			timestamp   time.Time
+			requestId   int32
 			requestType uint8
 		)
 
 		switch {
 		// idle state
-		case userAccountId < -1:
-			const getSyncRequestQuery = `
-				select 
-					timestamp,
-					user_account_id, 
-					type
-				from
-					sync_request
-				where
-					status = 0 and (type = 0 or type = 1)
-				order by
-					timestamp asc
-				limit
-					1
-			`
+		case userAccountId < 0:
 			row := pool.QueryRow(context.Background(), getSyncRequestQuery)
-			err := row.Scan(&timestamp, &userAccountId, &requestType)
+			err := row.Scan(&requestId, &userAccountId, &requestType)
 			if errors.Is(err, pgx.ErrNoRows) {
 				logger.Info("queue empty")
-				userAccountId = -1
 				continue
 			}
 			assert.NoErr(err, "unable to query sync request")
 
+			// TODO: Set based on operation
 			switch requestType {
 			case 0:
 				// fetch + parse
 			case 1:
+				_, err = pool.Exec(
+					context.Background(),
+					updateSyncRequestStatusQuery,
+					requestId, db.SyncRequestProcessing,
+				)
+				assert.NoErr(err, "unable to update sync request")
+
 				// parse
 				var ctx context.Context
 				ctx, ctxCancel = context.WithCancel(context.Background())
 
 				logger.Info("received parse request for %d", userAccountId)
 				parser.Parse(ctx, pool, evmClient, userAccountId, true)
+
+				_, err = pool.Exec(context.Background(), deleteSyncRequestQuery, requestId)
+				assert.NoErr(err, "unable to delete sync request")
+
+				userAccountId = -1
 			}
 		// processing
 		default:
-			const getSyncRequestQuery = `
-				select 1 from sync_request where
-					status = 0 and 
-					type = 2 and
-					user_account_id = $1
-				limit 
-					1
-			`
-			row := pool.QueryRow(
-				context.Background(),
-				getSyncRequestQuery,
-				userAccountId,
-			)
-			var _x int
-			err := row.Scan(&_x)
-			if errors.Is(err, pgx.ErrNoRows) {
-				continue
-			}
-
-			ctxCancel()
-			userAccountId = -1
+			// const getSyncRequestQuery = `
+			// 	delete from sync_request where id = (
+			// 		select id from sync_request where
+			// 			status = 0 and
+			// 			type = 2 and
+			// 			user_account_id = $1
+			// 		limit
+			// 			1
+			// 	) returning id
+			// `
+			// row := pool.QueryRow(
+			// 	context.Background(),
+			// 	getSyncRequestQuery,
+			// 	userAccountId,
+			// )
+			// var _x int
+			// err := row.Scan(&_x)
+			// if errors.Is(err, pgx.ErrNoRows) {
+			// 	continue
+			// }
+			//
+			// ctxCancel()
+			// userAccountId = -1
 		}
 	}
 }

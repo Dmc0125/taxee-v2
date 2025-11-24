@@ -3,6 +3,7 @@ package db
 import (
 	"encoding/json"
 	"fmt"
+	"taxee/pkg/assert"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -174,4 +175,33 @@ func (event *Event) UnmarshalData(src []byte) error {
 
 	event.Data = data
 	return nil
+}
+
+type SyncRequestType uint8
+type SyncRequestStatus uint8
+
+const (
+	// fetch + parse txs and events
+	SyncRequestFetch SyncRequestType = iota
+	// parse txs and events
+	SyncRequestParseTxs
+	// parse events
+	SyncRequestParseEvents
+)
+
+const (
+	SyncRequestQueued SyncRequestStatus = iota
+	SyncRequestProcessing
+)
+
+func (s *SyncRequestStatus) String() string {
+	switch *s {
+	case SyncRequestQueued:
+		return "In queue"
+	case SyncRequestProcessing:
+		return "Processing"
+	default:
+		assert.True(false, "invalid status: %d", *s)
+		return ""
+	}
 }

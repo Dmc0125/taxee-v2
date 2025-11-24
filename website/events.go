@@ -53,9 +53,16 @@ type eventTableRowComponentData struct {
 	ProcessErrors    eventErrorGroupComponentData
 }
 
+type eventsProgressIndicatorComponentData struct {
+	Done      bool
+	RequestId int32
+	Status    string
+}
+
 type eventsPageData struct {
-	NextUrl string
-	Rows    []eventTableRowComponentData
+	ProgressIndicator eventsProgressIndicatorComponentData
+	NextUrl           string
+	Rows              []eventTableRowComponentData
 }
 
 type eventComponentData struct {
@@ -370,6 +377,35 @@ func eventsHandler(
 		if modeQueryVal == "dev" {
 			mode.value = modeQueryVal
 			mode.set = true
+		}
+
+		/////////////
+		// get sync status
+		const getSyncRequestStatus = `
+			select status, id from sync_request where user_account_id = $1
+			order by
+				timestamp desc
+			limit
+				1
+		`
+		syncRequestRow := pool.QueryRow(ctx, getSyncRequestStatus, userAccountId)
+
+		progressIndicator := eventsProgressIndicatorComponentData{
+			Done: true,
+		}
+		var syncRequestStatus db.SyncRequestStatus
+		if err := syncRequestRow.Scan(
+			&syncRequestStatus,
+			&progressIndicator.RequestId,
+		); err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				renderError(w, 500, "unable to query sync_request: %s", err)
+				return
+			}
+		} else {
+			progressIndicator.Done = false
+			progressIndicator.Status = syncRequestStatus.String()
+
 		}
 
 		/////////////
@@ -900,8 +936,9 @@ func eventsHandler(
 		}
 
 		eventsPageData := eventsPageData{
-			NextUrl: nextUrl.String(),
-			Rows:    eventsTableRows,
+			ProgressIndicator: progressIndicator,
+			NextUrl:           nextUrl.String(),
+			Rows:              eventsTableRows,
 		}
 
 		eventsPageContent := executeTemplateMust(
