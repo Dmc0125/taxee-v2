@@ -1,7 +1,6 @@
-
 /**
-    * @param {any} val
-    * @param {string} msg
+* @param {any} val
+* @param {string} msg
 */
 function assertDefined(val, msg) {
     if (val == null) {
@@ -9,9 +8,12 @@ function assertDefined(val, msg) {
     }
 }
 
+///////////////////
+// Refetch, reparse, ... and progress indicator
+
 /**
-    * @param {string} encoded
-    */
+* @param {string} encoded
+*/
 function decodeHex(encoded) {
     let str = ""
     for (let i = 0; i < encoded.length; i += 2) {
@@ -22,9 +24,9 @@ function decodeHex(encoded) {
 }
 
 /**
-    * @param {string} requestId
-    * @param {(html: string, done: boolean) => void} updateFn
-    */
+* @param {string} requestId
+* @param {(html: string, done: boolean) => void} updateFn
+*/
 function listenForUpdates(requestId, updateFn) {
     try {
         const requestConn = new EventSource(`/sync_request?id=${requestId}`)
@@ -52,9 +54,9 @@ function listenForUpdates(requestId, updateFn) {
 
 
 /**
-    * @param {string} requestType
-    * @returns {Promise<{ rid: string; html: string } | null>}
-    */
+* @param {string} requestType
+* @returns {Promise<{ rid: string; html: string } | null>}
+*/
 async function handleClickParse(requestType) {
     try {
         const res = await fetch(
@@ -81,10 +83,10 @@ async function handleClickParse(requestType) {
 }
 
 /**
-    * @param {Element} el
-    * @param {string} html
-    * @returns {Element}
-    */
+* @param {Element} el
+* @param {string} html
+* @returns {Element}
+*/
 function updateEl(el, html) {
     el.outerHTML = html
     return document.querySelector(`#${el.id}`)
@@ -128,7 +130,58 @@ btnParseTxsEl.addEventListener("click", async function() {
         progressIndicatorEl = updateEl(progressIndicatorEl, html)
         if (done) {
             // TODO: set btn as clickable
+            fetch(`/events${window.location.search}&partial=true`)
+                .then(function(tableResult) {
+                    return tableResult.text()
+                })
+                .then(function(tableHtml) {
+                    document.querySelector("#events-table").innerHTML = tableHtml
+                    console.log("table updated")
+                })
+
             parsing = false
         }
     })
 })
+
+
+////////////////
+// sticky table nav
+// window.addEventListener("resize", function() {
+//
+// })
+//
+
+////////////////
+// Sticky header
+
+/** @type {Element} */
+let tableHeaderEl
+/** @type {DOMRect} */
+let tableHeaderRect
+/** @type {number} */
+let tableHeaderOffsetFromTop
+
+// TODO: Browser for some reason does not keep the scroll position on reload
+// if the style was applied when clicking reload
+function makeEventsTableHeaderFloat() {
+    const offset = window.scrollY - tableHeaderOffsetFromTop
+    if (offset > 0) {
+        tableHeaderEl.setAttribute("style", `top: ${offset}px`)
+    } else if (offset < 0) {
+        tableHeaderEl.setAttribute("style", "top: 0px")
+    }
+}
+
+document.addEventListener("DOMContentLoaded", function() {
+    tableHeaderEl = document.querySelector("#table-header")
+    const tableHeaderRect = tableHeaderEl.getBoundingClientRect()
+    tableHeaderOffsetFromTop = (tableHeaderRect.top + window.scrollY) - 8
+
+    makeEventsTableHeaderFloat()
+})
+
+document.addEventListener("scroll", function() {
+    makeEventsTableHeaderFloat()
+})
+

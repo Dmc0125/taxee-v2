@@ -1,6 +1,6 @@
 {{ define "events_page" }}
 <script defer src="/static/js/events.js"></script>
-<div class="w-fullrelative">
+<div class="w-full relative">
     <div class="
         w-[3rem] min-h-screen fixed py-10 px-2 flex flex-col items-center 
         border-r border-gray-200 z-50
@@ -63,7 +63,7 @@
     <div class="w-[calc(100%-3rem)] pt-10 ml-[3rem]">
         <header class="w-full px-4 flex items-center justify-between text-gray-800">
             <h1 class="font-semibold text-2xl">Events</h1>
-            <div class="flex gap-8">
+            <div class="flex items-center gap-8">
                 {{ template "events_progress_indicator" .ProgressIndicator }}
                 <a href="{{ .NextUrl }}" class="text-gray-800 link">
                     Next
@@ -71,13 +71,24 @@
             </div>
         </header>
 
-        <div class="w-full px-4 mt-10 overflow-x-auto">
-            <ul class="w-fit min-w-full flex flex-col gap-y-4 relative">
+        <!-- TODO -->
+        <div id="table-nav-floating" class="
+            py-2 px-4 fixed bottom-2 right-4 flex items-center gap-8
+            bg-white border border-gray-200 rounded-lg z-1000 hidden
+        ">
+            {{ template "events_progress_indicator" .ProgressIndicator }}
+            <a href="{{ .NextUrl }}" class="text-gray-800 link">
+                Next
+            </a>
+        </div>
+
+        <div id="table-container" class="w-full px-4 mt-10 overflow-x-auto">
+            <div class="w-fit min-w-full relative">
                 <!-- header -->
-                <!-- TODO: sticky -->
-                <li class="
-                    w-full py-2 pl-4 top-2
-                    grid grid-cols-[150px_1fr]
+                <div id="table-header-placeholder" class="w-full h-10"></div>
+                <div id="table-header" class="
+                    w-full h-10 pl-4 grid grid-cols-[150px_1fr] items-center
+                    absolute top-0 z-1000
                     bg-gray-50 border border-gray-200 rounded-lg text-gray-800
                 ">
                     <span>Date</span>
@@ -93,63 +104,72 @@
                         </div>
                         <span>Profit</span>
                     </div>
-                </li>
+                </div>
 
-                {{ range .Rows }}
-                    {{ if eq .Type 0 }}
-                        <li class="w-full py-1 px-4 bg-crossed rounded-lg">
-                            <span class="text-sm text-gray-800">{{ formatDate .Timestamp }}</span>
-                        </li>
-                    {{ else }}
-                        <!-- Timestamp + explorer -->
-                        <li class="w-full pl-4 grid grid-cols-[150px_1fr] gap-y-4">
-                            <div class="flex flex-col col-[1/2]">
-                                <a
-                                    href="{{ .ExplorerUrl }}"
-                                    target="_blank"
-                                    class="text-gray-800 decoration-gray-400 link"
-                                >{{ .TxId }}</a>
-                                <span class="text-sm text-gray-700">{{ formatTime .Timestamp }}</span>
-                            </div>
-
-                            <!-- event data -->
-                            
-                            {{ if .Events }}
-                                {{ range .Events }}
-                                    <div class="
-                                        w-full col-[2/-1] border border-gray-200 rounded-lg
-                                    ">
-                                        {{ template "event_component" . }}
-                                    </div>
-                                {{ end }}
-                            {{ else }}
-                                <div class="
-                                    w-full col-[2/-1] min-h-14 relative
-                                    flex items-center justify-center 
-                                    border border-gray-200 rounded-lg text-gray-600
-                                ">
-                                    {{ template "events_network_component" .NetworkImgUrl }}
-
-                                    This transaction does not have any events	
-                                </div>
-                            {{ end }}
-
-                            {{ if .HasErrors }}
-                                <div class="
-                                    w-full col-[2/-1] grid grid-cols-[repeat(2,1fr)]
-                                    border border-gray-200 rounded-lg 
-                                ">
-                                    {{ template "event_error_group_component" .PreprocessErrors }}
-                                    {{ template "event_error_group_component" .ProcessErrors }}
-                                </div>
-                            {{ end }}
-                        </li>
-                    {{ end }}
-                {{ end }}
-            </ul>
+                <ul 
+                    id="events-table"
+                    class="w-fit min-w-full mt-4 flex flex-col gap-y-4"
+                >
+                    {{ template "events_rows" .Rows }}
+                </ul>
+            </div>
         </div>
     </div>
 </div>
+{{ end }}
+
+{{ define "events_rows" }}
+{{ range . }}
+    {{ if eq .Type 0 }}
+        <li class="w-full py-1 px-4 bg-crossed rounded-lg">
+            <span class="text-sm text-gray-800">{{ formatDate .Timestamp }}</span>
+        </li>
+    {{ else }}
+        <!-- Timestamp + explorer -->
+        <li class="w-full pl-4 grid grid-cols-[150px_1fr] gap-y-4">
+            <div class="flex flex-col col-[1/2]">
+                <a
+                    href="{{ .ExplorerUrl }}"
+                    target="_blank"
+                    class="text-gray-800 decoration-gray-400 link"
+                >{{ .TxId }}</a>
+                <span class="text-sm text-gray-700">{{ formatTime .Timestamp }}</span>
+            </div>
+
+            <!-- event data -->
+            
+            {{ if .Events }}
+                {{ range .Events }}
+                    <div class="
+                        w-full col-[2/-1] border border-gray-200 rounded-lg
+                    ">
+                        {{ template "event_component" . }}
+                    </div>
+                {{ end }}
+            {{ else }}
+                <div class="
+                    w-full col-[2/-1] min-h-14 relative
+                    flex items-center justify-center 
+                    border border-gray-200 rounded-lg text-gray-600
+                ">
+                    {{ template "events_network_component" .NetworkImgUrl }}
+
+                    This transaction does not have any events	
+                </div>
+            {{ end }}
+
+            {{ if .HasErrors }}
+                <div class="
+                    w-full col-[2/-1] grid grid-cols-[repeat(2,1fr)]
+                    border border-gray-200 rounded-lg 
+                ">
+                    {{ template "event_error_group_component" .PreprocessErrors }}
+                    {{ template "event_error_group_component" .ProcessErrors }}
+                </div>
+            {{ end }}
+        </li>
+    {{ end }}
+{{ end }}
 {{ end }}
 
 {{ define "events_progress_indicator" }}
