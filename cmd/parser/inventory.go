@@ -115,66 +115,66 @@ func (inv *inventory) processEvent(
 	errors *[]*db.ParserError,
 ) {
 	switch data := event.Data.(type) {
-	case *db.EventTransferInternal:
-		fromAccountId := inventoryAccountId{event.Network, data.FromAccount, data.Token}
-		fromBalances := inv.accounts[fromAccountId]
-
-		toAccountId := inventoryAccountId{event.Network, data.ToAccount, data.Token}
-		toBalances := inv.accounts[toAccountId]
-
-		remainingAmount := data.Amount
-
-		for len(fromBalances) > 0 && remainingAmount.GreaterThan(decimal.Zero) {
-			acqPrice := fromBalances[0].acqPrice
-
-			var movedAmount decimal.Decimal
-			remainingAmount, movedAmount = invSubBalance(
-				&fromBalances,
-				remainingAmount,
-			)
-
-			toBalances = append(toBalances, &inventoryAccount{
-				amount:   movedAmount,
-				acqPrice: acqPrice,
-			})
-		}
-
-		if remainingAmount.GreaterThan(decimal.Zero) {
-			err := db.ParserError{
-				TxId:     event.TxId,
-				IxIdx:    event.IxIdx,
-				EventIdx: int32(event.Idx),
-				Type:     db.ParserErrorTypeMissingBalance,
-				Data: &db.ParserErrorMissingBalance{
-					AccountAddress: data.FromAccount,
-					Token:          data.Token,
-					Amount:         remainingAmount,
-					TokenSource:    data.TokenSource,
-				},
-			}
-			appendParserError(errors, &err)
-
-			value := remainingAmount.Mul(data.Price)
-			data.Profit = value
-			inv.income = inv.income.Add(value)
-
-			toBalances = append(toBalances, &inventoryAccount{
-				amount:   remainingAmount,
-				acqPrice: data.Price,
-			})
-		}
-
-		inv.accounts[fromAccountId] = fromBalances
-		inv.accounts[toAccountId] = toBalances
 	case *db.EventTransfer:
 		switch data.Direction {
+		case db.EventTransferInternal:
+			fromAccountId := inventoryAccountId{event.Network, data.FromAccount, data.Token}
+			fromBalances := inv.accounts[fromAccountId]
+
+			toAccountId := inventoryAccountId{event.Network, data.ToAccount, data.Token}
+			toBalances := inv.accounts[toAccountId]
+
+			remainingAmount := data.Amount
+
+			for len(fromBalances) > 0 && remainingAmount.GreaterThan(decimal.Zero) {
+				acqPrice := fromBalances[0].acqPrice
+
+				var movedAmount decimal.Decimal
+				remainingAmount, movedAmount = invSubBalance(
+					&fromBalances,
+					remainingAmount,
+				)
+
+				toBalances = append(toBalances, &inventoryAccount{
+					amount:   movedAmount,
+					acqPrice: acqPrice,
+				})
+			}
+
+			if remainingAmount.GreaterThan(decimal.Zero) {
+				err := db.ParserError{
+					TxId:     event.TxId,
+					IxIdx:    event.IxIdx,
+					EventIdx: int32(event.Idx),
+					Type:     db.ParserErrorTypeMissingBalance,
+					Data: &db.ParserErrorMissingBalance{
+						AccountAddress: data.FromAccount,
+						Token:          data.Token,
+						Amount:         remainingAmount,
+						TokenSource:    data.TokenSource,
+					},
+				}
+				appendParserError(errors, &err)
+
+				value := remainingAmount.Mul(data.Price)
+				data.Profit = value
+				inv.income = inv.income.Add(value)
+
+				toBalances = append(toBalances, &inventoryAccount{
+					amount:   remainingAmount,
+					acqPrice: data.Price,
+				})
+			}
+
+			inv.accounts[fromAccountId] = fromBalances
+			inv.accounts[toAccountId] = toBalances
 		case db.EventTransferIncoming:
 			if event.Type == db.EventTypeTransfer {
 				inv.income = inv.income.Add(data.Value)
 				data.Profit = data.Value
 			}
 
-			accountId := inventoryAccountId{event.Network, data.Account, data.Token}
+			accountId := inventoryAccountId{event.Network, data.ToAccount, data.Token}
 			inv.accounts[accountId] = append(
 				inv.accounts[accountId],
 				&inventoryAccount{
@@ -185,7 +185,7 @@ func (inv *inventory) processEvent(
 		case db.EventTransferOutgoing:
 			invSubFromAccount(
 				inv,
-				data.Account, data.Token, data.TokenSource,
+				data.FromAccount, data.Token, data.TokenSource,
 				event,
 				data.Amount, data.Price, &data.Profit,
 				event.Type == db.EventTypeTransfer,

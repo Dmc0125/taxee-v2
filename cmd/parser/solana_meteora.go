@@ -118,8 +118,9 @@ func solMeteoraFarmsNewStakingEvent(
 	event := solNewEvent(ctx)
 	event.UiAppName = app
 	event.UiMethodName = method
-	event.Type = db.EventTypeTransferInternal
-	event.Data = &db.EventTransferInternal{
+	event.Type = db.EventTypeTransfer
+	event.Data = &db.EventTransfer{
+		Direction:   db.EventTransferInternal,
 		FromWallet:  tokenAccountData.Owner,
 		ToWallet:    tokenAccountData.Owner,
 		FromAccount: fromAccount,
@@ -207,8 +208,8 @@ func solProcessMeteoraFarmsIx(
 		event.Type = db.EventTypeTransfer
 		event.Data = &db.EventTransfer{
 			Direction:   db.EventTransferIncoming,
-			Wallet:      toAccountData.Owner,
-			Account:     to,
+			ToWallet:    toAccountData.Owner,
+			ToAccount:   to,
 			Token:       toAccountData.Mint,
 			Amount:      newDecimalFromRawAmount(amount, decimals),
 			TokenSource: uint16(db.NetworkSolana),

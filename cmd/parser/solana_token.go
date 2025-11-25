@@ -168,8 +168,9 @@ func solTokenProcessTransfer(
 
 		ok = true
 		// TODO: check toAccount, it should have the same mint as fromAccount
-		t = db.EventTypeTransferInternal
-		d = &db.EventTransferInternal{
+		t = db.EventTypeTransfer
+		d = &db.EventTransfer{
+			Direction:   db.EventTransferInternal,
 			FromWallet:  fromAccountData.Owner,
 			ToWallet:    toAccountData.Owner,
 			FromAccount: from,
@@ -182,8 +183,11 @@ func solTokenProcessTransfer(
 	}
 
 	var tokenAccountData *solTokenAccountData
-	var tokenAccount string
-	var direction db.EventTransferDirection
+	event := db.EventTransfer{
+		FromAccount: from,
+		ToAccount:   to,
+		TokenSource: uint16(db.NetworkSolana),
+	}
 
 	switch {
 	case fromAccount != nil:
@@ -193,7 +197,10 @@ func solTokenProcessTransfer(
 		if !ok {
 			return
 		}
-		direction, tokenAccount = db.EventTransferOutgoing, from
+
+		event.Direction = db.EventTransferOutgoing
+		event.FromWallet = tokenAccountData.Owner
+		event.Token = tokenAccountData.Mint
 	case toAccount != nil:
 		tokenAccountData, ok = solAccountDataMust[solTokenAccountData](
 			ctx, toAccount, to,
@@ -201,22 +208,20 @@ func solTokenProcessTransfer(
 		if !ok {
 			return
 		}
-		direction, tokenAccount = db.EventTransferIncoming, to
+
+		event.Direction = db.EventTransferIncoming
+		event.ToWallet = tokenAccountData.Owner
+		event.Token = tokenAccountData.Mint
 	default:
 		return
 	}
 
 	decimals := solDecimalsMust(ctx, tokenAccountData.Mint)
+	event.Amount = newDecimalFromRawAmount(amount, decimals)
+
 	ok = true
 	t = db.EventTypeTransfer
-	d = &db.EventTransfer{
-		Direction:   direction,
-		Wallet:      tokenAccountData.Owner,
-		Account:     tokenAccount,
-		Token:       tokenAccountData.Mint,
-		Amount:      newDecimalFromRawAmount(amount, decimals),
-		TokenSource: uint16(db.NetworkSolana),
-	}
+	d = &event
 
 	return
 }
@@ -306,7 +311,8 @@ func solProcessTokenIx(
 		decimals := solDecimalsMust(ctx, accountData.Mint)
 		eventType = db.EventTypeMint
 		eventData = &db.EventTransfer{
-			Account:     to,
+			ToWallet:    accountData.Owner,
+			ToAccount:   to,
 			Token:       accountData.Mint,
 			Amount:      newDecimalFromRawAmount(amount, decimals),
 			TokenSource: uint16(db.NetworkSolana),
@@ -336,7 +342,8 @@ func solProcessTokenIx(
 		decimals := solDecimalsMust(ctx, accountData.Mint)
 		eventType = db.EventTypeBurn
 		eventData = &db.EventTransfer{
-			Account:     from,
+			FromWallet:  accountData.Owner,
+			FromAccount: from,
 			Token:       accountData.Mint,
 			Amount:      newDecimalFromRawAmount(amount, decimals),
 			TokenSource: uint16(db.NetworkSolana),

@@ -79,32 +79,20 @@ const GetPricepointByCoingeckoId string = `
 		ct.coingecko_id = $1
 `
 
-type EventTransferInternal struct {
-	// wallets corresponding to accounts
-	FromWallet string `json:"fromWallet"`
-	ToWallet   string `json:"toWallet"`
-
-	FromAccount string          `json:"fromAccount"`
-	ToAccount   string          `json:"toAccount"`
-	Token       string          `json:"token"`
-	Amount      decimal.Decimal `json:"amount"`
-	TokenSource uint16          `json:"tokenSource"`
-	Price       decimal.Decimal `json:"price"`
-	Value       decimal.Decimal `json:"value"`
-	Profit      decimal.Decimal `json:"profit"`
-}
-
 type EventTransferDirection uint8
 
 const (
 	EventTransferIncoming EventTransferDirection = iota
 	EventTransferOutgoing
+	EventTransferInternal
 )
 
 type EventTransfer struct {
 	Direction   EventTransferDirection `json:"direction"`
-	Wallet      string                 `json:"wallet"`
-	Account     string                 `json:"account"`
+	FromWallet  string                 `json:"fromWallet"`
+	ToWallet    string                 `json:"toWallet"`
+	FromAccount string                 `json:"fromaccount"`
+	ToAccount   string                 `json:"toAccount"`
 	Token       string                 `json:"token"`
 	Amount      decimal.Decimal        `json:"amount"`
 	TokenSource uint16                 `json:"tokenSource"`
@@ -132,9 +120,7 @@ type EventSwap struct {
 type EventType int
 
 const (
-	EventTypeTransferInternal EventType = iota
-
-	EventTypeTransfer
+	EventTypeTransfer EventType = iota
 	EventTypeMint
 	EventTypeBurn
 
@@ -161,8 +147,6 @@ type Event struct {
 func (event *Event) UnmarshalData(src []byte) error {
 	var data any
 	switch event.Type {
-	case EventTypeTransferInternal:
-		data = new(EventTransferInternal)
 	case EventTypeTransfer, EventTypeMint, EventTypeBurn:
 		data = new(EventTransfer)
 	case EventTypeSwap, EventTypeAddLiquidity, EventTypeRemoveLiquidity:

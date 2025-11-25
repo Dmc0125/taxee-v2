@@ -41,38 +41,27 @@ func setEventTransfer(
 	token string,
 	tokenSource uint16,
 ) {
+	var direction db.EventTransferDirection
+
 	switch {
 	case fromInternal && toInternal:
-		event.Type = db.EventTypeTransferInternal
-		event.Data = &db.EventTransferInternal{
-			FromWallet:  fromWallet,
-			ToWallet:    toWallet,
-			FromAccount: from,
-			ToAccount:   to,
-			Token:       token,
-			Amount:      amount,
-			TokenSource: tokenSource,
-		}
+		direction = db.EventTransferInternal
 	case fromInternal:
-		event.Type = db.EventTypeTransfer
-		event.Data = &db.EventTransfer{
-			Direction:   db.EventTransferOutgoing,
-			Wallet:      fromWallet,
-			Account:     from,
-			Token:       token,
-			Amount:      amount,
-			TokenSource: tokenSource,
-		}
+		direction = db.EventTransferOutgoing
 	case toInternal:
-		event.Type = db.EventTypeTransfer
-		event.Data = &db.EventTransfer{
-			Direction:   db.EventTransferIncoming,
-			Wallet:      toWallet,
-			Account:     to,
-			Token:       token,
-			Amount:      amount,
-			TokenSource: tokenSource,
-		}
+		direction = db.EventTransferIncoming
+	}
+
+	event.Type = db.EventTypeTransfer
+	event.Data = &db.EventTransfer{
+		Direction:   direction,
+		FromWallet:  fromWallet,
+		ToWallet:    toWallet,
+		FromAccount: from,
+		ToAccount:   to,
+		Token:       token,
+		Amount:      amount,
+		TokenSource: tokenSource,
 	}
 }
 
@@ -248,8 +237,6 @@ func fetchDecimalsAndPrices(
 
 	for _, event := range events {
 		switch data := event.Data.(type) {
-		case *db.EventTransferInternal:
-			appendEvmTokensByNetwork(data.Token, data.TokenSource)
 		case *db.EventTransfer:
 			appendEvmTokensByNetwork(data.Token, data.TokenSource)
 		case *db.EventSwap:
@@ -448,46 +435,24 @@ func fetchDecimalsAndPrices(
 			0,
 		)
 
-		if data, ok := event.Data.(*db.EventSwap); ok {
-			for _, t := range data.Outgoing {
-				queryEventDataPrice(
-					roundedTimestamp, event.Network,
-					t.Token, t.TokenSource,
-					&t.Price, &t.Value, &t.Amount,
-				)
-			}
-			for _, t := range data.Incoming {
-				queryEventDataPrice(
-					roundedTimestamp, event.Network,
-					t.Token, t.TokenSource,
-					&t.Price, &t.Value, &t.Amount,
-				)
-			}
-			continue
-		}
-
-		var token string
-		var tokenSource uint16
-		var price, value, amount *decimal.Decimal
-
 		switch data := event.Data.(type) {
-		case *db.EventTransferInternal:
-			token, tokenSource = data.Token, data.TokenSource
-			price, value, amount = &data.Price, &data.Value, &data.Amount
+		case *db.EventSwap:
+			for _, t := range append(data.Outgoing, data.Incoming...) {
+				queryEventDataPrice(
+					roundedTimestamp, event.Network,
+					t.Token, t.TokenSource,
+					&t.Price, &t.Value, &t.Amount,
+				)
+			}
 		case *db.EventTransfer:
-			token, tokenSource = data.Token, data.TokenSource
-			price, value, amount = &data.Price, &data.Value, &data.Amount
+			queryEventDataPrice(
+				roundedTimestamp, event.Network,
+				data.Token, data.TokenSource,
+				&data.Price, &data.Value, &data.Amount,
+			)
 		default:
 			assert.True(false, "unknown event data: %T %#v", data, *event)
-			continue
 		}
-
-		queryEventDataPrice(
-			roundedTimestamp,
-			event.Network,
-			token, tokenSource,
-			price, value, amount,
-		)
 	}
 
 	br := pool.SendBatch(ctx, &queryPricesBatch)
@@ -724,9 +689,9 @@ func Parse(
 					UiMethodName: "fee",
 					Type:         db.EventTypeTransfer,
 					Data: &db.EventTransfer{
-						Direction: db.EventTransferOutgoing,
-						Wallet:    txData.Signer,
-						Account:   txData.Signer,
+						Direction:   db.EventTransferOutgoing,
+						FromWallet:  txData.Signer,
+						FromAccount: txData.Signer,
 						// not using coingecko solana because in inventory we are not
 						// differentiating between wrapped and unwrapped sol
 						Token:       SOL_MINT_ADDRESS,
@@ -762,8 +727,8 @@ func Parse(
 					Type:         db.EventTypeTransfer,
 					Data: &db.EventTransfer{
 						Direction:   db.EventTransferOutgoing,
-						Wallet:      txData.From,
-						Account:     txData.From,
+						FromWallet:  txData.From,
+						FromAccount: txData.From,
 						Token:       "ethereum",
 						Amount:      txData.Fee,
 						TokenSource: tokenSourceCoingecko,
