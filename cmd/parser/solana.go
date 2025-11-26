@@ -89,10 +89,7 @@ func (ctx *solContext) walletOwned(other string) bool {
 func (ctx *solContext) receiveSol(address string, amount uint64) {
 	lifetimes, ok := ctx.accounts[address]
 
-	if !ok {
-		lifetimes = make([]accountLifetime, 0)
-	}
-	if len(lifetimes) == 0 {
+	if !ok || len(lifetimes) == 0 {
 		acc := newAccountLifetime(ctx.slot, ctx.ixIdx)
 		acc.Balance = amount
 		lifetimes = append(lifetimes, acc)
@@ -160,15 +157,12 @@ func (ctx *solContext) close(closedAddress, receiverAddress string) {
 		return
 	}
 
-	closedBalance := acc.Balance
-
 	acc.PreparseOpen = false
 	acc.MaxSlot = ctx.slot
 	acc.MaxIxIdx = ctx.ixIdx
-	acc.Balance = 0
 	ctx.accounts[closedAddress] = lifetimes
 
-	ctx.receiveSol(receiverAddress, closedBalance)
+	ctx.receiveSol(receiverAddress, acc.Balance)
 }
 
 // 0 -> not owned, 1 -> owned, 2 -> whatever
@@ -205,6 +199,21 @@ func (ctx *solContext) findOwned(
 	address string,
 ) *accountLifetime {
 	return ctx.find(slot, ixIdx, address, 1)
+}
+
+func (ctx *solContext) findOwnedOrError(
+	slot uint64,
+	ixIdx uint32,
+	address string,
+) (account *accountLifetime, ok bool) {
+	account = ctx.find(slot, ixIdx, address, 1)
+	if account == nil {
+		err := solNewErrMissingAccount(ctx, address)
+		ctx.errors = append(ctx.errors, err)
+	} else {
+		ok = true
+	}
+	return
 }
 
 func solNewEvent(ctx *solContext) *db.Event {
@@ -251,6 +260,18 @@ func solAccountDataMust[T solAccountData](
 	return data, true
 }
 
+func solAccountExactOrError[T solAccountData](
+	ctx *solContext,
+	address string,
+) (*accountLifetime, *T, bool) {
+	account, ok := ctx.findOwnedOrError(ctx.slot, ctx.ixIdx, address)
+	if !ok {
+		return nil, nil, false
+	}
+	data, ok := solAccountDataMust[T](ctx, account, address)
+	return account, data, ok
+}
+
 func solDecimalsMust(ctx *solContext, mint string) uint8 {
 	// NOTE: this should **always** be ok, if it is not, RPC api changed and
 	// we want to know that
@@ -281,6 +302,8 @@ func solPreprocessIx(ctx *solContext, ix *db.SolanaInstruction) {
 		solPreprocessSquadsV4Ix(ctx, ix)
 	case SOL_METEORA_FARMS_PROGRAM_ADDRESS:
 		solPreprocessMeteoraFarmsIx(ctx, ix)
+	case SOL_DRIFT_PROGRAM_ADDRESS:
+		solPreprocessDriftIx(ctx, ix)
 	}
 }
 
@@ -610,5 +633,7 @@ func solProcessIx(
 		solProcessMeteoraFarmsIx(ctx, ix, events)
 	case SOL_MERCURIAL_PROGRAM_ADDRESS:
 		solProcessMercurialIx(ctx, ix, events)
+	case SOL_DRIFT_PROGRAM_ADDRESS:
+		solProcessDriftIx(ctx, ix, events)
 	}
 }

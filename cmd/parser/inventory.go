@@ -125,6 +125,13 @@ func (inv *inventory) processEvent(
 			toBalances := inv.accounts[toAccountId]
 
 			remainingAmount := data.Amount
+			if event.Type == db.EventTypeCloseAccount {
+				for _, b := range fromBalances {
+					remainingAmount = remainingAmount.Add(b.amount)
+				}
+				data.Amount = remainingAmount
+				data.Value = remainingAmount.Mul(data.Price)
+			}
 
 			for len(fromBalances) > 0 && remainingAmount.GreaterThan(decimal.Zero) {
 				acqPrice := fromBalances[0].acqPrice

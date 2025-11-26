@@ -285,7 +285,39 @@ func solProcessTokenIx(
 			return
 		}
 	case solTokenIxClose:
-		return
+		closedAccountAddress, destinationAddress := ix.Accounts[0], ix.Accounts[1]
+
+		closedAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, closedAccountAddress)
+		destinationAccountInternal := ctx.walletOwned(destinationAddress)
+
+		if closedAccount == nil && !destinationAccountInternal {
+			return
+		}
+
+		if closedAccount == nil && destinationAccountInternal {
+			// TODO: display some warning in the UI that this is a close ix
+			// but there is no way for us to know the amount and the user has
+			// to create the event
+			return
+		}
+
+		closedAccountData, ok := solAccountDataMust[solTokenAccountData](
+			ctx, closedAccount, closedAccountAddress,
+		)
+		if !ok {
+			return
+		}
+
+		eventType = db.EventTypeCloseAccount
+		eventData = &db.EventTransfer{
+			Direction:   getTransferEventDirection(true, destinationAccountInternal),
+			FromWallet:  closedAccountData.Owner,
+			ToWallet:    destinationAddress,
+			FromAccount: closedAccountAddress,
+			ToAccount:   destinationAddress,
+			Token:       SOL_MINT_ADDRESS,
+			TokenSource: uint16(db.NetworkSolana),
+		}
 	case solTokenIxMint, solTokenIxMintChecked:
 		amount, to, mint := solParseTokenMint(ix.Accounts, ix.Data)
 		if amount == 0 {
@@ -353,7 +385,7 @@ func solProcessTokenIx(
 	}
 
 	event := solNewEvent(ctx)
-	event.UiAppName = "token_program"
+	event.UiAppName = "token"
 	event.UiMethodName = method
 	event.Type = eventType
 	event.Data = eventData

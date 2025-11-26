@@ -32,6 +32,20 @@ func newDecimalFromRawAmount(amount uint64, decimals uint8) decimal.Decimal {
 	return d
 }
 
+func getTransferEventDirection(fromInternal, toInternal bool) db.EventTransferDirection {
+	assert.True(fromInternal || toInternal, "not a valid transfer direction")
+	var direction db.EventTransferDirection
+	switch {
+	case fromInternal && toInternal:
+		direction = db.EventTransferInternal
+	case fromInternal:
+		direction = db.EventTransferOutgoing
+	case toInternal:
+		direction = db.EventTransferIncoming
+	}
+	return direction
+}
+
 func setEventTransfer(
 	event *db.Event,
 	fromWallet, toWallet,
@@ -41,20 +55,9 @@ func setEventTransfer(
 	token string,
 	tokenSource uint16,
 ) {
-	var direction db.EventTransferDirection
-
-	switch {
-	case fromInternal && toInternal:
-		direction = db.EventTransferInternal
-	case fromInternal:
-		direction = db.EventTransferOutgoing
-	case toInternal:
-		direction = db.EventTransferIncoming
-	}
-
 	event.Type = db.EventTypeTransfer
 	event.Data = &db.EventTransfer{
-		Direction:   direction,
+		Direction:   getTransferEventDirection(fromInternal, toInternal),
 		FromWallet:  fromWallet,
 		ToWallet:    toWallet,
 		FromAccount: from,

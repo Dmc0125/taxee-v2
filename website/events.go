@@ -625,7 +625,6 @@ func renderEvents(
 							transfers = eventComponentData.OutgoingTransfers
 						}
 
-						fmt.Println(*data)
 						tokenData := eventsCreateTokenAmountData(
 							data.Amount,
 							data.Token, account,

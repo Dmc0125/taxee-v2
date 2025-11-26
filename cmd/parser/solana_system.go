@@ -100,20 +100,30 @@ func solProcessSystemIx(
 	}
 
 	fromInternal := ctx.walletOwned(from)
-	toInternal := ctx.walletOwned(to) ||
-		ctx.findOwned(ctx.slot, ctx.ixIdx, to) != nil
+	toInternalWallet := ctx.walletOwned(to)
+	toAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, to)
+
+	toWallet, toInternal := to, toInternalWallet
+	if toAccount != nil {
+		toInternal = true
+		switch data := toAccount.Data.(type) {
+		case *solTokenAccountData:
+			toWallet = data.Owner
+		}
+	}
 
 	if !fromInternal && !toInternal {
 		return
 	}
 
 	event := solNewEvent(ctx)
-	event.UiAppName = "system_program"
+	event.UiAppName = "system"
 	event.UiMethodName = method
 
+	// TODO: to can be arbitrary account, so it can have owner wallet
 	setEventTransfer(
 		event,
-		from, to,
+		from, toWallet,
 		from, to,
 		fromInternal, toInternal,
 		newDecimalFromRawAmount(amount, 9),

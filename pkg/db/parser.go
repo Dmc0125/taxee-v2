@@ -121,6 +121,7 @@ type EventType int
 
 const (
 	EventTypeTransfer EventType = iota
+	EventTypeCloseAccount
 	EventTypeMint
 	EventTypeBurn
 
@@ -147,7 +148,7 @@ type Event struct {
 func (event *Event) UnmarshalData(src []byte) error {
 	var data any
 	switch event.Type {
-	case EventTypeTransfer, EventTypeMint, EventTypeBurn:
+	case EventTypeTransfer, EventTypeCloseAccount, EventTypeMint, EventTypeBurn:
 		data = new(EventTransfer)
 	case EventTypeSwap, EventTypeAddLiquidity, EventTypeRemoveLiquidity:
 		data = new(EventSwap)
