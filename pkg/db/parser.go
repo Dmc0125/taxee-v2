@@ -6,6 +6,7 @@ import (
 	"taxee/pkg/assert"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 )
 
@@ -169,7 +170,8 @@ type EventTransfer struct {
 	Value  decimal.Decimal `json:"value"`
 	Profit decimal.Decimal `json:"profit"`
 
-	MissingAmount decimal.Decimal `json:"missingAmount"`
+	MissingAmount   decimal.Decimal `json:"missingAmount"`
+	PrecedingEvents []uuid.UUID     `json:"precedingEvents"`
 }
 
 type EventSwapTransfer struct {
@@ -182,7 +184,8 @@ type EventSwapTransfer struct {
 	Value  decimal.Decimal `json:"value"`
 	Profit decimal.Decimal `json:"profit"`
 
-	MissingAmount decimal.Decimal `json:"missingAmount"`
+	MissingAmount   decimal.Decimal `json:"missingAmount"`
+	PrecedingEvents []uuid.UUID     `json:"precedingEvents"`
 }
 
 type EventSwap struct {
@@ -208,6 +211,7 @@ const (
 )
 
 type Event struct {
+	Id           uuid.UUID
 	Timestamp    time.Time
 	Network      Network
 	UiAppName    string

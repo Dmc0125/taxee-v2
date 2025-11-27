@@ -34,14 +34,22 @@ func newDecimalFromRawAmount(amount uint64, decimals uint8) decimal.Decimal {
 }
 
 func solNewEvent(ctx *solContext) *db.Event {
+	id, err := uuid.NewRandom()
+	assert.NoErr(err, "unable to generate event id")
+
 	return &db.Event{
+		Id:        id,
 		Timestamp: ctx.timestamp,
 		Network:   db.NetworkSolana,
 	}
 }
 
 func evmNewEvent(ctx *evmContext) *db.Event {
+	id, err := uuid.NewRandom()
+	assert.NoErr(err, "unable to generate event id")
+
 	return &db.Event{
+		Id:        id,
 		Timestamp: ctx.timestamp,
 		Network:   ctx.network,
 	}
@@ -646,7 +654,10 @@ func Parse(
 		tokenSource uint16,
 		amount decimal.Decimal,
 	) *db.Event {
+		id, err := uuid.NewRandom()
+		assert.NoErr(err, "unable to generate event id")
 		return &db.Event{
+			Id:           id,
 			Timestamp:    tx.Timestamp,
 			Network:      tx.Network,
 			UiAppName:    "native",
@@ -733,7 +744,7 @@ func Parse(
 	logger.Info("Process events")
 
 	inv := inventory{
-		accounts: make(map[inventoryAccountId][]*inventoryAccount),
+		accounts: make(map[inventoryAccountId][]*inventoryRecord),
 	}
 	batch := pgx.Batch{}
 	eventPosition := 0
@@ -753,8 +764,6 @@ func Parse(
 			eventData, err := json.Marshal(event.Data)
 			assert.NoErr(err, "unable to marshal event data")
 
-			eventId, err := uuid.NewRandom()
-			assert.NoErr(err, "unable to generate event id")
 			const insertEventQuery = `
 				insert into event (
 					id, position, internal_tx_id,
@@ -765,7 +774,7 @@ func Parse(
 			`
 			batch.Queue(
 				insertEventQuery,
-				eventId,
+				event.Id,
 				eventPosition,
 				internalTxId,
 				event.UiAppName,

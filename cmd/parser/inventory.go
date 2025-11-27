@@ -4,6 +4,7 @@ import (
 	"taxee/pkg/assert"
 	"taxee/pkg/db"
 
+	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 )
 
@@ -13,7 +14,8 @@ type inventoryAccountId struct {
 	token   string
 }
 
-type inventoryAccount struct {
+type inventoryRecord struct {
+	eventId  uuid.UUID
 	amount   decimal.Decimal
 	acqPrice decimal.Decimal
 }
@@ -22,11 +24,11 @@ type inventory struct {
 	acquisition decimal.Decimal
 	disposal    decimal.Decimal
 	income      decimal.Decimal
-	accounts    map[inventoryAccountId][]*inventoryAccount
+	accounts    map[inventoryAccountId][]*inventoryRecord
 }
 
 func invSubBalance(
-	balances *[]*inventoryAccount,
+	balances *[]*inventoryRecord,
 	amount decimal.Decimal,
 ) (newAmount decimal.Decimal, removedAmount decimal.Decimal) {
 	balance := (*balances)[0]
@@ -47,25 +49,27 @@ func invSubBalance(
 func invSubFromAccount(
 	inv *inventory,
 	account, token string,
-	tokenSource uint16,
 	event *db.Event,
 	amount, price decimal.Decimal,
 	profit *decimal.Decimal,
 	increaseProfits bool,
 	missingAmount *decimal.Decimal,
+	precedingEvents *[]uuid.UUID,
 ) decimal.Decimal {
 	accountId := inventoryAccountId{event.Network, account, token}
-	balances := inv.accounts[accountId]
+	records := inv.accounts[accountId]
 
 	remainingAmount := amount
 	value := decimal.Zero
 
-	for len(balances) > 0 && remainingAmount.GreaterThan(decimal.Zero) {
-		acqPrice := balances[0].acqPrice
+	for len(records) > 0 && remainingAmount.GreaterThan(decimal.Zero) {
+		r := records[0]
+		acqPrice := r.acqPrice
+		*precedingEvents = append(*precedingEvents, r.eventId)
 
 		var movedAmount decimal.Decimal
 		remainingAmount, movedAmount = invSubBalance(
-			&balances,
+			&records,
 			remainingAmount,
 		)
 
@@ -93,7 +97,7 @@ func invSubFromAccount(
 		}
 	}
 
-	inv.accounts[accountId] = balances
+	inv.accounts[accountId] = records
 
 	return value
 }
@@ -104,30 +108,32 @@ func (inv *inventory) processEvent(event *db.Event) {
 		switch data.Direction {
 		case db.EventTransferInternal:
 			fromAccountId := inventoryAccountId{event.Network, data.FromAccount, data.Token}
-			fromBalances := inv.accounts[fromAccountId]
-
+			fromRecords := inv.accounts[fromAccountId]
 			toAccountId := inventoryAccountId{event.Network, data.ToAccount, data.Token}
-			toBalances := inv.accounts[toAccountId]
+			toRecords := inv.accounts[toAccountId]
 
 			remainingAmount := data.Amount
 			if event.Type == db.EventTypeCloseAccount {
-				for _, b := range fromBalances {
+				for _, b := range fromRecords {
 					remainingAmount = remainingAmount.Add(b.amount)
 				}
 				data.Amount = remainingAmount
 				data.Value = remainingAmount.Mul(data.Price)
 			}
 
-			for len(fromBalances) > 0 && remainingAmount.GreaterThan(decimal.Zero) {
-				acqPrice := fromBalances[0].acqPrice
+			for len(fromRecords) > 0 && remainingAmount.GreaterThan(decimal.Zero) {
+				r := fromRecords[0]
+				acqPrice := r.acqPrice
+				data.PrecedingEvents = append(data.PrecedingEvents, r.eventId)
 
 				var movedAmount decimal.Decimal
 				remainingAmount, movedAmount = invSubBalance(
-					&fromBalances,
+					&fromRecords,
 					remainingAmount,
 				)
 
-				toBalances = append(toBalances, &inventoryAccount{
+				toRecords = append(toRecords, &inventoryRecord{
+					eventId:  event.Id,
 					amount:   movedAmount,
 					acqPrice: acqPrice,
 				})
@@ -140,14 +146,14 @@ func (inv *inventory) processEvent(event *db.Event) {
 				data.Profit = value
 				inv.income = inv.income.Add(value)
 
-				toBalances = append(toBalances, &inventoryAccount{
+				toRecords = append(toRecords, &inventoryRecord{
 					amount:   remainingAmount,
 					acqPrice: data.Price,
 				})
 			}
 
-			inv.accounts[fromAccountId] = fromBalances
-			inv.accounts[toAccountId] = toBalances
+			inv.accounts[fromAccountId] = fromRecords
+			inv.accounts[toAccountId] = toRecords
 		case db.EventTransferIncoming:
 			if event.Type == db.EventTypeTransfer {
 				inv.income = inv.income.Add(data.Value)
@@ -157,7 +163,8 @@ func (inv *inventory) processEvent(event *db.Event) {
 			accountId := inventoryAccountId{event.Network, data.ToAccount, data.Token}
 			inv.accounts[accountId] = append(
 				inv.accounts[accountId],
-				&inventoryAccount{
+				&inventoryRecord{
+					eventId:  event.Id,
 					amount:   data.Amount,
 					acqPrice: data.Price,
 				},
@@ -165,11 +172,12 @@ func (inv *inventory) processEvent(event *db.Event) {
 		case db.EventTransferOutgoing:
 			invSubFromAccount(
 				inv,
-				data.FromAccount, data.Token, data.TokenSource,
+				data.FromAccount, data.Token,
 				event,
 				data.Amount, data.Price, &data.Profit,
 				event.Type == db.EventTypeTransfer,
 				&data.MissingAmount,
+				&data.PrecedingEvents,
 			)
 		default:
 			assert.True(false, "invalid direction: %d", data.Direction)
@@ -208,9 +216,9 @@ func (inv *inventory) processEvent(event *db.Event) {
 
 		tokensValue := decimal.Zero
 
-		for _, q := range queue {
-			if q.incoming {
-				for _, t := range q.transfers {
+		processItem := func(item queued) {
+			if item.incoming {
+				for _, t := range item.transfers {
 					if event.Type == db.EventTypeAddLiquidity && t.Value.IsZero() {
 						t.Value = tokensValue
 						t.Price = tokensValue.Div(t.Amount)
@@ -219,13 +227,14 @@ func (inv *inventory) processEvent(event *db.Event) {
 					}
 
 					accountId := inventoryAccountId{event.Network, t.Account, t.Token}
-					inv.accounts[accountId] = append(inv.accounts[accountId], &inventoryAccount{
+					inv.accounts[accountId] = append(inv.accounts[accountId], &inventoryRecord{
+						eventId:  event.Id,
 						amount:   t.Amount,
 						acqPrice: t.Price,
 					})
 				}
 			} else {
-				for _, t := range q.transfers {
+				for _, t := range item.transfers {
 					if event.Type == db.EventTypeRemoveLiquidity && t.Value.IsZero() {
 						t.Value = tokensValue
 						t.Price = tokensValue.Div(t.Amount)
@@ -233,11 +242,12 @@ func (inv *inventory) processEvent(event *db.Event) {
 
 					value := invSubFromAccount(
 						inv,
-						t.Account, t.Token, t.TokenSource,
+						t.Account, t.Token,
 						event,
 						t.Amount, t.Price, &t.Profit,
 						true,
 						&t.MissingAmount,
+						&t.PrecedingEvents,
 					)
 					if event.Type == db.EventTypeAddLiquidity {
 						tokensValue = tokensValue.Add(value)
@@ -245,5 +255,8 @@ func (inv *inventory) processEvent(event *db.Event) {
 				}
 			}
 		}
+
+		processItem(queue[0])
+		processItem(queue[1])
 	}
 }

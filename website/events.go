@@ -48,7 +48,7 @@ var appImgUrls = map[string]string{
 	"3-native":           "/static/logo_arbitrum.svg",
 }
 
-type eventTableRowComponentData struct {
+type eventsTableRowComponentData struct {
 	Type uint8
 
 	Timestamp     time.Time
@@ -72,7 +72,7 @@ type eventsProgressIndicatorComponentData struct {
 type eventsPageData struct {
 	ProgressIndicator eventsProgressIndicatorComponentData
 	NextUrl           string
-	Rows              []eventTableRowComponentData
+	Rows              []eventsTableRowComponentData
 }
 
 type eventComponentData struct {
@@ -375,7 +375,7 @@ func renderEvents(
 	limit int32,
 	offset float32,
 	devMode bool,
-) ([]eventTableRowComponentData, float32, error) {
+) ([]eventsTableRowComponentData, float32, error) {
 	getEventsQuery, getEventsParams := buildGetEventsQuery(
 		userAccountId,
 		txId,
@@ -389,7 +389,7 @@ func renderEvents(
 		return nil, 0, fmt.Errorf("unable to query txs: %w", err)
 	}
 
-	eventsTableRows := make([]eventTableRowComponentData, 0)
+	eventsTableRows := make([]eventsTableRowComponentData, 0)
 	getTokensMetaBatch := pgx.Batch{}
 	fetchTokensMetadataQueue := make([]*fetchTokenMetadataQueued, 0)
 	var prevDateUnix int64
@@ -415,7 +415,7 @@ func renderEvents(
 			prevDateUnix = dateUnix
 			eventsTableRows = append(
 				eventsTableRows,
-				eventTableRowComponentData{
+				eventsTableRowComponentData{
 					Type:      0,
 					Timestamp: timestamp,
 				},
@@ -425,7 +425,7 @@ func renderEvents(
 		networkGlobals, ok := networksGlobals[network]
 		assert.True(ok, "missing globals for network: %s", network.String())
 
-		rowData := eventTableRowComponentData{
+		rowData := eventsTableRowComponentData{
 			Type:      1,
 			Timestamp: timestamp,
 			TxId: fmt.Sprintf(
@@ -481,6 +481,7 @@ func renderEvents(
 
 				switch data := e.Data.(type) {
 				case *db.EventTransfer:
+					fmt.Println(data.PrecedingEvents)
 					fiatData, profitData := eventsCreateFiatAmountsData(
 						data.Value, data.Price, data.Profit,
 					)
