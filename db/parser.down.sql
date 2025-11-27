@@ -4,7 +4,7 @@ drop table parser_error;
 
 drop table event;
 
-drop type event_type;
+drop table missing_pricepoint;
 
 drop table pricepoint;
 

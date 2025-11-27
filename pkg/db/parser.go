@@ -34,12 +34,23 @@ const GetPricepointByNetworkAndTokenAddress string = `
 				when pp.coingecko_id is not null then pp.price
 				else ''
 			end
-		) as price
+		) as price,
+		(
+			case
+				when mp.coingecko_id is not null then true
+				else false
+			end
+		) as missing
 	from
 		coingecko_token ct
 	left join
 		pricepoint pp on
 			pp.coingecko_id = ct.coingecko_id and pp.timestamp = $1
+	left join
+		missing_pricepoint mp on
+			mp.coingecko_id = ct.coingecko_id and
+			mp.timestamp_from <= $1 and
+			mp.timestamp_to >= $1
 	where
 		ct.network = $2 and ct.address = $3
 `
@@ -69,14 +80,71 @@ const GetPricepointByCoingeckoId string = `
 				when pp.coingecko_id is not null then pp.price
 				else ''
 			end
-		) as price
+		) as price,
+		(
+			case
+				when mp.coingecko_id is not null then true
+				else false
+			end
+		) as missing
 	from 
 		coingecko_token_data ct
 	left join
 		pricepoint pp on
 			pp.coingecko_id = $1 and pp.timestamp = $2
+	left join
+		missing_pricepoint mp on
+			mp.coingecko_id = $1 and
+			mp.timestamp_from <= $2 and
+			mp.timestamp_to >= $2 
 	where
 		ct.coingecko_id = $1
+`
+
+// InsertPricepoint
+//
+//	insert into pricepoint (
+//		price, timestamp, coingecko_id
+//	) values (
+//		$1, $2, $3
+//	) on conflict (timestamp, coingecko_id) do nothing
+const InsertPricepoint string = `
+	insert into pricepoint (
+		price, timestamp, coingecko_id
+	) values (
+		$1, $2, $3
+	) on conflict (timestamp, coingecko_id) do nothing
+`
+
+// SetMissingPricepoint
+//
+//	insert into missing_pricepoint (
+//		coingecko_id, timestamp_from, timestamp_to
+//	) values (
+//		$1, $2, $3
+//	) on conflict (coingecko_id) do update set
+//		timestamp_from = case
+//			when $2 < timestamp_from then $2
+//			else timestamp_from
+//		end,
+//		timestamp_to = case
+//			when $3 > timestamp_to then $3
+//			else timestamp_to
+//		end
+const SetMissingPricepoint string = `
+	insert into missing_pricepoint (
+		coingecko_id, timestamp_from, timestamp_to
+	) values (
+		$1, $2, $3
+	) on conflict (coingecko_id) do update set
+		timestamp_from = case
+			when $2 < missing_pricepoint.timestamp_from then $2
+			else missing_pricepoint.timestamp_from
+		end,
+		timestamp_to = case
+			when $3 > missing_pricepoint.timestamp_to then $3
+			else missing_pricepoint.timestamp_to
+		end
 `
 
 type EventTransferDirection uint8

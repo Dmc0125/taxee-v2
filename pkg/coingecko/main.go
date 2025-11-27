@@ -208,7 +208,7 @@ func GetCoinOhlc(
 	coinId string,
 	vsCurrency FiatCurrency,
 	from time.Time,
-) ([]*OhlcCoinData, error) {
+) ([]*OhlcCoinData, time.Time, error) {
 	fromUnix := from.Unix()
 	toUnix := fromUnix + 60*60*24*31
 	if now := time.Now().Unix(); toUnix > now {
@@ -225,7 +225,7 @@ func GetCoinOhlc(
 	res := make([]*OhlcCoinData, 0)
 	err := sendRequest(endpoint, &res)
 
-	return res, err
+	return res, time.Unix(toUnix, 0), err
 }
 
 type CoinMetadata struct {

@@ -26,6 +26,17 @@ create table pricepoint (
     primary key (coingecko_id, timestamp)
 );
 
+-- TODO: this probaly shouldnt be just for coingecko tokens, idk
+create table missing_pricepoint (
+    coingecko_id varchar primary key,
+    foreign key (coingecko_id) references coingecko_token_data (coingecko_id) on delete cascade,
+    
+    -- TODO: not sure if this can be like that, if there awould be missing prices
+    -- somewhere in the middle, it won't be possible to save that
+    timestamp_from timestamptz not null,
+    timestamp_to timestamptz not null
+);
+
 create table event (
     user_account_id integer not null,
     tx_id varchar not null,

@@ -155,7 +155,10 @@ func fetchCoingeckoTokens(
 	pool *pgxpool.Pool,
 ) {
 	coins, err := coingecko.GetCoins()
-	assert.NoErr(err, "unable to get coingecko coins")
+	if err != nil {
+		logger.Warn("unable to update coingecko tokens: %s", err)
+		return
+	}
 
 	batch := pgx.Batch{}
 
@@ -322,6 +325,51 @@ func fetchDecimalsAndPrices(
 	dbPriceQueriesCount := 0
 	dbPriceQueriesStart := time.Now()
 
+	handleQueriedPricepoint := func(
+		row pgx.Row,
+		token string,
+		roundedTimestamp time.Time,
+		price, value, amount *decimal.Decimal,
+	) error {
+		var cid, priceStr string
+		var missing bool
+		err := row.Scan(&cid, &priceStr, &missing)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// NOTE: coingecko does not have this token, need to use backup
+			// like birdeye or something
+			return nil
+		} else {
+			assert.NoErr(
+				err,
+				fmt.Sprintf("unable to scan pricepoint: %s", token),
+			)
+		}
+		if missing {
+			return nil
+		}
+
+		if priceStr == "" {
+			tokenPricesToFetch = append(
+				tokenPricesToFetch,
+				tokenPriceToFetch{
+					coingeckoId: cid,
+					timestamp:   roundedTimestamp.Unix(),
+					price:       price,
+					value:       value,
+					amount:      amount,
+				},
+			)
+		} else {
+			pricepoint, err := decimal.NewFromString(priceStr)
+			assert.NoErr(err, fmt.Sprintf("invalid price: %s", priceStr))
+
+			*price = pricepoint
+			*value = pricepoint.Mul(*amount)
+		}
+
+		return nil
+	}
+
 	queryEventDataPrice := func(
 		roundedTimestamp time.Time,
 		network db.Network,
@@ -338,39 +386,12 @@ func fetchDecimalsAndPrices(
 				roundedTimestamp,
 			)
 			q.QueryRow(func(row pgx.Row) error {
-				var cid, priceStr string
-				err := row.Scan(&cid, &priceStr)
-				if errors.Is(err, pgx.ErrNoRows) {
-					// ERROR
-					return nil
-				} else {
-					assert.NoErr(
-						err,
-						fmt.Sprintf("unable to scan pricepoint: %s", token),
-					)
-				}
-
-				if priceStr == "" {
-					tokenPricesToFetch = append(
-						tokenPricesToFetch,
-						tokenPriceToFetch{
-							coingeckoId: token,
-							timestamp:   roundedTimestamp.Unix(),
-							price:       price,
-							value:       value,
-							amount:      amount,
-						},
-					)
-				} else {
-					// logger.Info("Found coingecko pricepoint in db: %s %s", token, roundedTimestamp)
-					pricepoint, err := decimal.NewFromString(priceStr)
-					assert.NoErr(err, fmt.Sprintf("invalid price: %s", priceStr))
-
-					*price = pricepoint
-					*value = pricepoint.Mul(*amount)
-				}
-
-				return nil
+				return handleQueriedPricepoint(
+					row,
+					token,
+					roundedTimestamp,
+					price, value, amount,
+				)
 			})
 		} else {
 			if tokenSource > uint16(db.NetworkEvmStart) {
@@ -398,35 +419,12 @@ func fetchDecimalsAndPrices(
 				token,
 			)
 			q.QueryRow(func(row pgx.Row) error {
-				var coingeckoId, priceStr string
-				err := row.Scan(&coingeckoId, &priceStr)
-				if errors.Is(err, pgx.ErrNoRows) {
-					// ERROR
-					return nil
-				} else {
-					assert.NoErr(err, fmt.Sprintf("unable to scan pricepoint: %s", token))
-				}
-
-				if priceStr == "" {
-					tokenPricesToFetch = append(
-						tokenPricesToFetch,
-						tokenPriceToFetch{
-							coingeckoId: coingeckoId,
-							timestamp:   roundedTimestamp.Unix(),
-							price:       price,
-							value:       value,
-							amount:      amount,
-						},
-					)
-				} else {
-					pricepoint, err := decimal.NewFromString(priceStr)
-					assert.NoErr(err, fmt.Sprintf("invalid price: %s", priceStr))
-					// logger.Info("Found pricepoint in db: %s %s", coingeckoId, roundedTimestamp)
-
-					*price = pricepoint
-					*value = pricepoint.Mul(*amount)
-				}
-				return nil
+				return handleQueriedPricepoint(
+					row,
+					token,
+					roundedTimestamp,
+					price, value, amount,
+				)
 			})
 		}
 	}
@@ -478,32 +476,25 @@ func fetchDecimalsAndPrices(
 	coingeckoQueriesStart := time.Now()
 
 	for _, token := range tokenPricesToFetch {
-		ts := time.Unix(token.timestamp, 0)
+		timestampFrom := time.Unix(token.timestamp, 0)
 		price, ok := coingeckoTokensPrices[coingeckoTokenPriceId{
 			token.coingeckoId, token.timestamp,
 		}]
 
 		if !ok {
 			coingeckoQueriesCount += 1
-			coingeckoPrices, err := coingecko.GetCoinOhlc(
+			coingeckoPrices, timestampTo, err := coingecko.GetCoinOhlc(
 				token.coingeckoId,
 				coingecko.FiatCurrencyEur,
-				ts,
+				timestampFrom,
 			)
 			assert.NoErr(err, "unable to get coingecko prices")
 
 			if len(coingeckoPrices) > 0 {
 				insertPricesBatch := pgx.Batch{}
 				for _, p := range coingeckoPrices {
-					const insertPricepoint = `
-						insert into pricepoint (
-							price, timestamp, coingecko_id
-						) values (
-							$1, $2, $3
-						) on conflict (timestamp, coingecko_id) do nothing
-					`
 					insertPricesBatch.Queue(
-						insertPricepoint,
+						db.InsertPricepoint,
 						p.Close,
 						p.Timestamp,
 						token.coingeckoId,
@@ -516,16 +507,20 @@ func fetchDecimalsAndPrices(
 				err := br.Close()
 				assert.NoErr(err, "unable to insert coingecko prices")
 
-				if p := coingeckoPrices[0]; p.Timestamp.Equal(ts) {
-					// logger.Info("Fetched pricepoint from coingecko: %s %s", token.coingeckoId, ts)
+				if p := coingeckoPrices[0]; p.Timestamp.Equal(timestampFrom) {
 					price, ok = p.Close, true
 				}
 			} else {
-				// ERROR
+				_, err := pool.Exec(
+					ctx,
+					db.SetMissingPricepoint,
+					token.coingeckoId,
+					timestampFrom,
+					timestampTo,
+				)
+				assert.NoErr(err, "unable to set missing pricepoint")
 				continue
 			}
-		} else {
-			// logger.Info("Found pricepoint in coingecko prices: %s %s", token.coingeckoId, ts)
 		}
 
 		*token.price = price
