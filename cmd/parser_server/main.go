@@ -137,7 +137,7 @@ func main() {
 				ctx, ctxCancel = context.WithCancel(context.Background())
 
 				logger.Info("received parse request for %d", userAccountId)
-				parser.Parse(ctx, pool, evmClient, userAccountId, true)
+				parser.Parse(ctx, pool, evmClient, userAccountId)
 
 				_, err = pool.Exec(context.Background(), deleteSyncRequestQuery, requestId)
 				assert.NoErr(err, "unable to delete sync request")

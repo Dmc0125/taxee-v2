@@ -52,7 +52,7 @@ func invSubFromAccount(
 	amount, price decimal.Decimal,
 	profit *decimal.Decimal,
 	increaseProfits bool,
-	errors *[]*db.ParserError,
+	missingAmount *decimal.Decimal,
 ) decimal.Decimal {
 	accountId := inventoryAccountId{event.Network, account, token}
 	balances := inv.accounts[accountId]
@@ -82,19 +82,7 @@ func invSubFromAccount(
 	}
 
 	if remainingAmount.GreaterThan(decimal.Zero) {
-		err := db.ParserError{
-			TxId:     event.TxId,
-			IxIdx:    event.IxIdx,
-			EventIdx: int32(event.Idx),
-			Type:     db.ParserErrorTypeMissingBalance,
-			Data: &db.ParserErrorMissingBalance{
-				AccountAddress: account,
-				Token:          token,
-				Amount:         remainingAmount,
-				TokenSource:    tokenSource,
-			},
-		}
-		*errors = append(*errors, &err)
+		*missingAmount = remainingAmount
 
 		if increaseProfits {
 			remainingValue := remainingAmount.Mul(price)
@@ -110,10 +98,7 @@ func invSubFromAccount(
 	return value
 }
 
-func (inv *inventory) processEvent(
-	event *db.Event,
-	errors *[]*db.ParserError,
-) {
+func (inv *inventory) processEvent(event *db.Event) {
 	switch data := event.Data.(type) {
 	case *db.EventTransfer:
 		switch data.Direction {
@@ -149,19 +134,7 @@ func (inv *inventory) processEvent(
 			}
 
 			if remainingAmount.GreaterThan(decimal.Zero) {
-				err := db.ParserError{
-					TxId:     event.TxId,
-					IxIdx:    event.IxIdx,
-					EventIdx: int32(event.Idx),
-					Type:     db.ParserErrorTypeMissingBalance,
-					Data: &db.ParserErrorMissingBalance{
-						AccountAddress: data.FromAccount,
-						Token:          data.Token,
-						Amount:         remainingAmount,
-						TokenSource:    data.TokenSource,
-					},
-				}
-				*errors = append(*errors, &err)
+				data.MissingAmount = remainingAmount
 
 				value := remainingAmount.Mul(data.Price)
 				data.Profit = value
@@ -196,7 +169,7 @@ func (inv *inventory) processEvent(
 				event,
 				data.Amount, data.Price, &data.Profit,
 				event.Type == db.EventTypeTransfer,
-				errors,
+				&data.MissingAmount,
 			)
 		default:
 			assert.True(false, "invalid direction: %d", data.Direction)
@@ -264,7 +237,7 @@ func (inv *inventory) processEvent(
 						event,
 						t.Amount, t.Price, &t.Profit,
 						true,
-						errors,
+						&t.MissingAmount,
 					)
 					if event.Type == db.EventTypeAddLiquidity {
 						tokensValue = tokensValue.Add(value)

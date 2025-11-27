@@ -67,10 +67,10 @@ func (acc *accountLifetime) open(slot uint64, ixIdx uint32) bool {
 }
 
 type solContext struct {
-	wallets  []string
-	accounts map[string][]accountLifetime
-
-	errors []*db.ParserError
+	wallets   []string
+	accounts  map[string][]accountLifetime
+	errors    []*db.ParserError
+	errOrigin db.ErrOrigin
 
 	// volatile for each tx/ix
 	txId           string
@@ -111,15 +111,13 @@ func (ctx *solContext) receiveSol(address string, amount uint64) {
 }
 
 func solNewErrMissingAccount(ctx *solContext, address string) *db.ParserError {
-	e := db.ParserError{
-		TxId:  ctx.txId,
-		IxIdx: int32(ctx.ixIdx),
-		Type:  db.ParserErrorTypeMissingAccount,
-		Data: &db.ParserErrorMissingAccount{
+	return solNewError(
+		ctx,
+		db.ParserErrorTypeMissingAccount,
+		&db.ParserErrorMissingAccount{
 			AccountAddress: address,
 		},
-	}
-	return &e
+	)
 }
 
 func (ctx *solContext) init(address string, owned bool, data any) {
@@ -216,22 +214,6 @@ func (ctx *solContext) findOwnedOrError(
 	return
 }
 
-func solNewEvent(ctx *solContext) *db.Event {
-	return &db.Event{
-		Timestamp: ctx.timestamp,
-		Network:   db.NetworkSolana,
-		TxId:      ctx.txId,
-		IxIdx:     int32(ctx.ixIdx),
-	}
-}
-
-func solNewTxError(ctx *solContext) *db.ParserError {
-	return &db.ParserError{
-		TxId:  ctx.txId,
-		IxIdx: int32(ctx.ixIdx),
-	}
-}
-
 type solAccountData interface {
 	name() string
 }
@@ -245,16 +227,15 @@ func solAccountDataMust[T solAccountData](
 	data, ok := account.Data.(*T)
 	if !ok {
 		var temp T
-		err := db.ParserError{
-			TxId:  ctx.txId,
-			IxIdx: int32(ctx.ixIdx),
-			Type:  db.ParserErrorTypeAccountDataMismatch,
-			Data: &db.ParserErrorAccountDataMismatch{
+		err := solNewError(
+			ctx,
+			db.ParserErrorTypeAccountDataMismatch,
+			&db.ParserErrorAccountDataMismatch{
 				AccountAddress: address,
 				Message:        fmt.Sprintf("Expected the data to be %s", temp.name()),
 			},
-		}
-		ctx.errors = append(ctx.errors, &err)
+		)
+		ctx.errors = append(ctx.errors, err)
 		return nil, false
 	}
 	return data, true
@@ -348,12 +329,11 @@ nativeBalancesLoop:
 					if isTokenAccount {
 						errData.Wallet = tokens.Owner
 					}
-					err := &db.ParserError{
-						TxId:  ctx.txId,
-						IxIdx: int32(ctx.ixIdx),
-						Type:  db.ParserErrorTypeAccountBalanceMismatch,
-						Data:  &errData,
-					}
+					err := solNewError(
+						ctx,
+						db.ParserErrorTypeAccountBalanceMismatch,
+						&errData,
+					)
 					ctx.errors = append(ctx.errors, err)
 				}
 
@@ -371,15 +351,14 @@ nativeBalancesLoop:
 						}
 					}
 					if !found {
-						err := &db.ParserError{
-							TxId:  ctx.txId,
-							IxIdx: int32(ctx.ixIdx),
-							Type:  db.ParserErrorTypeAccountDataMismatch,
-							Data: &db.ParserErrorAccountDataMismatch{
+						err := solNewError(
+							ctx,
+							db.ParserErrorTypeAccountDataMismatch,
+							&db.ParserErrorAccountDataMismatch{
 								AccountAddress: address,
 								Message:        "Invalid token account mint",
 							},
-						}
+						)
 						ctx.errors = append(ctx.errors, err)
 						continue nativeBalancesLoop
 					}

@@ -336,10 +336,10 @@ type evmContractImplementation struct {
 }
 
 type evmContext struct {
-	contracts     map[string][]evmContractImplementation
-	wallets       []string
-	network       db.Network
-	decimals      map[string]uint8
+	contracts map[string][]evmContractImplementation
+	wallets   []string
+	network   db.Network
+	decimals  map[string]uint8
 
 	// different for each tx
 	timestamp time.Time
@@ -392,14 +392,6 @@ func evmWalletOwned(ctx *evmContext, address string) bool {
 	return slices.Contains(ctx.wallets, address)
 }
 
-func evmNewEvent(ctx *evmContext) *db.Event {
-	return &db.Event{
-		Timestamp: ctx.timestamp,
-		Network:   ctx.network,
-		TxId:      ctx.txId,
-	}
-}
-
 func evmProcessSwap(
 	sender string,
 	network db.Network,
@@ -414,9 +406,10 @@ func evmProcessSwap(
 	}
 
 	for _, itx := range itxs {
-		if sender == itx.From {
+		switch sender {
+		case itx.From:
 			amounts["ethereum"] = amounts["ethereum"].Sub(itx.Value)
-		} else if sender == itx.To {
+		case itx.To:
 			amounts["ethereum"] = amounts["ethereum"].Add(itx.Value)
 		}
 	}
@@ -427,9 +420,10 @@ func evmProcessSwap(
 			to := evmAddressFrom32Bytes(log.Topics[2])
 			amount := evmAmountFrom32Bytes(log.Data[:32])
 
-			if sender == from {
+			switch sender {
+			case from:
 				amounts[log.Address] = amounts[log.Address].Sub(amount)
-			} else if sender == to {
+			case to:
 				amounts[log.Address] = amounts[log.Address].Add(amount)
 			}
 		}
@@ -535,13 +529,13 @@ func evmProcessTx(
 			case evmErc20ContractId:
 				evmProcessErc20Tx(ctx, events, txData)
 			case evm1inchV4ContractId:
-				evmProcessSwapTx(ctx, events, txData, "paraswap", "swap")
+				evmProcessSwapTx(ctx, events, txData, "1inch", "swap")
 			case evm1inchVUnknownContractId:
-				evmProcessSwapTx(ctx, events, txData, "paraswap", "swap")
+				evmProcessSwapTx(ctx, events, txData, "1inch", "swap")
 			case evmUniswapV3ContractId:
 				evmProcessUniswapV3Tx(ctx, events, txData)
 			case evmTraderJoeRouter2ContractId:
-				evmProcessSwapTx(ctx, events, txData, "paraswap", "swap")
+				evmProcessSwapTx(ctx, events, txData, "trader_joe", "swap")
 			case evmParaswapContractId:
 				evmProcessSwapTx(ctx, events, txData, "paraswap", "swap")
 			}

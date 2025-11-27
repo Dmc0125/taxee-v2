@@ -17,6 +17,7 @@ import (
 	"taxee/pkg/logger"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
@@ -30,6 +31,34 @@ func newDecimalFromRawAmount(amount uint64, decimals uint8) decimal.Decimal {
 		-int32(decimals),
 	)
 	return d
+}
+
+func solNewEvent(ctx *solContext) *db.Event {
+	return &db.Event{
+		Timestamp: ctx.timestamp,
+		Network:   db.NetworkSolana,
+	}
+}
+
+func evmNewEvent(ctx *evmContext) *db.Event {
+	return &db.Event{
+		Timestamp: ctx.timestamp,
+		Network:   ctx.network,
+	}
+}
+
+func solNewError(
+	ctx *solContext,
+	t db.ParserErrorType,
+	data any,
+) *db.ParserError {
+	return &db.ParserError{
+		TxId:   ctx.txId,
+		IxIdx:  int32(ctx.ixIdx),
+		Origin: ctx.errOrigin,
+		Type:   t,
+		Data:   data,
+	}
 }
 
 func getTransferEventDirection(fromInternal, toInternal bool) db.EventTransferDirection {
@@ -73,12 +102,7 @@ func devDeleteEvents(
 	pool *pgxpool.Pool,
 	userAccountId int32,
 ) error {
-	batch := pgx.Batch{}
-	batch.Queue("delete from event where user_account_id = $1", userAccountId)
-	batch.Queue("delete from parser_error where user_account_id = $1", userAccountId)
-
-	br := pool.SendBatch(ctx, &batch)
-	err := br.Close()
+	_, err := pool.Exec(ctx, "delete from internal_tx where user_account_id = $1", userAccountId)
 	if err != nil {
 		return fmt.Errorf("unable to delete events")
 	}
@@ -475,23 +499,64 @@ func Parse(
 	pool *pgxpool.Pool,
 	evmClient *evm.Client,
 	userAccountId int32,
-	fresh bool,
 ) {
 	logger.Info("Update coingecko tokens")
 	fetchCoingeckoTokens(ctx, pool)
 
-	if fresh {
-		err := devDeleteEvents(ctx, pool, userAccountId)
-		assert.NoErr(err, "")
-	}
+	err := devDeleteEvents(ctx, pool, userAccountId)
+	assert.NoErr(err, "")
 
 	/////////////////
 	// Init
+	const createInternalTxsQuery = `
+		insert into internal_tx (
+			position, user_account_id, network, tx_id, timestamp
+		) select	
+			row_number() over (
+				order by 
+					-- global ordering
+					tx.timestamp asc,
+					-- network specific ordering in case of timestamps conflicts
+					-- solana 
+					(tx.data->>'slot')::bigint asc,
+					(tx.data->>'blockIndex')::integer asc,
+					-- evm
+					(tx.data->>'block')::bigint asc,
+					(tx.data->>'txIdx')::integer asc
+			) as position,
+			$1,
+			tx.network,
+			tx_ref.tx_id,
+			tx.timestamp
+		from
+			tx_ref
+		join
+			tx on tx.id = tx_ref.tx_id
+		where
+			tx_ref.user_account_id = $1
+		returning
+			id, tx_id
+	`
+	internalTxsByTxId := make(map[string]int32)
+	if rows, err := pool.Query(ctx, createInternalTxsQuery, userAccountId); err == nil {
+		for rows.Next() {
+			var id int32
+			var txId string
+			err := rows.Scan(&id, &txId)
+			assert.NoErr(err, "unable to scan internal_tx id")
+			internalTxsByTxId[txId] = id
+		}
+	} else {
+		assert.True(false, "unable to create internal txs: %s", err)
+	}
+
+	parserErrors := make([]*db.ParserError, 0)
 
 	logger.Info("Init parser state")
 	solCtx := solContext{
-		accounts: make(map[string][]accountLifetime),
-		errors:   make([]*db.ParserError, 0),
+		accounts:  make(map[string][]accountLifetime),
+		errors:    parserErrors,
+		errOrigin: db.ErrOriginPreprocess,
 	}
 	evmContexts := make(map[db.Network]*evmContext)
 
@@ -521,7 +586,7 @@ func Parse(
 	// pagination ??
 	// 700 txs ~= 6.4mb of allocations
 
-	txs, err := db.GetTransactions(ctx, pool, userAccountId)
+	txs, err := db.GetParsableTransactions(ctx, pool, userAccountId)
 	assert.NoErr(err, "")
 
 	///////////////////
@@ -572,41 +637,36 @@ func Parse(
 	}
 
 	///////////////////
-	// insert preprocess errors
-	batch := pgx.Batch{}
-	for _, preprocessErr := range solCtx.errors {
-		dataSerialized, err := json.Marshal(preprocessErr.Data)
-		assert.NoErr(err, "unable to marshal preprocess error data")
-
-		const insertErrorQuery = `
-				insert into parser_error (
-					user_account_id, tx_id, ix_idx, origin, type, data
-				) values (
-					$1, $2, $3, $4, $5, $6
-				)
-			`
-		batch.Queue(
-			insertErrorQuery,
-			userAccountId,
-			preprocessErr.TxId,
-			preprocessErr.IxIdx,
-			db.ErrOriginPreprocess,
-			preprocessErr.Type,
-			dataSerialized,
-		)
-	}
-	br := pool.SendBatch(ctx, &batch)
-	err = br.Close()
-	assert.NoErr(err, "unable to insert preprocess errors")
-
-	solCtx.errors = solCtx.errors[:0]
-
-	///////////////////
 	// process txs
 	logger.Info("Process txs")
 
+	newFeeEvent := func(
+		tx *db.TransactionRow,
+		from, token string,
+		tokenSource uint16,
+		amount decimal.Decimal,
+	) *db.Event {
+		return &db.Event{
+			Timestamp:    tx.Timestamp,
+			Network:      tx.Network,
+			UiAppName:    "native",
+			UiMethodName: "fee",
+			Type:         db.EventTypeTransfer,
+			Data: &db.EventTransfer{
+				Direction:   db.EventTransferOutgoing,
+				FromWallet:  from,
+				FromAccount: from,
+				Token:       token,
+				Amount:      amount,
+				TokenSource: tokenSource,
+			},
+		}
+
+	}
+
 	events := make([]*db.Event, 0)
 	groupedEvents := make(map[string][]*db.Event)
+	solCtx.errOrigin = db.ErrOriginProcess
 
 	for _, tx := range txs {
 		eventsGroup := make([]*db.Event, 0)
@@ -614,26 +674,10 @@ func Parse(
 		switch txData := tx.Data.(type) {
 		case *db.SolanaTransactionData:
 			if txData.Fee.GreaterThan(decimal.Zero) && solCtx.walletOwned(txData.Signer) {
-				event := &db.Event{
-					TxId:         tx.Id,
-					IxIdx:        -1,
-					Timestamp:    tx.Timestamp,
-					Network:      tx.Network,
-					UiAppName:    "native",
-					UiMethodName: "fee",
-					Type:         db.EventTypeTransfer,
-					Data: &db.EventTransfer{
-						Direction:   db.EventTransferOutgoing,
-						FromWallet:  txData.Signer,
-						FromAccount: txData.Signer,
-						// not using coingecko solana because in inventory we are not
-						// differentiating between wrapped and unwrapped sol
-						Token:       SOL_MINT_ADDRESS,
-						Amount:      txData.Fee,
-						TokenSource: uint16(db.NetworkSolana),
-					},
-				}
-				eventsGroup = append(eventsGroup, event)
+				eventsGroup = append(eventsGroup, newFeeEvent(
+					tx, txData.Signer, SOL_MINT_ADDRESS,
+					uint16(db.NetworkSolana), txData.Fee,
+				))
 			}
 
 			if !tx.Err {
@@ -652,22 +696,11 @@ func Parse(
 			assert.True(ok, "missing evm context %s", tx.Network.String())
 
 			if txData.Fee.GreaterThan(decimal.Zero) && evmWalletOwned(ctx, txData.From) {
-				event := &db.Event{
-					TxId:         tx.Id,
-					Timestamp:    tx.Timestamp,
-					Network:      tx.Network,
-					UiAppName:    "native",
-					UiMethodName: "fee",
-					Type:         db.EventTypeTransfer,
-					Data: &db.EventTransfer{
-						Direction:   db.EventTransferOutgoing,
-						FromWallet:  txData.From,
-						FromAccount: txData.From,
-						Token:       "ethereum",
-						Amount:      txData.Fee,
-						TokenSource: tokenSourceCoingecko,
-					},
-				}
+				event := newFeeEvent(
+					tx, txData.From, "ethereum",
+					tokenSourceCoingecko, txData.Fee,
+				)
+				// event.IxIdx = 0
 				eventsGroup = append(eventsGroup, event)
 			}
 
@@ -682,36 +715,10 @@ func Parse(
 		if len(eventsGroup) > 0 {
 			groupedEvents[tx.Id] = eventsGroup
 			for _, event := range eventsGroup {
-				event.Idx = len(events)
 				events = append(events, event)
 			}
 		}
 	}
-
-	batch = pgx.Batch{}
-	for _, error := range solCtx.errors {
-		data, err := json.Marshal(error.Data)
-		assert.NoErr(err, "unable to marshal error data")
-
-		const insertErrorQuery = `
-				insert into parser_error (
-					user_account_id, tx_id, ix_idx,
-					origin, type, data
-				) values (
-					$1, $2, $3, $4, $5, $6
-				)
-			`
-		batch.Queue(
-			insertErrorQuery,
-			// args
-			userAccountId,
-			error.TxId, error.IxIdx,
-			db.ErrOriginProcess, error.Type, data,
-		)
-	}
-	br = pool.SendBatch(ctx, &batch)
-	err = br.Close()
-	assert.NoErr(err, "unable to insert process events")
 
 	fetchDecimalsAndPrices(
 		ctx,
@@ -728,8 +735,8 @@ func Parse(
 	inv := inventory{
 		accounts: make(map[inventoryAccountId][]*inventoryAccount),
 	}
-	processEventsErrors := make(map[db.Network]*[]*db.ParserError)
-	batch = pgx.Batch{}
+	batch := pgx.Batch{}
+	eventPosition := 0
 
 	for _, tx := range txs {
 		txEvents, ok := groupedEvents[tx.Id]
@@ -737,37 +744,36 @@ func Parse(
 			continue
 		}
 
-		errors := processEventsErrors[tx.Network]
-		if errors == nil {
-			e := make([]*db.ParserError, 0)
-			errors = &e
-			processEventsErrors[tx.Network] = &e
-		}
+		internalTxId, ok := internalTxsByTxId[tx.Id]
+		assert.True(ok, "missing internal_tx id for: %s", tx.Id)
 
 		for _, event := range txEvents {
-			inv.processEvent(event, errors)
+			inv.processEvent(event)
 
 			eventData, err := json.Marshal(event.Data)
 			assert.NoErr(err, "unable to marshal event data")
+
+			eventId, err := uuid.NewRandom()
+			assert.NoErr(err, "unable to generate event id")
 			const insertEventQuery = `
 				insert into event (
-					user_account_id, tx_id, ix_idx, idx,
+					id, position, internal_tx_id,
 					ui_app_name, ui_method_name, type, data
 				) values (
-					$1, $2, $3, $4, $5, $6, $7, $8
+					$1, $2, $3, $4, $5, $6, $7
 				)
 			`
 			batch.Queue(
 				insertEventQuery,
-				userAccountId,
-				event.TxId,
-				event.IxIdx,
-				event.Idx,
+				eventId,
+				eventPosition,
+				internalTxId,
 				event.UiAppName,
 				event.UiMethodName,
 				event.Type,
 				eventData,
 			)
+			eventPosition += 1
 		}
 
 		/////////////////
@@ -795,8 +801,9 @@ func Parse(
 
 				if !expectedBalance.Equal(sum) {
 					err := db.ParserError{
-						TxId: tx.Id,
-						Type: db.ParserErrorTypeAccountBalanceMismatch,
+						TxId:   tx.Id,
+						Origin: db.ErrOriginProcess,
+						Type:   db.ParserErrorTypeAccountBalanceMismatch,
 						Data: &db.ParserErrorAccountBalanceMismatch{
 							Wallet:         account,
 							AccountAddress: account,
@@ -805,7 +812,7 @@ func Parse(
 							Local:          sum,
 						},
 					}
-					*errors = append(*errors, &err)
+					parserErrors = append(parserErrors, &err)
 				}
 			}
 
@@ -831,8 +838,9 @@ func Parse(
 
 					if !expectedAmount.Equal(sum) {
 						err := db.ParserError{
-							TxId: tx.Id,
-							Type: db.ParserErrorTypeAccountBalanceMismatch,
+							TxId:   tx.Id,
+							Origin: db.ErrOriginProcess,
+							Type:   db.ParserErrorTypeAccountBalanceMismatch,
 							Data: &db.ParserErrorAccountBalanceMismatch{
 								Wallet:         balance.Owner,
 								AccountAddress: account,
@@ -841,54 +849,38 @@ func Parse(
 								Local:          sum,
 							},
 						}
-						*errors = append(*errors, &err)
+						parserErrors = append(parserErrors, &err)
 					}
 				}
 			}
 		}
 	}
 
-	for _, errors := range processEventsErrors {
-		for _, error := range *errors {
-			data, err := json.Marshal(error.Data)
-			assert.NoErr(err, "unable to marshal error data")
+	for _, error := range parserErrors {
+		internalTxId, ok := internalTxsByTxId[error.TxId]
+		assert.True(ok, "missing internal_tx for %s", error.TxId)
 
-			switch error.Type {
-			case db.ParserErrorTypeMissingBalance:
-				const insertErrorQuery = `
-					insert into parser_error (
-						user_account_id, tx_id, event_idx,
-						origin, type, data
-					) values (
-						$1, $2, $3, $4, $5, $6
-					)
-				`
-				batch.Queue(
-					insertErrorQuery,
-					// args
-					userAccountId, error.TxId, error.EventIdx,
-					db.ErrOriginProcess, error.Type, data,
-				)
-			case db.ParserErrorTypeAccountBalanceMismatch:
-				const insertErrorQuery = `
-					insert into parser_error (
-						user_account_id, tx_id,
-						origin, type, data
-					) values (
-						$1, $2, $3, $4, $5
-					)
-				`
-				batch.Queue(
-					insertErrorQuery,
-					// args
-					userAccountId, error.TxId,
-					db.ErrOriginProcess, error.Type, data,
-				)
-			}
-		}
+		data, err := json.Marshal(error.Data)
+		assert.NoErr(err, "unable to marshal error data")
+
+		const insertErrorQuery = `
+			insert into parser_error (
+				internal_tx_id, ix_idx, origin, type, data
+			) values (
+				$1, $2, $3, $4, $5
+			)
+		`
+		batch.Queue(
+			insertErrorQuery,
+			internalTxId,
+			error.IxIdx,
+			error.Origin,
+			error.Type,
+			data,
+		)
 	}
 
-	br = pool.SendBatch(ctx, &batch)
+	br := pool.SendBatch(ctx, &batch)
 	err = br.Close()
 	assert.NoErr(err, "unable to insert events")
 }

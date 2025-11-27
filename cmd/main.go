@@ -251,6 +251,6 @@ func main() {
 		alchemyReqTimer := requesttimer.NewDefault(100)
 		etherscanClient := evm.NewClient(alchemyReqTimer)
 
-		parser.Parse(context.Background(), pool, etherscanClient, 1, true)
+		parser.Parse(context.Background(), pool, etherscanClient, 1)
 	}
 }

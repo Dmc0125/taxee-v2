@@ -37,17 +37,36 @@ create table missing_pricepoint (
     timestamp_to timestamptz not null
 );
 
-create table event (
+-- intermediary table for events errors and transactions
+--
+-- one to one with `transaction`
+-- one to many events if it is an onchain transaction
+-- one to one event if it is a custom event
+-- one to many errors
+create table internal_tx (
+    id serial primary key,
+    position real not null,
+
     user_account_id integer not null,
-    tx_id varchar not null,
+    foreign key (user_account_id) references user_account (id) on delete cascade,
+
+    network network not null,
+    tx_id varchar,
     foreign key (user_account_id, tx_id) references tx_ref (
         user_account_id, tx_id
     ) on delete cascade,
 
-    ix_idx integer,
-    idx integer not null default 0,
+    timestamp timestamptz not null
+);
 
-    primary key (tx_id, ix_idx, idx, user_account_id),
+create index on internal_tx (position);
+
+create table event (
+    id uuid primary key,
+    position real not null,
+
+    internal_tx_id integer not null,
+    foreign key (internal_tx_id) references internal_tx (id) on delete cascade,
 
     ui_app_name varchar not null,
     ui_method_name varchar not null,
@@ -58,22 +77,11 @@ create table event (
 create table parser_error (
     id serial primary key,
 
-    user_account_id integer not null,
-    tx_id varchar not null,
-    foreign key (user_account_id, tx_id) references tx_ref (
-        user_account_id, tx_id
-    ) on delete cascade,
+    internal_tx_id integer not null,
+    foreign key (internal_tx_id) references internal_tx (id) on delete cascade,
 
     ix_idx integer,
-    event_idx integer,
-    foreign key (
-        user_account_id, tx_id, ix_idx, event_idx
-    ) references event (
-        user_account_id, tx_id, ix_idx, idx
-    ) on delete cascade,
 
-    -- 0 => tx preprocess
-    -- 1 => tx process / event process
     origin smallint not null,
     type smallint not null,
     data jsonb not null

@@ -4,6 +4,8 @@ drop table parser_error;
 
 drop table event;
 
+drop table internal_tx;
+
 drop table missing_pricepoint;
 
 drop table pricepoint;

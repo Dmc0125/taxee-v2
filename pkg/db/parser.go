@@ -164,9 +164,12 @@ type EventTransfer struct {
 	Token       string                 `json:"token"`
 	Amount      decimal.Decimal        `json:"amount"`
 	TokenSource uint16                 `json:"tokenSource"`
-	Price       decimal.Decimal        `json:"price"`
-	Value       decimal.Decimal        `json:"value"`
-	Profit      decimal.Decimal        `json:"profit"`
+
+	Price  decimal.Decimal `json:"price"`
+	Value  decimal.Decimal `json:"value"`
+	Profit decimal.Decimal `json:"profit"`
+
+	MissingAmount decimal.Decimal `json:"missingAmount"`
 }
 
 type EventSwapTransfer struct {
@@ -174,9 +177,12 @@ type EventSwapTransfer struct {
 	Token       string          `json:"token"`
 	Amount      decimal.Decimal `json:"amount"`
 	TokenSource uint16          `json:"tokenSource"`
-	Price       decimal.Decimal `json:"price"`
-	Value       decimal.Decimal `json:"value"`
-	Profit      decimal.Decimal `json:"profit"`
+
+	Price  decimal.Decimal `json:"price"`
+	Value  decimal.Decimal `json:"value"`
+	Profit decimal.Decimal `json:"profit"`
+
+	MissingAmount decimal.Decimal `json:"missingAmount"`
 }
 
 type EventSwap struct {
@@ -202,9 +208,6 @@ const (
 )
 
 type Event struct {
-	TxId         string
-	Idx          int
-	IxIdx        int32
 	Timestamp    time.Time
 	Network      Network
 	UiAppName    string

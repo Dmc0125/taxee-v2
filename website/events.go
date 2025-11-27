@@ -286,185 +286,82 @@ type urlParam[T any] struct {
 	set   bool
 }
 
-type eventsPagination struct {
-	SolanaSlot         int64
-	SolanaBlockIndex   int32
-	ArbitrumBlock      int64
-	ArbitrumBlockIndex int32
-}
-
-func (p *eventsPagination) serialize() string {
-	q := strings.Builder{}
-
-	q.WriteString(fmt.Sprintf("%d_", p.SolanaSlot))
-	q.WriteString(fmt.Sprintf("%d_", p.SolanaBlockIndex))
-	q.WriteString(fmt.Sprintf("%d_", p.ArbitrumBlock))
-	q.WriteString(fmt.Sprintf("%d", p.ArbitrumBlockIndex))
-
-	return q.String()
-}
-
-func (p *eventsPagination) deserialize(src []byte) error {
-	setOffsets := func(block *int64, blockIndex *int32, serializedBlock, serializedIndex string) error {
-		if serializedBlock != "" {
-			b, err := strconv.ParseInt(serializedBlock, 10, 64)
-			if err != nil {
-				return fmt.Errorf("invalid network block: %s", serializedBlock)
-			}
-			*block = b
-		}
-
-		if serializedIndex != "" {
-			i, err := strconv.ParseInt(serializedIndex, 10, 32)
-			if err != nil {
-				return fmt.Errorf("invalid network block index: %s", serializedIndex)
-			}
-			*blockIndex = int32(i)
-		}
-
-		return nil
-	}
-
-	offsets := strings.Split(string(src), "_")
-	if len(offsets) != 4 {
-		return fmt.Errorf("invalid networks offsets: %s", string(src))
-	}
-
-	var err error
-	if err = setOffsets(&p.SolanaSlot, &p.SolanaBlockIndex, offsets[0], offsets[1]); err != nil {
-		return err
-	}
-	if err = setOffsets(&p.ArbitrumBlock, &p.ArbitrumBlockIndex, offsets[2], offsets[2]); err != nil {
-		return err
-	}
-
-	return nil
-}
-
 func buildGetEventsQuery(
 	userAccountId int32,
 	txId string,
 	limit int32,
-	pagination *eventsPagination,
+	fromItxPosition float32,
 	devMode bool,
 ) (q string, params []any) {
 	const getEventsQuerySelect = `
-			select
-				tx.id,
-				tx.network,
-				tx.timestamp,
-				(tx.data->>'slot')::bigint as solana_slot,
-				(tx.data->>'blockIndex')::integer as solana_block_index,
-				(tx.data->>'block')::bigint as evm_block,
-				(tx.data->>'txIdx')::integer as evm_block_index,
-				coalesce(events.events, '[]'::jsonb) as events,
-				coalesce(errors.errors,	'[]'::jsonb) as errors
-			from
-				tx_ref
-			inner join
-				tx on tx.id = tx_ref.tx_id
-			left join lateral (
-				select jsonb_agg(
-					jsonb_build_object(
-						'Idx', e.idx,
-						'IxIdx', e.ix_idx,
-						'UiAppName', e.ui_app_name,
-						'UiMethodName', e.ui_method_name,
-						'Type', e.type,
-						'Data', e.data
-					) order by e.idx asc
-				) as events 
-				from 
-					event e
-				where
-					e.tx_id = tx_ref.tx_id and e.user_account_id = tx_ref.user_account_id
-			) events on true
-			left join lateral (
-				select jsonb_agg(
-					jsonb_build_object(
-						'IxIdx', pe.ix_idx,
-						'EventIdx', pe.event_idx,
-						'Origin', pe.origin,
-						'Type', pe.type,
-						'Data', pe.data
-					) order by pe.origin asc
-				) as errors
-				from 
-					parser_error pe
-				where 
-					pe.tx_id = tx_ref.tx_id and pe.user_account_id = tx_ref.user_account_id
-			) errors on true
-		`
-	const getEventsQuerySelectAfter = `
-			order by
-				-- global ordering
-				tx.timestamp asc,
-				-- network specific ordering in case of timestamps conflicts
-				-- solana
-				(tx.data->>'slot')::bigint asc,
-				(tx.data->>'blockIndex')::integer asc,
-				-- evm
-				(tx.data->>'block')::bigint asc,
-				(tx.data->>'txIdx')::integer asc
-		`
+		select
+			itx.tx_id, 
+			itx.network, 
+			itx.timestamp,
+			itx.position,
+			coalesce(events.events, '[]'::jsonb) as events,
+			coalesce(errors.errors,	'[]'::jsonb) as errors
+		from
+			internal_tx itx
+		left join lateral (
+			select jsonb_agg(
+				jsonb_build_object(
+					'UiAppName', e.ui_app_name,
+					'UiMethodName', e.ui_method_name,
+					'Type', e.type,
+					'Data', e.data
+				) order by e.position asc
+			) as events 
+			from 
+				event e
+			where
+				e.internal_tx_id = itx.id
+		) events on true
+		left join lateral (
+			select jsonb_agg(
+		 		jsonb_build_object(
+		 			'IxIdx', pe.ix_idx,
+		 			'Origin', pe.origin,
+		 			'Type', pe.type,
+		 			'Data', pe.data
+		 		) order by pe.origin asc
+		 	) as errors
+		 	from 
+		 		parser_error pe
+		 	where 
+		 		pe.internal_tx_id = itx.id
+		 ) errors on true
+	`
+	const getEventsQuerySelectAfter = "order by itx.position asc"
 
 	var filterEmptyTxs string
 	if !devMode {
-		filterEmptyTxs = "(events.events is not null or errors.errors is not null) and"
+		filterEmptyTxs = "and (events.events is not null or errors.errors is not null)"
 	}
 
 	switch {
 	case txId != "":
-		q = fmt.Sprintf(`
-					%s
-					where
-						tx_ref.user_account_id = $1 and tx.id = $2
-					%s
-				`,
+		q = fmt.Sprintf(
+			"%s where itx.user_account_id = $1 and itx.tx_id = $2",
 			getEventsQuerySelect,
-			getEventsQuerySelectAfter,
 		)
 		params = append(params, userAccountId, txId)
 	default:
 		q = fmt.Sprintf(`
+				%s
+				where
+					itx.user_account_id = $1 and
+					itx.position > $2 
 					%s
-					where
-						tx_ref.user_account_id = $1 and
-						%s
-
-						-- pagination
-						(
-							(
-								tx.network = 'solana' and (
-									(tx.data->>'slot')::bigint > $3 or (
-										(tx.data->>'slot')::bigint = $3 and
-										(tx.data->>'blockIndex')::integer > $4
-									)
-								)
-							) or (
-								tx.network = 'arbitrum' and (
-									(tx.data->>'block')::bigint > $5 or (
-										(tx.data->>'block')::bigint = $5 and
-										(tx.data->>'txIdx')::integer > $6
-									)
-								)
-							)
-						)
-					%s
-					limit
-						$2
-				`,
+				%s
+				limit
+					$3
+			`,
 			getEventsQuerySelect,
 			filterEmptyTxs,
 			getEventsQuerySelectAfter,
 		)
-		params = append(
-			params,
-			userAccountId,
-			limit,
-			pagination.SolanaSlot, pagination.SolanaBlockIndex,
-			pagination.ArbitrumBlock, pagination.ArbitrumBlockIndex,
-		)
+		params = append(params, userAccountId, fromItxPosition, limit)
 	}
 
 	return
@@ -476,53 +373,41 @@ func renderEvents(
 	userAccountId int32,
 	txId string,
 	limit int32,
-	pagination *eventsPagination,
+	offset float32,
 	devMode bool,
-) ([]eventTableRowComponentData, error) {
+) ([]eventTableRowComponentData, float32, error) {
 	getEventsQuery, getEventsParams := buildGetEventsQuery(
 		userAccountId,
 		txId,
 		limit,
-		pagination,
+		offset,
 		devMode,
 	)
 	transactionsRows, err := pool.Query(ctx, getEventsQuery, getEventsParams...)
 
 	if err != nil {
-		return nil, fmt.Errorf("unable to query txs: %w", err)
+		return nil, 0, fmt.Errorf("unable to query txs: %w", err)
 	}
 
 	eventsTableRows := make([]eventTableRowComponentData, 0)
 	getTokensMetaBatch := pgx.Batch{}
 	fetchTokensMetadataQueue := make([]*fetchTokenMetadataQueued, 0)
 	var prevDateUnix int64
+	var lastItxPosition float32
 
 	for transactionsRows.Next() {
 		var (
 			txId                                   string
 			network                                db.Network
 			timestamp                              time.Time
-			solanaSlot, evmBlock                   pgtype.Int8
-			solanaBlockIndex, evmBlockIndex        pgtype.Int4
 			eventsMarshaled, parserErrorsMarshaled json.RawMessage
 		)
 
 		if err := transactionsRows.Scan(
-			&txId, &network, &timestamp,
-			&solanaSlot, &solanaBlockIndex,
-			&evmBlock, &evmBlockIndex,
+			&txId, &network, &timestamp, &lastItxPosition,
 			&eventsMarshaled, &parserErrorsMarshaled,
 		); err != nil {
-			return nil, fmt.Errorf("unable to scan txs: %w", err)
-		}
-
-		switch network {
-		case db.NetworkSolana:
-			pagination.SolanaSlot = solanaSlot.Int64
-			pagination.SolanaBlockIndex = solanaBlockIndex.Int32
-		case db.NetworkArbitrum:
-			pagination.ArbitrumBlock = evmBlock.Int64
-			pagination.ArbitrumBlockIndex = evmBlockIndex.Int32
+			return nil, 0, fmt.Errorf("unable to scan txs: %w", err)
 		}
 
 		const daySecs = 60 * 60 * 24
@@ -566,12 +451,12 @@ func renderEvents(
 			}
 
 			if err := json.Unmarshal(eventsMarshaled, &events); err != nil {
-				return nil, fmt.Errorf("unable to unmarshal events: %w", err)
+				return nil, 0, fmt.Errorf("unable to unmarshal events: %w", err)
 			}
 
 			for _, e := range events {
 				if err := e.UnmarshalData(e.SerializedData); err != nil {
-					return nil, fmt.Errorf("unable to unmarshal event data: %w", err)
+					return nil, 0, fmt.Errorf("unable to unmarshal event data: %w", err)
 				}
 
 				appImgUrl := appImgUrls[fmt.Sprintf("%d-%s", network, e.UiAppName)]
@@ -582,7 +467,6 @@ func renderEvents(
 				}
 
 				eventComponentData := &eventComponentData{
-					Idx:             e.Idx,
 					Native:          native,
 					NetworkImgUrl:   networkGlobals.imgUrl,
 					AppImgUrl:       appImgUrl,
@@ -597,6 +481,32 @@ func renderEvents(
 
 				switch data := e.Data.(type) {
 				case *db.EventTransfer:
+					fiatData, profitData := eventsCreateFiatAmountsData(
+						data.Value, data.Price, data.Profit,
+					)
+					eventComponentData.Profits = append(
+						eventComponentData.Profits,
+						profitData,
+					)
+
+					if data.MissingAmount.GreaterThan(decimal.Zero) {
+						tokenData := &eventTokenAmountComponentData{
+							Account:    data.FromAccount,
+							Amount:     data.Amount.String(),
+							LongAmount: data.Amount.String(),
+						}
+						getTokenSymbolAndImg(
+							data.Token, data.TokenSource, network,
+							&tokenData.Symbol, &tokenData.ImgUrl,
+							&fetchTokensMetadataQueue,
+							&getTokensMetaBatch,
+						)
+						eventComponentData.MissingBalances = append(
+							eventComponentData.MissingBalances,
+							tokenData,
+						)
+					}
+
 					if data.Direction == db.EventTransferInternal {
 						fromTokenData := eventsCreateTokenAmountData(
 							data.Amount, data.Token, data.FromAccount,
@@ -611,16 +521,9 @@ func renderEvents(
 							&fetchTokensMetadataQueue,
 						)
 
-						fiatData, profitData := eventsCreateFiatAmountsData(
-							data.Value, data.Price, data.Profit,
-						)
 						fiatData.Sign = 0
 						fiatData.Missing = false
 
-						eventComponentData.Profits = append(
-							eventComponentData.Profits,
-							profitData,
-						)
 						eventComponentData.OutgoingTransfers = &eventTransfersComponentData{
 							Wallet: shorten(data.FromWallet, 4, 4),
 							Tokens: []*eventTokenAmountComponentData{fromTokenData},
@@ -654,14 +557,7 @@ func renderEvents(
 							&getTokensMetaBatch,
 							&fetchTokensMetadataQueue,
 						)
-						fiatData, profitData := eventsCreateFiatAmountsData(
-							data.Value, data.Price, data.Profit,
-						)
 
-						eventComponentData.Profits = append(
-							eventComponentData.Profits,
-							profitData,
-						)
 						*transfers = eventTransfersComponentData{
 							Wallet: shorten(wallet, 4, 4),
 							Tokens: []*eventTokenAmountComponentData{
@@ -673,13 +569,13 @@ func renderEvents(
 						}
 					}
 				case *db.EventSwap:
-
+					walletShort := shorten(data.Wallet, 4, 4)
 					outgoing := eventTransfersComponentData{
-						Wallet: shorten(data.Wallet, 4, 4),
+						Wallet: walletShort,
 					}
 					eventComponentData.OutgoingTransfers = &outgoing
 					incoming := eventTransfersComponentData{
-						Wallet: shorten(data.Wallet, 4, 4),
+						Wallet: walletShort,
 					}
 					eventComponentData.IncomingTransfers = &incoming
 
@@ -702,6 +598,24 @@ func renderEvents(
 
 						outgoing.Tokens = append(outgoing.Tokens, tokenData)
 						outgoing.Fiats = append(outgoing.Fiats, fiatData)
+
+						if swap.MissingAmount.GreaterThan(decimal.Zero) {
+							tokenData := &eventTokenAmountComponentData{
+								Account:    swap.Account,
+								Amount:     swap.Amount.String(),
+								LongAmount: swap.Amount.String(),
+							}
+							getTokenSymbolAndImg(
+								swap.Token, swap.TokenSource, network,
+								&tokenData.Symbol, &tokenData.ImgUrl,
+								&fetchTokensMetadataQueue,
+								&getTokensMetaBatch,
+							)
+							eventComponentData.MissingBalances = append(
+								eventComponentData.MissingBalances,
+								tokenData,
+							)
+						}
 					}
 
 					for _, swap := range data.Incoming {
@@ -725,48 +639,17 @@ func renderEvents(
 
 		if len(parserErrorsMarshaled) != 2 {
 			var errors []*struct {
-				IxIdx    int32
-				EventIdx pgtype.Int4
-				Origin   db.ErrOrigin
-				Type     db.ParserErrorType
-				Data     json.RawMessage
+				IxIdx  int32
+				Origin db.ErrOrigin
+				Type   db.ParserErrorType
+				Data   json.RawMessage
 			}
 			if err := json.Unmarshal(parserErrorsMarshaled, &errors); err != nil {
-				return nil, fmt.Errorf("unable to unmarshal parser errors: %w", err)
+				return nil, 0, fmt.Errorf("unable to unmarshal parser errors: %w", err)
 			}
 
 			for _, err := range errors {
-				if err.Type == db.ParserErrorTypeMissingBalance {
-					var data db.ParserErrorMissingBalance
-					if err := json.Unmarshal(err.Data, &data); err != nil {
-						return nil, fmt.Errorf("unable to unmarshal parser error: %w", err)
-					}
-
-					for _, event := range rowData.Events {
-						if event.Idx == int(err.EventIdx.Int32) {
-							tokenData := &eventTokenAmountComponentData{
-								Account:    data.AccountAddress,
-								Amount:     data.Amount.String(),
-								LongAmount: data.Amount.String(),
-							}
-
-							getTokenSymbolAndImg(
-								data.Token, data.TokenSource, network,
-								&tokenData.Symbol, &tokenData.ImgUrl,
-								&fetchTokensMetadataQueue,
-								&getTokensMetaBatch,
-							)
-
-							event.MissingBalances = append(
-								event.MissingBalances,
-								tokenData,
-							)
-							break
-						}
-					}
-					continue
-				}
-
+				fmt.Println(err.Origin)
 				rowData.HasErrors = true
 
 				var errors *eventErrorGroupComponentData
@@ -783,7 +666,7 @@ func renderEvents(
 				case db.ParserErrorTypeMissingAccount:
 					var data db.ParserErrorMissingAccount
 					if err := json.Unmarshal(err.Data, &data); err != nil {
-						return nil, fmt.Errorf("unable to unmarshal parser error: %w", err)
+						return nil, 0, fmt.Errorf("unable to unmarshal parser error: %w", err)
 					}
 
 					errors.MissingAccounts = append(
@@ -796,7 +679,7 @@ func renderEvents(
 				case db.ParserErrorTypeAccountBalanceMismatch:
 					var data db.ParserErrorAccountBalanceMismatch
 					if err := json.Unmarshal(err.Data, &data); err != nil {
-						return nil, fmt.Errorf("unable to unmarshal parser error: %w", err)
+						return nil, 0, fmt.Errorf("unable to unmarshal parser error: %w", err)
 					}
 
 					errComponentData := eventErrorComponentData{
@@ -825,7 +708,7 @@ func renderEvents(
 				case db.ParserErrorTypeAccountDataMismatch:
 					var data db.ParserErrorAccountDataMismatch
 					if err := json.Unmarshal(err.Data, &data); err != nil {
-						return nil, fmt.Errorf("unable to unmarshal parser error: %w", err)
+						return nil, 0, fmt.Errorf("unable to unmarshal parser error: %w", err)
 					}
 
 					errors.DataMismatches = append(
@@ -850,7 +733,7 @@ func renderEvents(
 
 	br := pool.SendBatch(ctx, &getTokensMetaBatch)
 	if err := br.Close(); err != nil {
-		return nil, fmt.Errorf("unable to query tokens meta: %w", err)
+		return nil, 0, fmt.Errorf("unable to query tokens meta: %w", err)
 	}
 
 	// TODO: this should not be done like this but after the html was sent
@@ -880,10 +763,10 @@ func renderEvents(
 
 	br = pool.SendBatch(ctx, &insertTokenImgUrlBatch)
 	if err := br.Close(); err != nil {
-		return nil, fmt.Errorf("unable to insert token img urls: %w", err)
+		return nil, 0, fmt.Errorf("unable to insert token img urls: %w", err)
 	}
 
-	return eventsTableRows, nil
+	return eventsTableRows, lastItxPosition, nil
 }
 
 func eventsHandler(
@@ -912,9 +795,9 @@ func eventsHandler(
 		// }
 
 		var (
-			limit  = urlParam[int32]{value: 50, set: true}
-			offset eventsPagination
-			mode   = urlParam[string]{}
+			limit           = urlParam[int32]{value: 50, set: true}
+			fromItxPosition = float32(-1)
+			mode            = urlParam[string]{}
 		)
 
 		var (
@@ -928,11 +811,8 @@ func eventsHandler(
 		if v, err := strconv.Atoi(limitQueryVal); err == nil {
 			limit.value = int32(v)
 		}
-		if offsetQueryVal != "" {
-			if err := offset.deserialize([]byte(offsetQueryVal)); err != nil {
-				renderError(w, 400, "invalid pagination: %s", err)
-				return
-			}
+		if v, err := strconv.ParseFloat(offsetQueryVal, 32); err == nil {
+			fromItxPosition = float32(v)
 		}
 		if modeQueryVal == "dev" {
 			mode.value = modeQueryVal
@@ -972,12 +852,12 @@ func eventsHandler(
 
 			/////////////
 			// get events
-			eventsTableRows, err := renderEvents(
+			eventsTableRows, lastItxPosition, err := renderEvents(
 				ctx, pool,
 				userAccountId,
 				txIdQueryVal,
 				limit.value,
-				&offset,
+				fromItxPosition,
 				mode.value == "dev",
 			)
 			if err != nil {
@@ -989,8 +869,7 @@ func eventsHandler(
 			nextUrl.WriteString("/events?")
 
 			if txIdQueryVal == "" {
-				nextUrl.WriteString("offset=")
-				nextUrl.WriteString(offset.serialize())
+				nextUrl.WriteString(fmt.Sprintf("offset=%f", lastItxPosition))
 
 				if limit.set {
 					nextUrl.WriteString("&limit=")
@@ -1021,12 +900,12 @@ func eventsHandler(
 			w.WriteHeader(200)
 			w.Write(page)
 		} else {
-			eventsTableRows, err := renderEvents(
+			eventsTableRows, _, err := renderEvents(
 				ctx, pool,
 				userAccountId,
 				txIdQueryVal,
 				limit.value,
-				&offset,
+				fromItxPosition,
 				mode.value == "dev",
 			)
 			if err != nil {

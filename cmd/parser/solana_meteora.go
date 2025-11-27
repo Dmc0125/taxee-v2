@@ -93,11 +93,7 @@ func solMeteoraFarmsNewStakingEvent(
 
 	stakeAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, stakeAccountAddress)
 	if stakeAccount == nil {
-		err := solNewTxError(ctx)
-		err.Type = db.ParserErrorTypeMissingAccount
-		err.Data = &db.ParserErrorMissingAccount{
-			AccountAddress: stakeAccountAddress,
-		}
+		err := solNewErrMissingAccount(ctx, stakeAccountAddress)
 		ctx.errors = append(ctx.errors, err)
 		return
 	}
