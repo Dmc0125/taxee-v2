@@ -126,14 +126,14 @@ func (ctx *solContext) init(address string, owned bool, data any) {
 	lifetimes, ok := ctx.accounts[address]
 	if !ok || len(lifetimes) == 0 {
 		err := solNewErrMissingAccount(ctx, address)
-		appendParserError(&ctx.errors, err)
+		ctx.errors = append(ctx.errors, err)
 		return
 	}
 
 	acc := &lifetimes[len(lifetimes)-1]
 	if !acc.PreparseOpen {
 		err := solNewErrMissingAccount(ctx, address)
-		appendParserError(&ctx.errors, err)
+		ctx.errors = append(ctx.errors, err)
 		return
 	}
 
@@ -146,14 +146,14 @@ func (ctx *solContext) close(closedAddress, receiverAddress string) {
 	lifetimes, ok := ctx.accounts[closedAddress]
 	if !ok || len(lifetimes) == 0 {
 		err := solNewErrMissingAccount(ctx, closedAddress)
-		appendParserError(&ctx.errors, err)
+		ctx.errors = append(ctx.errors, err)
 		return
 	}
 
 	acc := &lifetimes[len(lifetimes)-1]
 	if !acc.PreparseOpen {
 		err := solNewErrMissingAccount(ctx, closedAddress)
-		appendParserError(&ctx.errors, err)
+		ctx.errors = append(ctx.errors, err)
 		return
 	}
 
@@ -254,7 +254,7 @@ func solAccountDataMust[T solAccountData](
 				Message:        fmt.Sprintf("Expected the data to be %s", temp.name()),
 			},
 		}
-		appendParserError(&ctx.errors, &err)
+		ctx.errors = append(ctx.errors, &err)
 		return nil, false
 	}
 	return data, true
@@ -326,7 +326,7 @@ nativeBalancesLoop:
 			// token account
 			if !accountExists && nativeBalance.Post > 0 {
 				err := solNewErrMissingAccount(ctx, address)
-				appendParserError(&ctx.errors, err)
+				ctx.errors = append(ctx.errors, err)
 				continue
 			}
 		}
@@ -354,7 +354,7 @@ nativeBalancesLoop:
 						Type:  db.ParserErrorTypeAccountBalanceMismatch,
 						Data:  &errData,
 					}
-					appendParserError(&ctx.errors, err)
+					ctx.errors = append(ctx.errors, err)
 				}
 
 				if isTokenAccount {
@@ -380,7 +380,7 @@ nativeBalancesLoop:
 								Message:        "Invalid token account mint",
 							},
 						}
-						appendParserError(&ctx.errors, err)
+						ctx.errors = append(ctx.errors, err)
 						continue nativeBalancesLoop
 					}
 				}

@@ -94,7 +94,7 @@ func invSubFromAccount(
 				TokenSource:    tokenSource,
 			},
 		}
-		appendParserError(errors, &err)
+		*errors = append(*errors, &err)
 
 		if increaseProfits {
 			remainingValue := remainingAmount.Mul(price)
@@ -161,7 +161,7 @@ func (inv *inventory) processEvent(
 						TokenSource:    data.TokenSource,
 					},
 				}
-				appendParserError(errors, &err)
+				*errors = append(*errors, &err)
 
 				value := remainingAmount.Mul(data.Price)
 				data.Profit = value

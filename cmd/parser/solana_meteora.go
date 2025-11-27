@@ -98,7 +98,7 @@ func solMeteoraFarmsNewStakingEvent(
 		err.Data = &db.ParserErrorMissingAccount{
 			AccountAddress: stakeAccountAddress,
 		}
-		appendParserError(&ctx.errors, err)
+		ctx.errors = append(ctx.errors, err)
 		return
 	}
 

@@ -68,70 +68,6 @@ func setEventTransfer(
 	}
 }
 
-func errsEq(e1, e2 any) (bool, bool) {
-	if d1, ok := e1.(*db.ParserErrorMissingAccount); ok {
-		if d2, ok := e2.(*db.ParserErrorMissingAccount); ok {
-			return true, d1.AccountAddress == d2.AccountAddress
-		}
-		return false, false
-	}
-
-	if d1, ok := e1.(*db.ParserErrorAccountBalanceMismatch); ok {
-		if d2, ok := e2.(*db.ParserErrorAccountBalanceMismatch); ok {
-			return true, d1.AccountAddress == d2.AccountAddress &&
-				d1.External.Equal(d2.External) &&
-				d1.Local.Equal(d2.Local)
-		}
-		return false, false
-	}
-
-	if d1, ok := e1.(*db.ParserErrorAccountDataMismatch); ok {
-		if d2, ok := e2.(*db.ParserErrorAccountDataMismatch); ok {
-			return true, d1.AccountAddress == d2.AccountAddress &&
-				d1.Message == d2.Message
-		}
-		return false, false
-	}
-
-	if d1, ok := e1.(*db.ParserErrorMissingBalance); ok {
-		if d2, ok := e2.(*db.ParserErrorMissingBalance); ok {
-			return true, d1.AccountAddress == d2.AccountAddress &&
-				d1.Token == d2.Token &&
-				d1.Amount.Equal(d2.Amount)
-		}
-	}
-
-	return false, false
-}
-
-func appendParserError(
-	errors *[]*db.ParserError,
-	n *db.ParserError,
-) {
-	if errors == nil {
-		a := make([]*db.ParserError, 0)
-		errors = &a
-	}
-
-	if len(*errors) == 0 {
-		*errors = append(*errors, n)
-		return
-	}
-
-	for i := len(*errors) - 1; i >= 0; i-- {
-		e := (*errors)[i]
-
-		sameType, sameData := errsEq(e.Data, n.Data)
-
-		if sameType && !sameData {
-			*errors = append(*errors, n)
-			return
-		}
-	}
-
-	*errors = append(*errors, n)
-}
-
 func devDeleteEvents(
 	ctx context.Context,
 	pool *pgxpool.Pool,
@@ -869,7 +805,7 @@ func Parse(
 							Local:          sum,
 						},
 					}
-					appendParserError(errors, &err)
+					*errors = append(*errors, &err)
 				}
 			}
 
@@ -905,7 +841,7 @@ func Parse(
 								Local:          sum,
 							},
 						}
-						appendParserError(errors, &err)
+						*errors = append(*errors, &err)
 					}
 				}
 			}
