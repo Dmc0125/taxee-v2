@@ -38,6 +38,16 @@ var networksGlobals = map[db.Network]networkGlobals{
 	},
 }
 
+var appImgUrls = map[string]string{
+	"0-native":           "/static/logo_solana.svg",
+	"0-system":           "/static/logo_solana.svg",
+	"0-token":            "/static/logo_solana.svg",
+	"0-associated_token": "/static/logo_solana.svg",
+	"0-meteora_pools":    "/static/logo_sol_meteora.svg",
+	"0-meteora_farms":    "/static/logo_sol_meteora.svg",
+	"3-native":           "/static/logo_arbitrum.svg",
+}
+
 type eventTableRowComponentData struct {
 	Type uint8
 
@@ -68,7 +78,9 @@ type eventsPageData struct {
 type eventComponentData struct {
 	Idx int
 
+	Native        bool
 	NetworkImgUrl string
+	AppImgUrl     string
 	EventType     string
 	Method        string
 
@@ -562,9 +574,18 @@ func renderEvents(
 					return nil, fmt.Errorf("unable to unmarshal event data: %w", err)
 				}
 
+				appImgUrl := appImgUrls[fmt.Sprintf("%d-%s", network, e.UiAppName)]
+				var native bool
+				switch e.UiAppName {
+				case "native", "system", "token", "associated_token":
+					native = true
+				}
+
 				eventComponentData := &eventComponentData{
 					Idx:             e.Idx,
+					Native:          native,
 					NetworkImgUrl:   networkGlobals.imgUrl,
+					AppImgUrl:       appImgUrl,
 					EventType:       toTitle(string(e.UiMethodName)),
 					Method:          toTitle(string(e.UiAppName)),
 					MissingBalances: make([]*eventTokenAmountComponentData, 0),
@@ -652,6 +673,7 @@ func renderEvents(
 						}
 					}
 				case *db.EventSwap:
+
 					outgoing := eventTransfersComponentData{
 						Wallet: shorten(data.Wallet, 4, 4),
 					}
@@ -843,11 +865,11 @@ func renderEvents(
 			}
 
 			const insertTokenImgUrl = `
-					update coingecko_token_data set
-						image_url = $1
-					where
-						coingecko_id = $2
-				`
+				update coingecko_token_data set
+					image_url = $1
+				where
+					coingecko_id = $2
+			`
 			insertTokenImgUrlBatch.Queue(
 				insertTokenImgUrl,
 				meta.Image.Small,
@@ -870,6 +892,8 @@ func eventsHandler(
 	templates *template.Template,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("cache-control", "no-cache")
+
 		/////////////
 		// parse query
 
