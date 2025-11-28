@@ -11,9 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"taxee/pkg/assert"
-	"taxee/pkg/coingecko"
 	"taxee/pkg/db"
-	"taxee/pkg/logger"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -48,6 +46,77 @@ var appImgUrls = map[string]string{
 	"3-native":           "/static/logo_arbitrum.svg",
 }
 
+type eventTokenImgComponentData struct {
+	ImgUrl      string
+	CoingeckoId string
+}
+
+type eventTokenAmountComponentData struct {
+	Account    string
+	ImgData    eventTokenImgComponentData
+	Amount     string
+	Symbol     string
+	LongAmount string
+}
+
+type eventFiatAmountComponentData struct {
+	Amount   string
+	Currency string
+	Price    string
+	Zero     bool
+	Missing  bool
+	Sign     int
+	IsProfit bool
+}
+
+type eventTransfersComponentData struct {
+	Wallet string
+	Tokens []*eventTokenAmountComponentData
+	Fiats  []*eventFiatAmountComponentData
+}
+
+type eventComponentData struct {
+	Idx int
+
+	Native        bool
+	NetworkImgUrl string
+	AppImgUrl     string
+	EventType     string
+	Method        string
+
+	OutgoingTransfers *eventTransfersComponentData
+	IncomingTransfers *eventTransfersComponentData
+	Profits           []*eventFiatAmountComponentData
+
+	MissingBalances []*eventTokenAmountComponentData
+}
+
+type eventErrorComponentData struct {
+	Wallet  string
+	Account string
+	IxIdx   int
+
+	ImgData            eventTokenImgComponentData
+	Token              string
+	LocalZero          bool
+	LocalAmount        string
+	LocalAmountLong    string
+	ExternalZero       bool
+	ExternalAmount     string
+	ExternalAmountLong string
+
+	Message string
+}
+
+type eventErrorGroupComponentData struct {
+	Type                 int
+	Empty                bool
+	MissingAccounts      []*eventErrorComponentData
+	BalanceMismatches    []*eventErrorComponentData
+	DataMismatches       []*eventErrorComponentData
+	MissingSwapTransfers []int
+}
+
 type eventsTableRowComponentData struct {
 	Type uint8
 
@@ -75,102 +144,16 @@ type eventsPageData struct {
 	Rows              []eventsTableRowComponentData
 }
 
-type eventComponentData struct {
-	Idx int
-
-	Native        bool
-	NetworkImgUrl string
-	AppImgUrl     string
-	EventType     string
-	Method        string
-
-	OutgoingTransfers *eventTransfersComponentData
-	IncomingTransfers *eventTransfersComponentData
-	Profits           []*eventFiatAmountComponentData
-
-	MissingBalances []*eventTokenAmountComponentData
-}
-
-type eventErrorComponentData struct {
-	Wallet  string
-	Account string
-	IxIdx   int
-
-	ImgUrl             string
-	Token              string
-	LocalZero          bool
-	LocalAmount        string
-	LocalAmountLong    string
-	ExternalZero       bool
-	ExternalAmount     string
-	ExternalAmountLong string
-
-	Message string
-}
-
-type eventErrorGroupComponentData struct {
-	Type              int
-	MissingAccounts   []*eventErrorComponentData
-	BalanceMismatches []*eventErrorComponentData
-	DataMismatches    []*eventErrorComponentData
-}
-
-type eventTransfersComponentData struct {
-	Wallet string
-	Tokens []*eventTokenAmountComponentData
-	Fiats  []*eventFiatAmountComponentData
-}
-
-type eventTokenAmountComponentData struct {
-	Account    string
-	ImgUrl     string
-	Amount     string
-	Symbol     string
-	LongAmount string
-}
-
-type eventFiatAmountComponentData struct {
-	Amount   string
-	Currency string
-	Price    string
-	Zero     bool
-	Missing  bool
-	Sign     int
-	IsProfit bool
-}
-
-type fetchTokenMetadataQueued struct {
-	coingeckoId string
-	imgUrls     []*string
-}
-
 func getTokenSymbolAndImg(
 	token string,
 	tokenSource uint16,
 	network db.Network,
-	symbolPtr, imgUrlPtr *string,
-	tokensQueue *[]*fetchTokenMetadataQueued,
+	symbolPtr *string,
+	imgDataPtr *eventTokenImgComponentData,
 	getTokensMetaBatch *pgx.Batch,
 ) {
-	appendTokenToQueue := func(coingeckoId string) {
-		contains := false
-		for _, q := range *tokensQueue {
-			if q.coingeckoId == coingeckoId {
-				contains = true
-				q.imgUrls = append(q.imgUrls, imgUrlPtr)
-				break
-			}
-		}
-
-		if !contains {
-			*tokensQueue = append(*tokensQueue, &fetchTokenMetadataQueued{
-				coingeckoId: coingeckoId,
-				imgUrls:     []*string{imgUrlPtr},
-			})
-		}
-	}
-
-	if tokenSource == math.MaxUint16 {
+	switch tokenSource {
+	case math.MaxUint16:
 		const getTokenMetaByCoingeckoId = `
 			select
 				symbol, image_url
@@ -193,13 +176,13 @@ func getTokenSymbolAndImg(
 				return err
 			}
 			if imgUrl.Valid {
-				*imgUrlPtr = imgUrl.String
+				imgDataPtr.ImgUrl = imgUrl.String
 			} else {
-				appendTokenToQueue(token)
+				imgDataPtr.CoingeckoId = token
 			}
 			return nil
 		})
-	} else {
+	default:
 		const getTokenMetaByAddressAndNetwork = `
 			select
 				ctd.symbol, ctd.image_url, ctd.coingecko_id
@@ -229,9 +212,9 @@ func getTokenSymbolAndImg(
 				return nil
 			}
 			if imgUrl.Valid {
-				*imgUrlPtr = imgUrl.String
+				imgDataPtr.ImgUrl = imgUrl.String
 			} else {
-				appendTokenToQueue(coingeckoId)
+				imgDataPtr.CoingeckoId = coingeckoId
 			}
 			return err
 		})
@@ -244,7 +227,6 @@ func eventsCreateTokenAmountData(
 	network db.Network,
 	tokenSource uint16,
 	getTokensMetaBatch *pgx.Batch,
-	tokensQueue *[]*fetchTokenMetadataQueued,
 ) *eventTokenAmountComponentData {
 	tokenData := &eventTokenAmountComponentData{
 		Account:    account,
@@ -253,8 +235,7 @@ func eventsCreateTokenAmountData(
 	}
 	getTokenSymbolAndImg(
 		token, tokenSource, network,
-		&tokenData.Symbol, &tokenData.ImgUrl,
-		tokensQueue,
+		&tokenData.Symbol, &tokenData.ImgData,
 		getTokensMetaBatch,
 	)
 	return tokenData
@@ -391,7 +372,6 @@ func renderEvents(
 
 	eventsTableRows := make([]eventsTableRowComponentData, 0)
 	getTokensMetaBatch := pgx.Batch{}
-	fetchTokensMetadataQueue := make([]*fetchTokenMetadataQueued, 0)
 	var prevDateUnix int64
 	var lastItxPosition float32
 
@@ -481,7 +461,6 @@ func renderEvents(
 
 				switch data := e.Data.(type) {
 				case *db.EventTransfer:
-					fmt.Println(data.PrecedingEvents)
 					fiatData, profitData := eventsCreateFiatAmountsData(
 						data.Value, data.Price, data.Profit,
 					)
@@ -498,8 +477,7 @@ func renderEvents(
 						}
 						getTokenSymbolAndImg(
 							data.Token, data.TokenSource, network,
-							&tokenData.Symbol, &tokenData.ImgUrl,
-							&fetchTokensMetadataQueue,
+							&tokenData.Symbol, &tokenData.ImgData,
 							&getTokensMetaBatch,
 						)
 						eventComponentData.MissingBalances = append(
@@ -513,13 +491,11 @@ func renderEvents(
 							data.Amount, data.Token, data.FromAccount,
 							network, data.TokenSource,
 							&getTokensMetaBatch,
-							&fetchTokensMetadataQueue,
 						)
 						toTokenData := eventsCreateTokenAmountData(
 							data.Amount, data.Token, data.ToAccount,
 							network, data.TokenSource,
 							&getTokensMetaBatch,
-							&fetchTokensMetadataQueue,
 						)
 
 						fiatData.Sign = 0
@@ -556,7 +532,6 @@ func renderEvents(
 							network,
 							data.TokenSource,
 							&getTokensMetaBatch,
-							&fetchTokensMetadataQueue,
 						)
 
 						*transfers = eventTransfersComponentData{
@@ -586,7 +561,6 @@ func renderEvents(
 							network,
 							swap.TokenSource,
 							&getTokensMetaBatch,
-							&fetchTokensMetadataQueue,
 						)
 						fiatData, profitData := eventsCreateFiatAmountsData(
 							swap.Value, swap.Price, swap.Profit,
@@ -608,8 +582,7 @@ func renderEvents(
 							}
 							getTokenSymbolAndImg(
 								swap.Token, swap.TokenSource, network,
-								&tokenData.Symbol, &tokenData.ImgUrl,
-								&fetchTokensMetadataQueue,
+								&tokenData.Symbol, &tokenData.ImgData,
 								&getTokensMetaBatch,
 							)
 							eventComponentData.MissingBalances = append(
@@ -622,10 +595,8 @@ func renderEvents(
 					for _, swap := range data.Incoming {
 						tokenData := eventsCreateTokenAmountData(
 							swap.Amount, swap.Token, swap.Account,
-							network,
-							swap.TokenSource,
+							network, swap.TokenSource,
 							&getTokensMetaBatch,
-							&fetchTokensMetadataQueue,
 						)
 						fiatData, _ := eventsCreateFiatAmountsData(
 							swap.Value, swap.Price, swap.Profit,
@@ -650,7 +621,6 @@ func renderEvents(
 			}
 
 			for _, err := range errors {
-				fmt.Println(err.Origin)
 				rowData.HasErrors = true
 
 				var errors *eventErrorGroupComponentData
@@ -663,7 +633,11 @@ func renderEvents(
 					assert.True(false, "invalid error origin: %d", err.Origin)
 				}
 
+				errors.Empty = false
+
 				switch err.Type {
+				case db.ParserErrorTypeOneSidedSwap:
+					errors.MissingSwapTransfers = append(errors.MissingSwapTransfers, int(err.IxIdx))
 				case db.ParserErrorTypeMissingAccount:
 					var data db.ParserErrorMissingAccount
 					if err := json.Unmarshal(err.Data, &data); err != nil {
@@ -697,8 +671,7 @@ func renderEvents(
 
 					getTokenSymbolAndImg(
 						data.Token, uint16(network), network,
-						&errComponentData.Token, &errComponentData.ImgUrl,
-						&fetchTokensMetadataQueue,
+						&errComponentData.Token, &errComponentData.ImgData,
 						&getTokensMetaBatch,
 					)
 
@@ -739,33 +712,33 @@ func renderEvents(
 
 	// TODO: this should not be done like this but after the html was sent
 	// via server sent events or something
-	insertTokenImgUrlBatch := pgx.Batch{}
-	logger.Info("Fetching tokens: %d", len(fetchTokensMetadataQueue))
-	for _, queued := range fetchTokensMetadataQueue {
-		meta, err := coingecko.GetCoinMetadata(queued.coingeckoId)
-		if err == nil {
-			for _, imgUrlPtr := range queued.imgUrls {
-				*imgUrlPtr = meta.Image.Small
-			}
-
-			const insertTokenImgUrl = `
-				update coingecko_token_data set
-					image_url = $1
-				where
-					coingecko_id = $2
-			`
-			insertTokenImgUrlBatch.Queue(
-				insertTokenImgUrl,
-				meta.Image.Small,
-				queued.coingeckoId,
-			)
-		}
-	}
-
-	br = pool.SendBatch(ctx, &insertTokenImgUrlBatch)
-	if err := br.Close(); err != nil {
-		return nil, 0, fmt.Errorf("unable to insert token img urls: %w", err)
-	}
+	// insertTokenImgUrlBatch := pgx.Batch{}
+	// logger.Info("Fetching tokens: %d", len(fetchTokensMetadataQueue))
+	// for _, queued := range fetchTokensMetadataQueue {
+	// 	meta, err := coingecko.GetCoinMetadata(queued.coingeckoId)
+	// 	if err == nil {
+	// 		for _, imgUrlPtr := range queued.imgUrls {
+	// 			*imgUrlPtr = meta.Image.Small
+	// 		}
+	//
+	// 		const insertTokenImgUrl = `
+	// 			update coingecko_token_data set
+	// 				image_url = $1
+	// 			where
+	// 				coingecko_id = $2
+	// 		`
+	// 		insertTokenImgUrlBatch.Queue(
+	// 			insertTokenImgUrl,
+	// 			meta.Image.Small,
+	// 			queued.coingeckoId,
+	// 		)
+	// 	}
+	// }
+	//
+	// br = pool.SendBatch(ctx, &insertTokenImgUrlBatch)
+	// if err := br.Close(); err != nil {
+	// 	return nil, 0, fmt.Errorf("unable to insert token img urls: %w", err)
+	// }
 
 	return eventsTableRows, lastItxPosition, nil
 }
@@ -895,7 +868,7 @@ func eventsHandler(
 				eventsPageData,
 			)
 
-			page := executeTemplateMust(templates, "page_layout", pageLayoutComponentData{
+			page := executeTemplateMust(templates, "dashboard_layout", pageLayoutComponentData{
 				Content: template.HTML(eventsPageContent),
 			})
 			w.WriteHeader(200)

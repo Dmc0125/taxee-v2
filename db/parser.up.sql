@@ -84,7 +84,7 @@ create table parser_error (
 
     origin smallint not null,
     type smallint not null,
-    data jsonb not null
+    data jsonb
 );
 
 commit;

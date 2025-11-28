@@ -1,3 +1,6 @@
+import { fetchTokensImages } from "./tokens.js"
+import { decodeHex } from "./utils.js"
+
 /**
 * @param {any} val
 * @param {string} msg
@@ -8,56 +11,11 @@ function assertDefined(val, msg) {
     }
 }
 
-///////////////////
-// Refetch, reparse, ... and progress indicator
-
-/**
-* @param {string} encoded
-*/
-function decodeHex(encoded) {
-    let str = ""
-    for (let i = 0; i < encoded.length; i += 2) {
-        const hexByte = encoded.substring(i, i + 2)
-        str += String.fromCharCode(parseInt(hexByte, 16))
-    }
-    return str
-}
-
-/**
-* @param {string} requestId
-* @param {(html: string, done: boolean) => void} updateFn
-*/
-function listenForUpdates(requestId, updateFn) {
-    try {
-        const requestConn = new EventSource(`/sync_request?id=${requestId}`)
-
-        requestConn.addEventListener("update", function(e) {
-            /** @type {string} */
-            const d = e.data
-            const [status, encodedHtml] = d.split(",")
-            const btnComponentHtml = decodeHex(encodedHtml)
-            updateFn(btnComponentHtml, status == "done")
-
-            if (status == "done") {
-                requestConn.close()
-            }
-        })
-
-        requestConn.addEventListener("error", function(e) {
-            console.error("request connection error: ", e.data)
-            requestConn.close()
-        })
-    } catch {
-        console.error("streaming is not supported")
-    }
-}
-
-
 /**
 * @param {string} requestType
 * @returns {Promise<{ rid: string; html: string } | null>}
 */
-async function handleClickParse(requestType) {
+async function sendSyncRequest(requestType) {
     try {
         const res = await fetch(
             `/sync_request?type=${requestType}`,
@@ -82,35 +40,68 @@ async function handleClickParse(requestType) {
     }
 }
 
-/**
-* @param {Element} el
-* @param {string} html
-* @returns {Element}
+/** 
+* @param {string} requestId
+* @returns {Promise<string | null>}
 */
-function updateEl(el, html) {
-    el.outerHTML = html
-    return document.querySelector(`#${el.id}`)
+function handleSync(requestId) {
+    console.log("handle sync")
+    /** @type {EventSource} */
+    let requestConn
+    try {
+        requestConn = new EventSource(`/sync_request?id=${requestId}`)
+    } catch {
+        console.error("streaming is not supported")
+        return
+    }
+
+    requestConn.addEventListener("update", function(e) {
+        const btnComponentEl = document.querySelector("#progress-indicator")
+        const html = decodeHex(e.data)
+        btnComponentEl.outerHTML = html
+    })
+
+    const p = new Promise(async function(resolve) {
+        requestConn.addEventListener("error", function(e) {
+            requestConn.close()
+            reject(e.data)
+        })
+
+        requestConn.addEventListener("close", async function() {
+            requestConn.close()
+
+            const tableRes = await fetch(`/events${window.location.search}&partial=true`)
+            const tableHtml = await tableRes.text()
+            document.querySelector("#events-table").innerHTML = tableHtml
+
+            await fetchTokensImages()
+            resolve()
+        })
+    })
+
+    return p
 }
 
-let btnRefetchEl = document.querySelector("#btn-refetch")
-let btnParseTxsEl = document.querySelector("#btn-parse-txs")
-assertDefined(btnParseTxsEl, "#btn-parse-txs not defined")
-let btnParseEventsEl = document.querySelector("#btn-parse-events")
-let progressIndicatorEl = document.querySelector("#progress-indicator")
 let parsing = false
 
-if (progressIndicatorEl.hasAttribute("data-request-id")) {
-    parsing = true
-    const rid = progressIndicatorEl.getAttribute("data-request-id")
+document.addEventListener("DOMContentLoaded", async function() {
+    const progressIndicatorEl = document.querySelector("#progress-indicator")
 
-    listenForUpdates(rid, function(html, done) {
-        progressIndicatorEl = updateEl(progressIndicatorEl, html)
-        if (done) {
-            // TODO: set btn as clickable
-            parsing = false
-        }
-    })
-}
+    if (progressIndicatorEl.hasAttribute("data-request-id")) {
+        parsing = true
+        const rid = progressIndicatorEl.getAttribute("data-request-id")
+
+        await handleSync(rid)
+        parsing = false
+    } else {
+        fetchTokensImages()
+    }
+})
+
+// let btnRefetchEl = document.querySelector("#btn-refetch")
+let btnParseTxsEl = document.querySelector("#btn-parse-txs")
+assertDefined(btnParseTxsEl, "#btn-parse-txs not defined")
+// let btnParseEventsEl = document.querySelector("#btn-parse-events")
 
 btnParseTxsEl.addEventListener("click", async function() {
     if (parsing) {
@@ -118,30 +109,19 @@ btnParseTxsEl.addEventListener("click", async function() {
     }
 
     parsing = true
-    const result = await handleClickParse(1)
+    const result = await sendSyncRequest(1)
     if (result == null) {
         return
     }
 
     const { rid, html } = result
-    progressIndicatorEl = updateEl(progressIndicatorEl, html)
+    document.querySelector("#progress-indicator").outerHTML = html
 
-    listenForUpdates(rid, function(html, done) {
-        progressIndicatorEl = updateEl(progressIndicatorEl, html)
-        if (done) {
-            // TODO: set btn as clickable
-            fetch(`/events${window.location.search}&partial=true`)
-                .then(function(tableResult) {
-                    return tableResult.text()
-                })
-                .then(function(tableHtml) {
-                    document.querySelector("#events-table").innerHTML = tableHtml
-                    console.log("table updated")
-                })
-
-            parsing = false
-        }
-    })
+    const err = await handleSync(rid)
+    if (err != null) {
+        console.error(err)
+    }
+    parsing = false
 })
 
 
@@ -157,8 +137,6 @@ btnParseTxsEl.addEventListener("click", async function() {
 
 /** @type {Element} */
 let tableHeaderEl
-/** @type {DOMRect} */
-let tableHeaderRect
 /** @type {number} */
 let tableHeaderOffsetFromTop
 

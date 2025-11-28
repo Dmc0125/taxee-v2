@@ -16,29 +16,47 @@ import (
 	"time"
 )
 
-type pageLayoutComponentData struct {
-	Content template.HTML
+func sendSSEError(
+	w http.ResponseWriter,
+	flusher http.Flusher,
+	msg string,
+) {
+	fmt.Fprintf(w, "event: error\ndata: %s\n\n", msg)
+	flusher.Flush()
 }
 
-var pageLayoutComponent = `
-{{define "page_layout"}}
-	<!DOCTYPE html>
-	<html>
-		<head>
-			<title>Taxee</title>
-			<link href="static/output.css" rel="stylesheet">
-		</head>
-		<body class="min-h-screen bg-gray-50">
-			{{ .Content }}
-		</body>
-	</html>
-{{end}}
-`
+func sendSSEUpdate(
+	w http.ResponseWriter,
+	flusher http.Flusher,
+	data string,
+) {
+	fmt.Fprintf(w, "event: update\ndata: %s\n\n", data)
+	flusher.Flush()
+}
 
-func loadTemplate(templates *template.Template, tmpl string) {
-	var err error
-	templates, err = templates.Parse(tmpl)
-	assert.NoErr(err, "unable to load template")
+func sendSSEClose(
+	w http.ResponseWriter,
+	flusher http.Flusher,
+) {
+	fmt.Fprintf(w, "event: close\ndata:\n\n")
+	flusher.Flush()
+}
+
+func initSSEHandler(w http.ResponseWriter) (flusher http.Flusher, ok bool) {
+	headers := w.Header()
+	headers.Set("content-type", "text/event-stream")
+	headers.Set("cache-control", "no-cache")
+	headers.Set("connection", "keep-alive")
+
+	flusher, ok = w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", 500)
+	}
+	return
+}
+
+type pageLayoutComponentData struct {
+	Content template.HTML
 }
 
 func loadTemplates(templates *template.Template, dirPath string) {
@@ -64,17 +82,9 @@ func (b *bufWriter) Write(n []byte) (int, error) {
 	return len(n), nil
 }
 
-func executeTemplate(tmpl *template.Template, name string, data any) ([]byte, error) {
+func executeTemplateMust(tmpl *template.Template, name string, data any) []byte {
 	buf := bufWriter([]byte{})
 	err := tmpl.ExecuteTemplate(&buf, name, data)
-	if err != nil {
-		return nil, err
-	}
-	return buf, nil
-}
-
-func executeTemplateMust(tmpl *template.Template, name string, data any) []byte {
-	buf, err := executeTemplate(tmpl, name, data)
 	assert.NoErr(err, "unable to execute template")
 	return buf
 }
@@ -89,7 +99,7 @@ func serveStaticFiles(prod bool) {
 	default:
 		_, file, _, ok := runtime.Caller(0)
 		assert.True(ok, "unable to get runtime caller")
-		staticDir = path.Join(file, "../static")
+		staticDir = path.Join(file, "../../static")
 	}
 
 	handler := http.FileServer(http.Dir(staticDir))
@@ -192,7 +202,6 @@ func main() {
 		"tern":    tern,
 	}
 	var templates *template.Template = template.New("root").Funcs(templateFuncs)
-	loadTemplate(templates, pageLayoutComponent)
 	loadTemplates(templates, htmlPath)
 	pool, err := db.InitPool(context.Background(), appEnv)
 	assert.NoErr(err, "")
@@ -207,12 +216,12 @@ func main() {
 		eventsHandler(context.Background(), pool, templates),
 	)
 	http.HandleFunc(
-		"/transactions",
-		transactionsHandler(context.Background(), pool, templates),
-	)
-	http.HandleFunc(
 		"/sync_request",
 		syncRequestHandler(pool, templates),
+	)
+	http.HandleFunc(
+		"/tokens",
+		tokensHandler(pool, templates),
 	)
 
 	fmt.Println("Listening at: http://localhost:8888")

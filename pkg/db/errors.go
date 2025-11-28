@@ -40,6 +40,8 @@ const (
 	// account data does not match between
 	//  - solana accounts and chain
 	ParserErrorTypeAccountDataMismatch
+	// swap missing either incoming or outgoing transfers
+	ParserErrorTypeOneSidedSwap
 )
 
 type ParserError struct {

@@ -69,7 +69,7 @@ func (acc *accountLifetime) open(slot uint64, ixIdx uint32) bool {
 type solContext struct {
 	wallets   []string
 	accounts  map[string][]accountLifetime
-	errors    []*db.ParserError
+	errors    *[]*db.ParserError
 	errOrigin db.ErrOrigin
 
 	// volatile for each tx/ix
@@ -110,28 +110,24 @@ func (ctx *solContext) receiveSol(address string, amount uint64) {
 	ctx.accounts[address] = lifetimes
 }
 
-func solNewErrMissingAccount(ctx *solContext, address string) *db.ParserError {
-	return solNewError(
-		ctx,
-		db.ParserErrorTypeMissingAccount,
-		&db.ParserErrorMissingAccount{
-			AccountAddress: address,
-		},
-	)
+func solNewErrMissingAccount(ctx *solContext, address string) {
+	err := solNewError(ctx)
+	err.Type = db.ParserErrorTypeMissingAccount
+	err.Data = &db.ParserErrorMissingAccount{
+		AccountAddress: address,
+	}
 }
 
 func (ctx *solContext) init(address string, owned bool, data any) {
 	lifetimes, ok := ctx.accounts[address]
 	if !ok || len(lifetimes) == 0 {
-		err := solNewErrMissingAccount(ctx, address)
-		ctx.errors = append(ctx.errors, err)
+		solNewErrMissingAccount(ctx, address)
 		return
 	}
 
 	acc := &lifetimes[len(lifetimes)-1]
 	if !acc.PreparseOpen {
-		err := solNewErrMissingAccount(ctx, address)
-		ctx.errors = append(ctx.errors, err)
+		solNewErrMissingAccount(ctx, address)
 		return
 	}
 
@@ -143,15 +139,13 @@ func (ctx *solContext) init(address string, owned bool, data any) {
 func (ctx *solContext) close(closedAddress, receiverAddress string) {
 	lifetimes, ok := ctx.accounts[closedAddress]
 	if !ok || len(lifetimes) == 0 {
-		err := solNewErrMissingAccount(ctx, closedAddress)
-		ctx.errors = append(ctx.errors, err)
+		solNewErrMissingAccount(ctx, closedAddress)
 		return
 	}
 
 	acc := &lifetimes[len(lifetimes)-1]
 	if !acc.PreparseOpen {
-		err := solNewErrMissingAccount(ctx, closedAddress)
-		ctx.errors = append(ctx.errors, err)
+		solNewErrMissingAccount(ctx, closedAddress)
 		return
 	}
 
@@ -206,8 +200,7 @@ func (ctx *solContext) findOwnedOrError(
 ) (account *accountLifetime, ok bool) {
 	account = ctx.find(slot, ixIdx, address, 1)
 	if account == nil {
-		err := solNewErrMissingAccount(ctx, address)
-		ctx.errors = append(ctx.errors, err)
+		solNewErrMissingAccount(ctx, address)
 	} else {
 		ok = true
 	}
@@ -227,15 +220,12 @@ func solAccountDataMust[T solAccountData](
 	data, ok := account.Data.(*T)
 	if !ok {
 		var temp T
-		err := solNewError(
-			ctx,
-			db.ParserErrorTypeAccountDataMismatch,
-			&db.ParserErrorAccountDataMismatch{
-				AccountAddress: address,
-				Message:        fmt.Sprintf("Expected the data to be %s", temp.name()),
-			},
-		)
-		ctx.errors = append(ctx.errors, err)
+		err := solNewError(ctx)
+		err.Type = db.ParserErrorTypeAccountDataMismatch
+		err.Data = &db.ParserErrorAccountDataMismatch{
+			AccountAddress: address,
+			Message:        fmt.Sprintf("Expected the data to be %s", temp.name()),
+		}
 		return nil, false
 	}
 	return data, true
@@ -306,8 +296,7 @@ nativeBalancesLoop:
 			// NOTE: account has to exist if it is owned and it is opened
 			// token account
 			if !accountExists && nativeBalance.Post > 0 {
-				err := solNewErrMissingAccount(ctx, address)
-				ctx.errors = append(ctx.errors, err)
+				solNewErrMissingAccount(ctx, address)
 				continue
 			}
 		}
@@ -329,12 +318,9 @@ nativeBalancesLoop:
 					if isTokenAccount {
 						errData.Wallet = tokens.Owner
 					}
-					err := solNewError(
-						ctx,
-						db.ParserErrorTypeAccountBalanceMismatch,
-						&errData,
-					)
-					ctx.errors = append(ctx.errors, err)
+					err := solNewError(ctx)
+					err.Type = db.ParserErrorTypeAccountBalanceMismatch
+					err.Data = &errData
 				}
 
 				if isTokenAccount {
@@ -351,15 +337,12 @@ nativeBalancesLoop:
 						}
 					}
 					if !found {
-						err := solNewError(
-							ctx,
-							db.ParserErrorTypeAccountDataMismatch,
-							&db.ParserErrorAccountDataMismatch{
-								AccountAddress: address,
-								Message:        "Invalid token account mint",
-							},
-						)
-						ctx.errors = append(ctx.errors, err)
+						err := solNewError(ctx)
+						err.Type = db.ParserErrorTypeAccountDataMismatch
+						err.Data = &db.ParserErrorAccountDataMismatch{
+							AccountAddress: address,
+							Message:        "Invalid token account mint",
+						}
 						continue nativeBalancesLoop
 					}
 				}
@@ -574,6 +557,12 @@ func solSwapEventFromTransfers(
 	eventType db.EventType,
 ) {
 	owner, incomingTransfers, outgoingTransfers := solParseTransfers(ctx, innerInstructions)
+
+	if len(incomingTransfers) == 0 || len(outgoingTransfers) == 0 {
+		err := solNewError(ctx)
+		err.Type = db.ParserErrorTypeOneSidedSwap
+		return
+	}
 
 	swapEventData := db.EventSwap{
 		Wallet:   owner,

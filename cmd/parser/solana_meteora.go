@@ -93,8 +93,7 @@ func solMeteoraFarmsNewStakingEvent(
 
 	stakeAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, stakeAccountAddress)
 	if stakeAccount == nil {
-		err := solNewErrMissingAccount(ctx, stakeAccountAddress)
-		ctx.errors = append(ctx.errors, err)
+		solNewErrMissingAccount(ctx, stakeAccountAddress)
 		return
 	}
 
@@ -232,7 +231,7 @@ func solProcessMercurialIx(
 	case 1:
 		method = "add_liquidity"
 		eventType = db.EventTypeAddLiquidity
-	case 3:
+	case 2, 3:
 		method = "remove_liquidity"
 		eventType = db.EventTypeRemoveLiquidity
 	default:

@@ -33,17 +33,6 @@ import (
 //
 // server pulls new request
 
-func sendError(
-	w http.ResponseWriter,
-	flusher http.Flusher,
-	msg string,
-	args ...any,
-) {
-	m := fmt.Sprintf(msg, args...)
-	fmt.Fprintf(w, "event: error\ndata: %s\n\n", m)
-	flusher.Flush()
-}
-
 func syncRequestHandler(
 	pool *pgxpool.Pool,
 	templates *template.Template,
@@ -114,14 +103,8 @@ func syncRequestHandler(
 			w.WriteHeader(200)
 			fmt.Fprintf(w, "%d,%s", syncRequestId, string(templateBuf))
 		case "GET":
-			headers := w.Header()
-			headers.Set("content-type", "text/event-stream")
-			headers.Set("cache-control", "no-cache")
-			headers.Set("connection", "keep-alive")
-
-			flusher, ok := w.(http.Flusher)
+			flusher, ok := initSSEHandler(w)
 			if !ok {
-				http.Error(w, "streaming not supported", 500)
 				return
 			}
 
@@ -130,11 +113,11 @@ func syncRequestHandler(
 			var requestId int32
 
 			if ri, err := strconv.ParseInt(requestIdRaw, 10, 32); err != nil {
-				sendError(w, flusher, "invalid request id: %s", requestIdRaw)
+				sendSSEError(w, flusher, fmt.Sprintf("invalid request id: %s", requestIdRaw))
 				return
 			} else {
 				if ri < 0 {
-					sendError(w, flusher, "request id can not be < 0")
+					sendSSEError(w, flusher, "request id can not be < 0")
 					return
 				}
 				requestId = int32(ri)
@@ -158,21 +141,18 @@ func syncRequestHandler(
 
 					var syncRequestStatus db.SyncRequestStatus
 					var progressIndicator eventsProgressIndicatorComponentData
-					var status string
 
 					if err := row.Scan(&syncRequestStatus); err != nil {
 						if !errors.Is(err, pgx.ErrNoRows) {
-							sendError(w, flusher, "unable to query sync request")
+							sendSSEError(w, flusher, "unable to query sync request")
 							return
 						}
-						// TODO: when done, should render events
 						progressIndicator.Done = true
-						status = "done"
 					} else {
 						progressIndicator.Status = syncRequestStatus.String()
 					}
 
-					if prevSyncRequestStatus == syncRequestStatus && status != "done" {
+					if prevSyncRequestStatus == syncRequestStatus && !progressIndicator.Done {
 						continue
 					}
 					prevSyncRequestStatus = syncRequestStatus
@@ -182,13 +162,11 @@ func syncRequestHandler(
 						"events_progress_indicator",
 						progressIndicator,
 					)
-
 					encoded := hex.EncodeToString(templateBuf)
+					sendSSEUpdate(w, flusher, encoded)
 
-					fmt.Fprintf(w, "event: update\ndata: %s,%s\n\n", status, encoded)
-					flusher.Flush()
-
-					if status == "done" {
+					if progressIndicator.Done {
+						sendSSEClose(w, flusher)
 						return
 					}
 				}

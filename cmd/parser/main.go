@@ -55,18 +55,14 @@ func evmNewEvent(ctx *evmContext) *db.Event {
 	}
 }
 
-func solNewError(
-	ctx *solContext,
-	t db.ParserErrorType,
-	data any,
-) *db.ParserError {
-	return &db.ParserError{
+func solNewError(ctx *solContext) *db.ParserError {
+	err := db.ParserError{
 		TxId:   ctx.txId,
 		IxIdx:  int32(ctx.ixIdx),
 		Origin: ctx.errOrigin,
-		Type:   t,
-		Data:   data,
 	}
+	*ctx.errors = append(*ctx.errors, &err)
+	return &err
 }
 
 func getTransferEventDirection(fromInternal, toInternal bool) db.EventTransferDirection {
@@ -563,7 +559,7 @@ func Parse(
 	logger.Info("Init parser state")
 	solCtx := solContext{
 		accounts:  make(map[string][]accountLifetime),
-		errors:    parserErrors,
+		errors:    &parserErrors,
 		errOrigin: db.ErrOriginPreprocess,
 	}
 	evmContexts := make(map[db.Network]*evmContext)
