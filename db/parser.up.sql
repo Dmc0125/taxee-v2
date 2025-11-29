@@ -71,7 +71,9 @@ create table event (
     ui_app_name varchar not null,
     ui_method_name varchar not null,
     type smallint not null,
-    data jsonb not null
+    data jsonb not null,
+
+    preceding_events_ids uuid[] not null
 );
 
 create table parser_error (

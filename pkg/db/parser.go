@@ -170,8 +170,7 @@ type EventTransfer struct {
 	Value  decimal.Decimal `json:"value"`
 	Profit decimal.Decimal `json:"profit"`
 
-	MissingAmount   decimal.Decimal `json:"missingAmount"`
-	PrecedingEvents []uuid.UUID     `json:"precedingEvents"`
+	MissingAmount decimal.Decimal `json:"missingAmount"`
 }
 
 type EventSwapTransfer struct {
@@ -184,8 +183,7 @@ type EventSwapTransfer struct {
 	Value  decimal.Decimal `json:"value"`
 	Profit decimal.Decimal `json:"profit"`
 
-	MissingAmount   decimal.Decimal `json:"missingAmount"`
-	PrecedingEvents []uuid.UUID     `json:"precedingEvents"`
+	MissingAmount decimal.Decimal `json:"missingAmount"`
 }
 
 type EventSwap struct {
@@ -211,13 +209,14 @@ const (
 )
 
 type Event struct {
-	Id           uuid.UUID
-	Timestamp    time.Time
-	Network      Network
-	UiAppName    string
-	UiMethodName string
-	Type         EventType
-	Data         any
+	Id              uuid.UUID
+	Timestamp       time.Time
+	Network         Network
+	UiAppName       string
+	UiMethodName    string
+	Type            EventType
+	Data            any
+	PrecedingEvents []uuid.UUID
 }
 
 func (event *Event) UnmarshalData(src []byte) error {

@@ -763,11 +763,17 @@ func Parse(
 			const insertEventQuery = `
 				insert into event (
 					id, position, internal_tx_id,
-					ui_app_name, ui_method_name, type, data
+					ui_app_name, ui_method_name, type, data,
+					preceding_events_ids
 				) values (
-					$1, $2, $3, $4, $5, $6, $7
+					$1, $2, $3, $4, $5, $6, $7, $8
 				)
 			`
+
+			if event.PrecedingEvents == nil {
+				event.PrecedingEvents = make([]uuid.UUID, 0)
+			}
+
 			batch.Queue(
 				insertEventQuery,
 				event.Id,
@@ -777,6 +783,7 @@ func Parse(
 				event.UiMethodName,
 				event.Type,
 				eventData,
+				event.PrecedingEvents,
 			)
 			eventPosition += 1
 		}

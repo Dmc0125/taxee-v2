@@ -168,8 +168,8 @@
             </div>
 
             <div class="flex flex-col ml-4">
-                <span class="text-gray-800 font-medium">{{ .EventType }}</span>
-                <span class="text-gray-600 text-sm">{{ .Method }}</span>
+                <span class="text-gray-800 font-medium">{{ toTitle .Method }}</span>
+                <span class="text-gray-600 text-sm">{{ toTitle .App }}</span>
             </div>
         </div>
 
@@ -196,6 +196,26 @@
         {{ end }}
     </div>
 
+    {{ if .PrecedingEvents }}
+        <div class="w-full px-4 py-2 border-t border-gray-200">
+            <span class="text-sm text-gray-600">Preceding events</span>
+            <ul class="w-full mt-2 flex flex-col gap-2 [--grid-cols:3rem_repeat(6,1fr)]">
+                <li class="grid grid-cols-(--grid-cols) -mx-2 px-2 py-0.5 rounded-lg text-sm text-gray-800 bg-gray-100">
+                    <span></span>
+                    <span>Date</span>
+                    <span>Time</span>
+                    <span>Type</span>
+                    <span>Amount</span>
+                    <span>Value</span>
+                    <span>Price</span>
+                </li>
+                {{ range .PrecedingEvents }}
+                    {{ template "preceding_event_component" . }}
+                {{ end }}
+            </ul>
+        </div>
+    {{ end }}
+
     {{ if .MissingBalances }}
         <div class="w-full px-4 py-2 bg-red-100 rounded-b-[.45rem]">
             {{ range .MissingBalances }}
@@ -212,6 +232,22 @@
             {{ end }}
         </div>
     {{ end }}
+{{ end }}
+
+{{ define "preceding_event_component" }}
+<li class="grid grid-cols-(--grid-cols) text-gray-700 text-sm">
+    <a href="/events?" target="_blank">
+        <svg class="size-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
+        </svg>
+    </a>
+    <span>{{ formatDate .Timestamp }}</span>
+    <span>{{ formatTime .Timestamp }}</span>
+    <span>{{ .Method }}</span>
+    <span>{{ template "event_token_amount_component" .TokenAmount }}</span>
+    <span>{{ template "event_fiat_amount_component" .FiatAmount }}</span>
+    <span>{{ template "event_fiat_amount_component" .Price }}</span>
+</li>
 {{ end }}
 
 {{ define "event_error_group_component" }}
