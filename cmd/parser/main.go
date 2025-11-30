@@ -764,6 +764,13 @@ func Parse(
 					$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
 				)
 			`
+			const insertTransferSourceQuery = `
+				insert into event_transfer_source (
+					transfer_id, source_transfer_id, used_amount
+				) values (
+					$1, $2, $3
+				)
+			`
 			for i, t := range event.Transfers {
 				batch.Queue(
 					insertTransferQuery,
@@ -773,6 +780,14 @@ func Parse(
 					t.Token, t.Amount, t.TokenSource,
 					t.Price, t.Value, t.Profit, t.MissingAmount,
 				)
+
+				for _, s := range t.Sources {
+					batch.Queue(
+						insertTransferSourceQuery,
+						// args
+						t.Id, s.TransferId, s.UsedAmount,
+					)
+				}
 			}
 		}
 

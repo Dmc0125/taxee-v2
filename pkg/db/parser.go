@@ -167,6 +167,11 @@ func (d1 *EventTransferDirection) Cmp(d2 EventTransferDirection) int {
 	return 1
 }
 
+type EventTransferSource struct {
+	TransferId uuid.UUID       `json:"transferId"`
+	UsedAmount decimal.Decimal `json:"usedAmount"`
+}
+
 type EventTransfer struct {
 	Id uuid.UUID `json:"id"`
 
@@ -185,7 +190,7 @@ type EventTransfer struct {
 	Profit        decimal.Decimal `json:"profit"`
 	MissingAmount decimal.Decimal `json:"missingAmount"`
 
-	PrecedingEventTransfers []uuid.UUID
+	Sources []*EventTransferSource `json:"sources"`
 }
 
 type EventType int

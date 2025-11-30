@@ -12,10 +12,6 @@
     --color-red-800: oklch(44.4% 0.177 26.899);
     --color-orange-200: oklch(90.1% 0.076 70.697);
     --color-orange-500: oklch(70.5% 0.213 47.604);
-    --color-yellow-200: oklch(94.5% 0.129 101.54);
-    --color-yellow-300: oklch(90.5% 0.182 98.111);
-    --color-yellow-500: oklch(79.5% 0.184 86.047);
-    --color-yellow-700: oklch(55.4% 0.135 66.442);
     --color-green-800: oklch(44.8% 0.119 151.328);
     --color-gray-50: oklch(98.5% 0.002 247.839);
     --color-gray-100: oklch(96.7% 0.003 264.542);
@@ -595,6 +591,12 @@
   }
   .filter {
     filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
+  }
+  .\[--grid-cols\:3rem_6rem_repeat\(5\,1fr\)\] {
+    --grid-cols: 3rem 6rem repeat(5,1fr);
+  }
+  .\[--grid-cols\:3rem_7rem_repeat\(5\,1fr\)\] {
+    --grid-cols: 3rem 7rem repeat(5,1fr);
   }
   .\[--grid-cols\:3rem_repeat\(6\,1fr\)\] {
     --grid-cols: 3rem repeat(6,1fr);

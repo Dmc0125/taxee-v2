@@ -147,9 +147,15 @@
 {{ end }}
 
 {{ define "event_component" }}
-    <div class="
-        w-full px-4 py-2 grid grid-cols-[300px_repeat(2,minmax(350px,1fr))_150px] relative
-    ">
+    <button 
+        {{ if .SourcesUi }}
+            data-event-with-sources 
+        {{ end }}
+        id="{{ .Id }}" class="
+            w-full px-4 py-2 grid grid-cols-[300px_repeat(2,minmax(350px,1fr))_150px] relative
+            {{ tern (0 | gt (len .SourcesUi)) "cursor-pointer" "" }}
+        "
+    >
         {{ if not .Native }}
             {{ template "events_network_component" .NetworkImgUrl }}
         {{ end }}
@@ -194,23 +200,23 @@
                 <div class="mt-1">-</div>
             </div>
         {{ end }}
-    </div>
+    </button>
 
-    {{ if .PrecedingEvents }}
-        <div class="w-full px-4 py-2 border-t border-gray-200">
-            <span class="text-sm text-gray-600">Preceding events</span>
-            <ul class="w-full mt-2 flex flex-col gap-2 [--grid-cols:3rem_repeat(6,1fr)]">
+    {{ if .SourcesUi }}
+        <div class="hidden w-full px-4 py-2 border-t border-gray-200">
+            <span class="text-sm text-gray-600">Sources</span>
+            <ul class="w-full mt-2 flex flex-col gap-2 [--grid-cols:3rem_7rem_repeat(5,1fr)]">
                 <li class="grid grid-cols-(--grid-cols) -mx-2 px-2 py-0.5 rounded-lg text-sm text-gray-800 bg-gray-100">
                     <span></span>
                     <span>Date</span>
                     <span>Time</span>
                     <span>Type</span>
+                    <span>Token</span>
                     <span>Amount</span>
-                    <span>Value</span>
-                    <span>Price</span>
+                    <span>Used amount</span>
                 </li>
-                {{ range .PrecedingEvents }}
-                    {{ template "preceding_event_component" . }}
+                {{ range .SourcesUi }}
+                    {{ template "event_source_component" . }}
                 {{ end }}
             </ul>
         </div>
@@ -234,19 +240,22 @@
     {{ end }}
 {{ end }}
 
-{{ define "preceding_event_component" }}
+{{ define "event_source_component" }}
 <li class="grid grid-cols-(--grid-cols) text-gray-700 text-sm">
-    <a href="/events?" target="_blank">
+    <a href="/events?id={{ .EventId }}" target="_blank">
         <svg class="size-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
         </svg>
     </a>
     <span>{{ formatDate .Timestamp }}</span>
     <span>{{ formatTime .Timestamp }}</span>
-    <span>{{ .Method }}</span>
-    <span>{{ template "event_token_amount_component" .TokenAmount }}</span>
-    <span>{{ template "event_fiat_amount_component" .FiatAmount }}</span>
-    <span>{{ template "event_fiat_amount_component" .Price }}</span>
+    <span>{{ toTitle .Method }}</span>
+    <span class="flex items-center gap-2">
+        {{ template "event_token_img" .TokenImgData }}
+        {{ upper .Token }}
+    </span>
+    <span>{{ .TokenAmount }}</span>
+    <span>{{ .UsedTokenAmount }}</span>
 </li>
 {{ end }}
 

@@ -100,9 +100,19 @@ create table event_transfer (
     value varchar,
     profit varchar,
     missing_amount varchar
+);
 
-    -- TODO: Separate table so we can tracked the actual used amount
-    -- preceding_transfers_ids uuid[] not null
+create table event_transfer_source (
+    id serial primary key,
+    transfer_id uuid not null,
+    source_transfer_id uuid not null,
+    used_amount varchar not null,
+
+    -- primary key (transfer_id, source_transfer_id),
+    foreign key (transfer_id) references event_transfer (id) on delete cascade,
+    foreign key (source_transfer_id) references event_transfer (id) on delete cascade,
+
+    check (transfer_id <> source_transfer_id)
 );
 
 create table parser_error (

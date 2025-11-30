@@ -163,3 +163,30 @@ document.addEventListener("scroll", function() {
     makeEventsTableHeaderFloat()
 })
 
+////////////////
+// Event sources toggle
+
+document.addEventListener("DOMContentLoaded", function() {
+    const events = document.querySelectorAll("[data-event-with-sources]")
+    /** @type {Map<string, boolean>} */
+    const opened = new Map()
+
+    for (const event of events) {
+        const sourcesEl = event.nextElementSibling
+
+        event.addEventListener("click", function() {
+            const id = event.Id
+            opened[id] = !opened[id]
+
+            if (opened[id]) {
+                sourcesEl.classList.remove("hidden")
+            } else {
+                sourcesEl.classList.add("hidden")
+            }
+        })
+    }
+
+})
+
+
+

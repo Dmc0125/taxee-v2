@@ -76,19 +76,22 @@ type eventTransfersComponentData struct {
 	Fiats  []*eventFiatAmountComponentData
 }
 
-type eventPrecedingEventComponentData struct {
-	Id          uuid.UUID
-	Timestamp   time.Time
-	Method      string
-	TokenAmount *eventTokenAmountComponentData
-	FiatAmount  eventFiatAmountComponentData
-	Price       eventFiatAmountComponentData
+type eventTransferSourceComponentData struct {
+	EventId   uuid.UUID
+	Timestamp time.Time
+	Method    string
+
+	TokenImgData eventTokenImgComponentData
+	Token        string
+
+	TokenAmount     string
+	UsedTokenAmount string
 }
 
 type eventComponentData struct {
 	Id        uuid.UUID
 	Timestamp time.Time
-	// PrecedingEventsIds []uuid.UUID
+	Sources   []*db.EventTransferSource
 
 	// UI
 	Native        bool
@@ -101,7 +104,7 @@ type eventComponentData struct {
 	IncomingTransfers *eventTransfersComponentData
 	Profits           []*eventFiatAmountComponentData
 
-	PrecedingEvents []eventPrecedingEventComponentData
+	SourcesUi []*eventTransferSourceComponentData
 
 	MissingBalances []*eventTokenAmountComponentData
 }
@@ -257,21 +260,21 @@ func eventsCreateTokenAmountData(
 }
 
 func eventsCreateFiatAmountsData(
-	value, price, profit decimal.Decimal,
+	transfer *db.EventTransfer,
 ) (fiatData, profitData *eventFiatAmountComponentData) {
 	fiatData = &eventFiatAmountComponentData{
-		Amount:   value.StringFixed(2),
+		Amount:   transfer.Value.StringFixed(2),
 		Currency: "eur",
-		Price:    price.StringFixed(2),
-		Sign:     value.Sign(),
-		Missing:  price.Equal(decimal.Zero),
-		Zero:     value.Equal(decimal.Zero),
+		Price:    transfer.Price.StringFixed(2),
+		Sign:     transfer.Value.Sign(),
+		Missing:  transfer.Price.Equal(decimal.Zero),
+		Zero:     transfer.Value.Equal(decimal.Zero),
 	}
 	profitData = &eventFiatAmountComponentData{
-		Amount:   profit.StringFixed(2),
+		Amount:   transfer.Profit.StringFixed(2),
 		Currency: "eur",
-		Sign:     profit.Sign(),
-		Zero:     profit.Equal(decimal.Zero),
+		Sign:     transfer.Profit.Sign(),
+		Zero:     transfer.Profit.Equal(decimal.Zero),
 		IsProfit: true,
 	}
 	return
@@ -284,6 +287,7 @@ type urlParam[T any] struct {
 
 func buildGetEventsQuery(
 	userAccountId int32,
+	eventId uuid.UUID,
 	txId string,
 	limit int32,
 	fromItxPosition float32,
@@ -321,7 +325,19 @@ func buildGetEventsQuery(
 								'price', et.price,
 								'value', et.value,
 								'profit', et.profit,
-								'missingAmount', et.missing_amount
+								'missingAmount', et.missing_amount,
+								'sources', (
+									select json_agg(
+										json_build_object(
+											'transferId', ts.source_transfer_id,
+											'usedAmount', ts.used_amount
+										)
+									) 
+									from
+										event_transfer_source ts
+									where
+										ts.transfer_id = et.id
+								)
 							) order by et.position asc
 						)
 						from
@@ -359,6 +375,19 @@ func buildGetEventsQuery(
 	}
 
 	switch {
+	case eventId != uuid.Nil:
+		q = fmt.Sprintf(
+			`
+				%s
+				where 
+					exists (
+						select 1 from event e where e.id = $2 and e.internal_tx_id = itx.id
+					) and
+					itx.user_account_id = $1
+			`,
+			getEventsQuerySelect,
+		)
+		params = append(params, userAccountId, eventId)
 	case txId != "":
 		q = fmt.Sprintf(
 			"%s where itx.user_account_id = $1 and itx.tx_id = $2",
@@ -390,6 +419,7 @@ func renderEvents(
 	ctx context.Context,
 	pool *pgxpool.Pool,
 	userAccountId int32,
+	eventId uuid.UUID,
 	txId string,
 	limit int32,
 	offset float32,
@@ -397,6 +427,7 @@ func renderEvents(
 ) ([]eventsTableRowComponentData, float32, error) {
 	getEventsQuery, getEventsParams := buildGetEventsQuery(
 		userAccountId,
+		eventId,
 		txId,
 		limit,
 		offset,
@@ -409,7 +440,16 @@ func renderEvents(
 	}
 
 	eventsTableRows := make([]eventsTableRowComponentData, 0)
-	allEvents := make([]*eventComponentData, 0)
+
+	type eventTransferWrapped struct {
+		*db.EventTransfer
+		EventId     uuid.UUID
+		Timestamp   time.Time
+		Network     db.Network
+		EventMethod string
+	}
+	transfers := make(map[uuid.UUID]eventTransferWrapped)
+
 	getTokensMetaBatch := pgx.Batch{}
 	var prevDateUnix int64
 	var lastItxPosition float32
@@ -484,7 +524,6 @@ func renderEvents(
 				eventComponentData := eventComponentData{
 					Id:        e.Id,
 					Timestamp: timestamp,
-					// PrecedingEventsIds: e.PrecedingEvents,
 
 					Native:          native,
 					NetworkImgUrl:   networkGlobals.imgUrl,
@@ -494,7 +533,6 @@ func renderEvents(
 					MissingBalances: make([]*eventTokenAmountComponentData, 0),
 				}
 				rowData.Events = append(rowData.Events, &eventComponentData)
-				allEvents = append(allEvents, &eventComponentData)
 
 				///////////////
 				// transfers
@@ -505,9 +543,19 @@ func renderEvents(
 				eventComponentData.IncomingTransfers = incomingTransfers
 
 				for _, t := range e.Transfers {
-					fiatData, profitData := eventsCreateFiatAmountsData(
-						t.Value, t.Price, t.Profit,
+					eventComponentData.Sources = append(
+						eventComponentData.Sources,
+						t.Sources...,
 					)
+					transfers[t.Id] = eventTransferWrapped{
+						EventTransfer: t,
+						EventId:       e.Id,
+						Timestamp:     timestamp,
+						Network:       network,
+						EventMethod:   e.Method,
+					}
+
+					fiatData, profitData := eventsCreateFiatAmountsData(t)
 
 					if t.MissingAmount.GreaterThan(decimal.Zero) {
 						tokenData := &eventTokenAmountComponentData{
@@ -647,7 +695,6 @@ func renderEvents(
 						ExternalZero:       data.External.Equal(decimal.Zero),
 						ExternalAmount:     data.External.StringFixed(2),
 						ExternalAmountLong: data.External.String(),
-						Token:              "USDC",
 					}
 
 					getTokenSymbolAndImg(
@@ -685,52 +732,88 @@ func renderEvents(
 
 	///////////////
 	//preceding events
+	batch2 := pgx.Batch{}
 
-	// TODO: will need to fetch events that are no fetched currently
-	// TODO: also show the actual used amount from the transfer
-	// for _, e := range allEvents {
-	// 	for _, precedingEventId := range e.PrecedingEventsIds {
-	// 		idx := slices.IndexFunc(allEvents, func(e2 *eventComponentData) bool {
-	// 			return e2.Id == precedingEventId
-	// 		})
-	// 		if idx == -1 {
-	// 			// not found
-	// 			continue
-	// 		}
-	//
-	// 		// create preceding event
-	// 		precedingEvent := allEvents[idx]
-	//
-	// 		var tokenAmount *eventTokenAmountComponentData
-	// 		var transferIdx int
-	//
-	// 		for i, incomingTransfer := range precedingEvent.IncomingTransfers.Tokens {
-	// 			for _, outgoingTransfer := range e.OutgoingTransfers.Tokens {
-	// 				if incomingTransfer.Symbol == outgoingTransfer.Symbol {
-	// 					tokenAmount = incomingTransfer
-	// 					transferIdx = i
-	// 					break
-	// 				}
-	// 			}
-	// 		}
-	//
-	// 		fiatAmount := *precedingEvent.IncomingTransfers.Fiats[transferIdx]
-	// 		price := eventFiatAmountComponentData{
-	// 			Amount:   fiatAmount.Price,
-	// 			Currency: fiatAmount.Currency,
-	// 		}
-	//
-	// 		precedingEventComponent := eventPrecedingEventComponentData{
-	// 			Id:          precedingEvent.Id,
-	// 			Timestamp:   precedingEvent.Timestamp,
-	// 			Method:      precedingEvent.Method,
-	// 			TokenAmount: tokenAmount,
-	// 			FiatAmount:  fiatAmount,
-	// 			Price:       price,
-	// 		}
-	// 		e.PrecedingEvents = append(e.PrecedingEvents, precedingEventComponent)
-	// 	}
-	// }
+	for _, row := range eventsTableRows {
+		if row.Type != 1 {
+			continue
+		}
+
+		for _, event := range row.Events {
+			for _, source := range event.Sources {
+				t, ok := transfers[source.TransferId]
+				if !ok {
+					// TODO: Need to fetch
+					const getTransferQuery = `
+						select
+							et.token,
+							et.token_source,
+							et.amount,
+							e.method,
+							e.id,
+							itx.network,
+							itx.timestamp
+						from
+							event_transfer et
+						join
+							event e on e.id = et.event_id
+						join
+							internal_tx itx on itx.id = e.internal_tx_id
+						where
+							et.id = $1
+					`
+					q := getTokensMetaBatch.Queue(getTransferQuery, source.TransferId)
+					q.QueryRow(func(row pgx.Row) error {
+						var (
+							tokenSource   uint16
+							amount        decimal.Decimal
+							token, method string
+							network       db.Network
+							timestamp     time.Time
+							eventId       uuid.UUID
+						)
+						err := row.Scan(
+							&token, &tokenSource, &amount,
+							&method, &eventId,
+							&network, &timestamp,
+						)
+						assert.NoErr(err, "unable to query event transfer")
+
+						cmp := eventTransferSourceComponentData{
+							EventId:         eventId,
+							Timestamp:       timestamp,
+							Method:          method,
+							TokenAmount:     amount.String(),
+							UsedTokenAmount: source.UsedAmount.String(),
+						}
+						getTokenSymbolAndImg(
+							token, tokenSource, network,
+							&cmp.Token, &cmp.TokenImgData,
+							&batch2,
+						)
+						event.SourcesUi = append(event.SourcesUi, &cmp)
+
+						return nil
+					})
+					continue
+				}
+
+				cmp := eventTransferSourceComponentData{
+					EventId:         t.EventId,
+					Timestamp:       t.Timestamp,
+					Method:          t.EventMethod,
+					TokenAmount:     t.Amount.String(),
+					UsedTokenAmount: source.UsedAmount.String(),
+				}
+				getTokenSymbolAndImg(
+					t.Token, t.TokenSource, t.Network,
+					&cmp.Token, &cmp.TokenImgData,
+					&getTokensMetaBatch,
+				)
+				event.SourcesUi = append(event.SourcesUi, &cmp)
+			}
+		}
+	}
 
 	///////////////
 	// execute network stuff
@@ -738,6 +821,11 @@ func renderEvents(
 	br := pool.SendBatch(ctx, &getTokensMetaBatch)
 	if err := br.Close(); err != nil {
 		return nil, 0, fmt.Errorf("unable to query tokens meta: %w", err)
+	}
+
+	br = pool.SendBatch(ctx, &batch2)
+	if err := br.Close(); err != nil {
+		return nil, 0, fmt.Errorf("unable to query transfers: %w", err)
 	}
 
 	return eventsTableRows, lastItxPosition, nil
@@ -772,9 +860,11 @@ func eventsHandler(
 			limit           = urlParam[int32]{value: 50, set: true}
 			fromItxPosition = float32(-1)
 			mode            = urlParam[string]{}
+			eventId         uuid.UUID
 		)
 
 		var (
+			idQueryVal      = query.Get("id")
 			offsetQueryVal  = query.Get("offset")
 			limitQueryVal   = query.Get("limit")
 			txIdQueryVal    = query.Get("tx_id")
@@ -782,6 +872,9 @@ func eventsHandler(
 			partialQueryVal = query.Get("partial")
 		)
 
+		if v, err := uuid.Parse(idQueryVal); err == nil {
+			eventId = v
+		}
 		if v, err := strconv.Atoi(limitQueryVal); err == nil {
 			limit.value = int32(v)
 		}
@@ -829,6 +922,7 @@ func eventsHandler(
 			eventsTableRows, lastItxPosition, err := renderEvents(
 				ctx, pool,
 				userAccountId,
+				eventId,
 				txIdQueryVal,
 				limit.value,
 				fromItxPosition,
@@ -877,6 +971,7 @@ func eventsHandler(
 			eventsTableRows, _, err := renderEvents(
 				ctx, pool,
 				userAccountId,
+				eventId,
 				txIdQueryVal,
 				limit.value,
 				fromItxPosition,
