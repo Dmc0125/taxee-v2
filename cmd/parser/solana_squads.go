@@ -338,8 +338,8 @@ func solProcessSquadsV4Ix(
 			return
 		}
 
-		event.UiAppName = app
-		event.UiMethodName = method
+		event.App = app
+		event.Method = method
 
 		*events = append(*events, event)
 	case solSquadsV4VaultTransactionExecute:

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"taxee/pkg/assert"
 	"taxee/pkg/db"
 	"time"
@@ -450,9 +451,10 @@ func solProcessAnchorInitAccount(
 func solParseTransfers(
 	ctx *solContext,
 	innerIxs []*db.SolanaInnerInstruction,
-) (wallet string, incomingTransfers, outgoingTransfers []*db.EventSwapTransfer) {
-	transfers := make(map[string]decimal.Decimal)
+) ([]*db.EventTransfer, int, int) {
+	amounts := make(map[string]decimal.Decimal)
 	tokenAccounts := make(map[string]string)
+	var wallet string
 
 	// 1. token transfer - incoming / outgoing
 	// 2. token mint - incoming
@@ -506,7 +508,7 @@ func solParseTransfers(
 			if from != "" {
 				if validMint, wallet, ok = getTokenAccount(from, mint); ok {
 					decimals := solDecimalsMust(ctx, validMint)
-					transfers[validMint] = transfers[validMint].Sub(
+					amounts[validMint] = amounts[validMint].Sub(
 						newDecimalFromRawAmount(amount, decimals),
 					)
 					tokenAccounts[validMint] = from
@@ -515,7 +517,7 @@ func solParseTransfers(
 			if to != "" {
 				if validMint, wallet, ok = getTokenAccount(to, mint); ok {
 					decimals := solDecimalsMust(ctx, validMint)
-					transfers[validMint] = transfers[validMint].Add(
+					amounts[validMint] = amounts[validMint].Add(
 						newDecimalFromRawAmount(amount, decimals),
 					)
 					tokenAccounts[validMint] = to
@@ -524,7 +526,10 @@ func solParseTransfers(
 		}
 	}
 
-	for mint, amount := range transfers {
+	transfers := make([]*db.EventTransfer, 0)
+	var outgoingCount, incomingCount int
+
+	for mint, amount := range amounts {
 		if amount.Equal(decimal.Zero) {
 			continue
 		}
@@ -532,21 +537,36 @@ func solParseTransfers(
 		tokenAccount, ok := tokenAccounts[mint]
 		assert.True(ok, "missing token account for mint")
 
-		t := db.EventSwapTransfer{
-			Account:     tokenAccount,
+		t := db.EventTransfer{
 			Token:       mint,
 			Amount:      amount.Abs(),
 			TokenSource: uint16(db.NetworkSolana),
 		}
 
 		if amount.IsNegative() {
-			outgoingTransfers = append(outgoingTransfers, &t)
+			outgoingCount += 1
+			t.Direction = db.EventTransferOutgoing
+			t.FromAccount = tokenAccount
+			t.FromWallet = wallet
+			transfers = append(transfers, &t)
 		} else {
-			incomingTransfers = append(incomingTransfers, &t)
+			incomingCount += 1
+			t.Direction = db.EventTransferIncoming
+			t.ToAccount = tokenAccount
+			t.ToWallet = wallet
+			transfers = append(transfers, &t)
 		}
 	}
 
-	return
+	slices.SortFunc(transfers, func(a, b *db.EventTransfer) int {
+		adir, bdir := a.Direction, b.Direction
+		if adir == bdir {
+			return strings.Compare(a.Token, b.Token)
+		}
+		return adir.Cmp(bdir)
+	})
+
+	return transfers, outgoingCount, incomingCount
 }
 
 func solSwapEventFromTransfers(
@@ -556,25 +576,18 @@ func solSwapEventFromTransfers(
 	app, method string,
 	eventType db.EventType,
 ) {
-	owner, incomingTransfers, outgoingTransfers := solParseTransfers(ctx, innerInstructions)
-
-	if len(incomingTransfers) == 0 || len(outgoingTransfers) == 0 {
+	transfers, outgoingCount, incomingCount := solParseTransfers(ctx, innerInstructions)
+	if outgoingCount == 0 || incomingCount == 0 {
 		err := solNewError(ctx)
 		err.Type = db.ParserErrorTypeOneSidedSwap
 		return
 	}
 
-	swapEventData := db.EventSwap{
-		Wallet:   owner,
-		Incoming: incomingTransfers,
-		Outgoing: outgoingTransfers,
-	}
-
 	event := solNewEvent(ctx)
-	event.UiAppName = app
-	event.UiMethodName = method
+	event.App = app
+	event.Method = method
 	event.Type = eventType
-	event.Data = &swapEventData
+	event.Transfers = transfers
 
 	*events = append(*events, event)
 }

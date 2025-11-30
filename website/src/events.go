@@ -8,7 +8,6 @@ import (
 	"html/template"
 	"math"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"taxee/pkg/assert"
@@ -87,9 +86,9 @@ type eventPrecedingEventComponentData struct {
 }
 
 type eventComponentData struct {
-	Id                 uuid.UUID
-	Timestamp          time.Time
-	PrecedingEventsIds []uuid.UUID
+	Id        uuid.UUID
+	Timestamp time.Time
+	// PrecedingEventsIds []uuid.UUID
 
 	// UI
 	Native        bool
@@ -296,19 +295,40 @@ func buildGetEventsQuery(
 			itx.network, 
 			itx.timestamp,
 			itx.position,
-			coalesce(events.events, '[]'::jsonb) as events,
-			coalesce(errors.errors,	'[]'::jsonb) as errors
+			coalesce(events.events, '[]'::json) as events,
+			coalesce(errors.errors,	'[]'::json) as errors
 		from
 			internal_tx itx
 		left join lateral (
-			select jsonb_agg(
-				jsonb_build_object(
+			select json_agg(
+				json_build_object(
 					'Id', e.id,
-					'PrecedingEvents', e.preceding_events_ids,
-					'UiAppName', e.ui_app_name,
-					'UiMethodName', e.ui_method_name,
+					'App', e.app,
+					'Method', e.method,
 					'Type', e.type,
-					'Data', e.data
+					'Transfers', (
+						select json_agg(
+							json_build_object(
+								'id', et.id,
+								'direction', et.direction,
+								'fromWallet', et.from_wallet,
+								'fromAccount', et.from_account,
+								'toWallet', et.to_wallet,
+								'toAccount', et.to_account,
+								'token', et.token,
+								'amount', et.amount,
+								'tokenSource', et.token_source,
+								'price', et.price,
+								'value', et.value,
+								'profit', et.profit,
+								'missingAmount', et.missing_amount
+							) order by et.position asc
+						)
+						from
+							event_transfer et
+						where
+							et.event_id = e.id
+					)
 				) order by e.position asc
 			) as events 
 			from 
@@ -317,8 +337,8 @@ func buildGetEventsQuery(
 				e.internal_tx_id = itx.id
 		) events on true
 		left join lateral (
-			select jsonb_agg(
-		 		jsonb_build_object(
+			select json_agg(
+		 		json_build_object(
 		 			'IxIdx', pe.ix_idx,
 		 			'Origin', pe.origin,
 		 			'Type', pe.type,
@@ -364,165 +384,6 @@ func buildGetEventsQuery(
 	}
 
 	return
-}
-
-func renderTransferEvent(
-	eventComponentData *eventComponentData,
-	data *db.EventTransfer,
-	network db.Network,
-	getTokensMetaBatch *pgx.Batch,
-) {
-	fiatData, profitData := eventsCreateFiatAmountsData(
-		data.Value, data.Price, data.Profit,
-	)
-	eventComponentData.Profits = append(
-		eventComponentData.Profits,
-		profitData,
-	)
-
-	if data.MissingAmount.GreaterThan(decimal.Zero) {
-		tokenData := &eventTokenAmountComponentData{
-			Account:    data.FromAccount,
-			Amount:     data.Amount.String(),
-			LongAmount: data.Amount.String(),
-		}
-		getTokenSymbolAndImg(
-			data.Token, data.TokenSource, network,
-			&tokenData.Symbol, &tokenData.ImgData,
-			getTokensMetaBatch,
-		)
-		eventComponentData.MissingBalances = append(
-			eventComponentData.MissingBalances,
-			tokenData,
-		)
-	}
-
-	if data.Direction == db.EventTransferInternal {
-		fromTokenData := eventsCreateTokenAmountData(
-			data.Amount, data.Token, data.FromAccount,
-			network, data.TokenSource,
-			getTokensMetaBatch,
-		)
-		toTokenData := eventsCreateTokenAmountData(
-			data.Amount, data.Token, data.ToAccount,
-			network, data.TokenSource,
-			getTokensMetaBatch,
-		)
-
-		fiatData.Sign = 0
-		fiatData.Missing = false
-
-		eventComponentData.OutgoingTransfers = &eventTransfersComponentData{
-			Wallet: shorten(data.FromWallet, 4, 4),
-			Tokens: []*eventTokenAmountComponentData{fromTokenData},
-			Fiats:  []*eventFiatAmountComponentData{fiatData},
-		}
-		eventComponentData.IncomingTransfers = &eventTransfersComponentData{
-			Wallet: shorten(data.ToWallet, 4, 4),
-			Tokens: []*eventTokenAmountComponentData{toTokenData},
-			Fiats:  []*eventFiatAmountComponentData{fiatData},
-		}
-	} else {
-		var account, wallet string
-		var transfers *eventTransfersComponentData
-
-		switch data.Direction {
-		case db.EventTransferIncoming:
-			account, wallet = data.ToAccount, data.ToWallet
-			eventComponentData.IncomingTransfers = &eventTransfersComponentData{}
-			transfers = eventComponentData.IncomingTransfers
-		case db.EventTransferOutgoing:
-			account, wallet = data.FromAccount, data.FromWallet
-			eventComponentData.OutgoingTransfers = &eventTransfersComponentData{}
-			transfers = eventComponentData.OutgoingTransfers
-		}
-
-		tokenData := eventsCreateTokenAmountData(
-			data.Amount,
-			data.Token, account,
-			network,
-			data.TokenSource,
-			getTokensMetaBatch,
-		)
-
-		*transfers = eventTransfersComponentData{
-			Wallet: shorten(wallet, 4, 4),
-			Tokens: []*eventTokenAmountComponentData{
-				tokenData,
-			},
-			Fiats: []*eventFiatAmountComponentData{
-				fiatData,
-			},
-		}
-	}
-}
-
-func renderSwapEvent(
-	eventComponentData *eventComponentData,
-	data *db.EventSwap,
-	network db.Network,
-	getTokensMetaBatch *pgx.Batch,
-) {
-	walletShort := shorten(data.Wallet, 4, 4)
-	outgoing := eventTransfersComponentData{
-		Wallet: walletShort,
-	}
-	eventComponentData.OutgoingTransfers = &outgoing
-	incoming := eventTransfersComponentData{
-		Wallet: walletShort,
-	}
-	eventComponentData.IncomingTransfers = &incoming
-
-	for _, swap := range data.Outgoing {
-		tokenData := eventsCreateTokenAmountData(
-			swap.Amount, swap.Token, swap.Account,
-			network,
-			swap.TokenSource,
-			getTokensMetaBatch,
-		)
-		fiatData, profitData := eventsCreateFiatAmountsData(
-			swap.Value, swap.Price, swap.Profit,
-		)
-
-		eventComponentData.Profits = append(
-			eventComponentData.Profits,
-			profitData,
-		)
-
-		outgoing.Tokens = append(outgoing.Tokens, tokenData)
-		outgoing.Fiats = append(outgoing.Fiats, fiatData)
-
-		if swap.MissingAmount.GreaterThan(decimal.Zero) {
-			tokenData := &eventTokenAmountComponentData{
-				Account:    swap.Account,
-				Amount:     swap.Amount.String(),
-				LongAmount: swap.Amount.String(),
-			}
-			getTokenSymbolAndImg(
-				swap.Token, swap.TokenSource, network,
-				&tokenData.Symbol, &tokenData.ImgData,
-				getTokensMetaBatch,
-			)
-			eventComponentData.MissingBalances = append(
-				eventComponentData.MissingBalances,
-				tokenData,
-			)
-		}
-	}
-
-	for _, swap := range data.Incoming {
-		tokenData := eventsCreateTokenAmountData(
-			swap.Amount, swap.Token, swap.Account,
-			network, swap.TokenSource,
-			getTokensMetaBatch,
-		)
-		fiatData, _ := eventsCreateFiatAmountsData(
-			swap.Value, swap.Price, swap.Profit,
-		)
-
-		incoming.Tokens = append(incoming.Tokens, tokenData)
-		incoming.Fiats = append(incoming.Fiats, fiatData)
-	}
 }
 
 func renderEvents(
@@ -613,26 +474,22 @@ func renderEvents(
 			}
 
 			for _, e := range events {
-				if err := e.UnmarshalData(e.SerializedData); err != nil {
-					return nil, 0, fmt.Errorf("unable to unmarshal event data: %w", err)
-				}
-
-				appImgUrl := appImgUrls[fmt.Sprintf("%d-%s", network, e.UiAppName)]
+				appImgUrl := appImgUrls[fmt.Sprintf("%d-%s", network, e.App)]
 				var native bool
-				switch e.UiAppName {
+				switch e.App {
 				case "native", "system", "token", "associated_token":
 					native = true
 				}
 
 				eventComponentData := eventComponentData{
-					Id:                 e.Id,
-					Timestamp:          timestamp,
-					PrecedingEventsIds: e.PrecedingEvents,
+					Id:        e.Id,
+					Timestamp: timestamp,
+					// PrecedingEventsIds: e.PrecedingEvents,
 
 					Native:          native,
 					NetworkImgUrl:   networkGlobals.imgUrl,
-					Method:          e.UiMethodName,
-					App:             e.UiAppName,
+					Method:          e.Method,
+					App:             e.App,
 					AppImgUrl:       appImgUrl,
 					MissingBalances: make([]*eventTokenAmountComponentData, 0),
 				}
@@ -642,21 +499,93 @@ func renderEvents(
 				///////////////
 				// transfers
 
-				switch data := e.Data.(type) {
-				case *db.EventTransfer:
-					renderTransferEvent(
-						&eventComponentData,
-						data,
-						network,
-						&getTokensMetaBatch,
+				outgoingTransfers := new(eventTransfersComponentData)
+				incomingTransfers := new(eventTransfersComponentData)
+				eventComponentData.OutgoingTransfers = outgoingTransfers
+				eventComponentData.IncomingTransfers = incomingTransfers
+
+				for _, t := range e.Transfers {
+					fiatData, profitData := eventsCreateFiatAmountsData(
+						t.Value, t.Price, t.Profit,
 					)
-				case *db.EventSwap:
-					renderSwapEvent(
-						&eventComponentData,
-						data,
-						network,
-						&getTokensMetaBatch,
-					)
+
+					if t.MissingAmount.GreaterThan(decimal.Zero) {
+						tokenData := &eventTokenAmountComponentData{
+							Account:    t.FromAccount,
+							Amount:     t.Amount.String(),
+							LongAmount: t.Amount.String(),
+						}
+						getTokenSymbolAndImg(
+							t.Token, t.TokenSource, network,
+							&tokenData.Symbol, &tokenData.ImgData,
+							&getTokensMetaBatch,
+						)
+						eventComponentData.MissingBalances = append(
+							eventComponentData.MissingBalances,
+							tokenData,
+						)
+					}
+
+					if t.Direction == db.EventTransferInternal {
+						outgoingTransfers.Wallet = shorten(t.FromWallet, 4, 4)
+						incomingTransfers.Wallet = shorten(t.ToWallet, 4, 4)
+
+						fromTokenData := eventsCreateTokenAmountData(
+							t.Amount, t.Token, t.FromAccount,
+							network, t.TokenSource,
+							&getTokensMetaBatch,
+						)
+						outgoingTransfers.Tokens = append(outgoingTransfers.Tokens, fromTokenData)
+						toTokenData := eventsCreateTokenAmountData(
+							t.Amount, t.Token, t.ToAccount,
+							network, t.TokenSource,
+							&getTokensMetaBatch,
+						)
+						incomingTransfers.Tokens = append(incomingTransfers.Tokens, toTokenData)
+
+						fiatData.Sign = 0
+						fiatData.Missing = false
+						outgoingTransfers.Fiats = append(outgoingTransfers.Fiats, fiatData)
+						incomingTransfers.Fiats = append(incomingTransfers.Fiats, fiatData)
+					} else {
+						var account, wallet string
+						var transfers *eventTransfersComponentData
+
+						switch t.Direction {
+						case db.EventTransferIncoming:
+							account, wallet = t.ToAccount, t.ToWallet
+							transfers = incomingTransfers
+
+							if e.Type < db.EventTypeSwapBr {
+								eventComponentData.Profits = append(
+									eventComponentData.Profits,
+									profitData,
+								)
+							}
+						case db.EventTransferOutgoing:
+							account, wallet = t.FromAccount, t.FromWallet
+							transfers = outgoingTransfers
+
+							if e.Type > db.EventTypeSwapBr {
+								eventComponentData.Profits = append(
+									eventComponentData.Profits,
+									profitData,
+								)
+							}
+						}
+
+						tokenData := eventsCreateTokenAmountData(
+							t.Amount,
+							t.Token, account,
+							network,
+							t.TokenSource,
+							&getTokensMetaBatch,
+						)
+
+						transfers.Wallet = shorten(wallet, 4, 4)
+						transfers.Tokens = append(transfers.Tokens, tokenData)
+						transfers.Fiats = append(transfers.Fiats, fiatData)
+					}
 				}
 			}
 		}
@@ -759,49 +688,49 @@ func renderEvents(
 
 	// TODO: will need to fetch events that are no fetched currently
 	// TODO: also show the actual used amount from the transfer
-	for _, e := range allEvents {
-		for _, precedingEventId := range e.PrecedingEventsIds {
-			idx := slices.IndexFunc(allEvents, func(e2 *eventComponentData) bool {
-				return e2.Id == precedingEventId
-			})
-			if idx == -1 {
-				// not found
-				continue
-			}
-
-			// create preceding event
-			precedingEvent := allEvents[idx]
-
-			var tokenAmount *eventTokenAmountComponentData
-			var transferIdx int
-
-			for i, incomingTransfer := range precedingEvent.IncomingTransfers.Tokens {
-				for _, outgoingTransfer := range e.OutgoingTransfers.Tokens {
-					if incomingTransfer.Symbol == outgoingTransfer.Symbol {
-						tokenAmount = incomingTransfer
-						transferIdx = i
-						break
-					}
-				}
-			}
-
-			fiatAmount := *precedingEvent.IncomingTransfers.Fiats[transferIdx]
-			price := eventFiatAmountComponentData{
-				Amount:   fiatAmount.Price,
-				Currency: fiatAmount.Currency,
-			}
-
-			precedingEventComponent := eventPrecedingEventComponentData{
-				Id:          precedingEvent.Id,
-				Timestamp:   precedingEvent.Timestamp,
-				Method:      precedingEvent.Method,
-				TokenAmount: tokenAmount,
-				FiatAmount:  fiatAmount,
-				Price:       price,
-			}
-			e.PrecedingEvents = append(e.PrecedingEvents, precedingEventComponent)
-		}
-	}
+	// for _, e := range allEvents {
+	// 	for _, precedingEventId := range e.PrecedingEventsIds {
+	// 		idx := slices.IndexFunc(allEvents, func(e2 *eventComponentData) bool {
+	// 			return e2.Id == precedingEventId
+	// 		})
+	// 		if idx == -1 {
+	// 			// not found
+	// 			continue
+	// 		}
+	//
+	// 		// create preceding event
+	// 		precedingEvent := allEvents[idx]
+	//
+	// 		var tokenAmount *eventTokenAmountComponentData
+	// 		var transferIdx int
+	//
+	// 		for i, incomingTransfer := range precedingEvent.IncomingTransfers.Tokens {
+	// 			for _, outgoingTransfer := range e.OutgoingTransfers.Tokens {
+	// 				if incomingTransfer.Symbol == outgoingTransfer.Symbol {
+	// 					tokenAmount = incomingTransfer
+	// 					transferIdx = i
+	// 					break
+	// 				}
+	// 			}
+	// 		}
+	//
+	// 		fiatAmount := *precedingEvent.IncomingTransfers.Fiats[transferIdx]
+	// 		price := eventFiatAmountComponentData{
+	// 			Amount:   fiatAmount.Price,
+	// 			Currency: fiatAmount.Currency,
+	// 		}
+	//
+	// 		precedingEventComponent := eventPrecedingEventComponentData{
+	// 			Id:          precedingEvent.Id,
+	// 			Timestamp:   precedingEvent.Timestamp,
+	// 			Method:      precedingEvent.Method,
+	// 			TokenAmount: tokenAmount,
+	// 			FiatAmount:  fiatAmount,
+	// 			Price:       price,
+	// 		}
+	// 		e.PrecedingEvents = append(e.PrecedingEvents, precedingEventComponent)
+	// 	}
+	// }
 
 	///////////////
 	// execute network stuff
@@ -810,36 +739,6 @@ func renderEvents(
 	if err := br.Close(); err != nil {
 		return nil, 0, fmt.Errorf("unable to query tokens meta: %w", err)
 	}
-
-	// TODO: this should not be done like this but after the html was sent
-	// via server sent events or something
-	// insertTokenImgUrlBatch := pgx.Batch{}
-	// logger.Info("Fetching tokens: %d", len(fetchTokensMetadataQueue))
-	// for _, queued := range fetchTokensMetadataQueue {
-	// 	meta, err := coingecko.GetCoinMetadata(queued.coingeckoId)
-	// 	if err == nil {
-	// 		for _, imgUrlPtr := range queued.imgUrls {
-	// 			*imgUrlPtr = meta.Image.Small
-	// 		}
-	//
-	// 		const insertTokenImgUrl = `
-	// 			update coingecko_token_data set
-	// 				image_url = $1
-	// 			where
-	// 				coingecko_id = $2
-	// 		`
-	// 		insertTokenImgUrlBatch.Queue(
-	// 			insertTokenImgUrl,
-	// 			meta.Image.Small,
-	// 			queued.coingeckoId,
-	// 		)
-	// 	}
-	// }
-	//
-	// br = pool.SendBatch(ctx, &insertTokenImgUrlBatch)
-	// if err := br.Close(); err != nil {
-	// 	return nil, 0, fmt.Errorf("unable to insert token img urls: %w", err)
-	// }
 
 	return eventsTableRows, lastItxPosition, nil
 }

@@ -142,34 +142,31 @@ func solTokenProcessTransfer(
 	ctx *solContext,
 	from, to string,
 	amount uint64,
-) (d any, t db.EventType, ok bool) {
+) (*db.EventTransfer, bool) {
 	fromAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, from)
 	toAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, to)
 
 	if fromAccount == nil && toAccount == nil {
-		return
+		return nil, false
 	}
 
 	if fromAccount != nil && toAccount != nil {
-		var fromAccountData, toAccountData *solTokenAccountData
-		fromAccountData, ok = solAccountDataMust[solTokenAccountData](
+		fromAccountData, ok := solAccountDataMust[solTokenAccountData](
 			ctx, fromAccount, from,
 		)
 		if !ok {
-			return
+			return nil, false
 		}
-		toAccountData, ok = solAccountDataMust[solTokenAccountData](
+		toAccountData, ok := solAccountDataMust[solTokenAccountData](
 			ctx, toAccount, to,
 		)
 		if !ok {
-			return
+			return nil, false
 		}
 		decimals := solDecimalsMust(ctx, fromAccountData.Mint)
 
-		ok = true
 		// TODO: check toAccount, it should have the same mint as fromAccount
-		t = db.EventTypeTransfer
-		d = &db.EventTransfer{
+		transfer := &db.EventTransfer{
 			Direction:   db.EventTransferInternal,
 			FromWallet:  fromAccountData.Owner,
 			ToWallet:    toAccountData.Owner,
@@ -179,11 +176,12 @@ func solTokenProcessTransfer(
 			Amount:      newDecimalFromRawAmount(amount, decimals),
 			TokenSource: uint16(db.NetworkSolana),
 		}
-		return
+		return transfer, true
 	}
 
 	var tokenAccountData *solTokenAccountData
-	event := db.EventTransfer{
+	var ok bool
+	transfer := db.EventTransfer{
 		FromAccount: from,
 		ToAccount:   to,
 		TokenSource: uint16(db.NetworkSolana),
@@ -195,35 +193,31 @@ func solTokenProcessTransfer(
 			ctx, fromAccount, from,
 		)
 		if !ok {
-			return
+			return nil, false
 		}
 
-		event.Direction = db.EventTransferOutgoing
-		event.FromWallet = tokenAccountData.Owner
-		event.Token = tokenAccountData.Mint
+		transfer.Direction = db.EventTransferOutgoing
+		transfer.FromWallet = tokenAccountData.Owner
+		transfer.Token = tokenAccountData.Mint
 	case toAccount != nil:
 		tokenAccountData, ok = solAccountDataMust[solTokenAccountData](
 			ctx, toAccount, to,
 		)
 		if !ok {
-			return
+			return nil, false
 		}
 
-		event.Direction = db.EventTransferIncoming
-		event.ToWallet = tokenAccountData.Owner
-		event.Token = tokenAccountData.Mint
+		transfer.Direction = db.EventTransferIncoming
+		transfer.ToWallet = tokenAccountData.Owner
+		transfer.Token = tokenAccountData.Mint
 	default:
-		return
+		return nil, false
 	}
 
 	decimals := solDecimalsMust(ctx, tokenAccountData.Mint)
-	event.Amount = newDecimalFromRawAmount(amount, decimals)
+	transfer.Amount = newDecimalFromRawAmount(amount, decimals)
 
-	ok = true
-	t = db.EventTypeTransfer
-	d = &event
-
-	return
+	return &transfer, true
 }
 
 func solParseTokenTransfer(accounts []string, data []byte) (amount uint64, from, to string) {
@@ -261,7 +255,7 @@ func solProcessTokenIx(
 	}
 
 	var eventType db.EventType
-	var eventData any
+	var transfer *db.EventTransfer
 
 	switch ixType {
 	case solTokenIxTransferChecked:
@@ -270,7 +264,8 @@ func solProcessTokenIx(
 			return
 		}
 
-		eventData, eventType, ok = solTokenProcessTransfer(ctx, from, to, amount)
+		eventType = db.EventTypeTransfer
+		transfer, ok = solTokenProcessTransfer(ctx, from, to, amount)
 		if !ok {
 			return
 		}
@@ -280,7 +275,8 @@ func solProcessTokenIx(
 			return
 		}
 
-		eventData, eventType, ok = solTokenProcessTransfer(ctx, from, to, amount)
+		eventType = db.EventTypeTransfer
+		transfer, ok = solTokenProcessTransfer(ctx, from, to, amount)
 		if !ok {
 			return
 		}
@@ -309,7 +305,7 @@ func solProcessTokenIx(
 		}
 
 		eventType = db.EventTypeCloseAccount
-		eventData = &db.EventTransfer{
+		transfer = &db.EventTransfer{
 			Direction:   getTransferEventDirection(true, destinationAccountInternal),
 			FromWallet:  closedAccountData.Owner,
 			ToWallet:    destinationAddress,
@@ -342,7 +338,7 @@ func solProcessTokenIx(
 
 		decimals := solDecimalsMust(ctx, accountData.Mint)
 		eventType = db.EventTypeMint
-		eventData = &db.EventTransfer{
+		transfer = &db.EventTransfer{
 			ToWallet:    accountData.Owner,
 			ToAccount:   to,
 			Token:       accountData.Mint,
@@ -373,7 +369,7 @@ func solProcessTokenIx(
 
 		decimals := solDecimalsMust(ctx, accountData.Mint)
 		eventType = db.EventTypeBurn
-		eventData = &db.EventTransfer{
+		transfer = &db.EventTransfer{
 			FromWallet:  accountData.Owner,
 			FromAccount: from,
 			Token:       accountData.Mint,
@@ -385,10 +381,10 @@ func solProcessTokenIx(
 	}
 
 	event := solNewEvent(ctx)
-	event.UiAppName = "token"
-	event.UiMethodName = method
+	event.App = "token"
+	event.Method = method
 	event.Type = eventType
-	event.Data = eventData
+	event.Transfers = append(event.Transfers, transfer)
 
 	*events = append(*events, event)
 }

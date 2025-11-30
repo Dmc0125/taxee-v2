@@ -70,10 +70,10 @@ func solDriftProcessInit(
 	}
 
 	event := solNewEvent(ctx)
-	event.UiAppName = app
-	event.UiMethodName = method
+	event.App = app
+	event.Method = method
 	event.Type = db.EventTypeTransfer
-	event.Data = &db.EventTransfer{
+	event.Transfers = append(event.Transfers, &db.EventTransfer{
 		Direction:   getTransferEventDirection(payerInternal, true),
 		FromWallet:  payer,
 		ToWallet:    owner,
@@ -82,7 +82,7 @@ func solDriftProcessInit(
 		Token:       SOL_MINT_ADDRESS,
 		Amount:      newDecimalFromRawAmount(amount, 9),
 		TokenSource: uint16(db.NetworkSolana),
-	}
+	})
 
 	*events = append(*events, event)
 
@@ -162,10 +162,10 @@ func driftProcessBorrowLend(
 	}
 
 	event := solNewEvent(ctx)
-	event.UiAppName = app
-	event.UiMethodName = method
+	event.App = app
+	event.Method = method
 	event.Type = db.EventTypeTransfer
-	event.Data = &db.EventTransfer{
+	event.Transfers = append(event.Transfers, &db.EventTransfer{
 		Direction:   db.EventTransferInternal,
 		FromWallet:  owner,
 		ToWallet:    owner,
@@ -174,7 +174,7 @@ func driftProcessBorrowLend(
 		Token:       tokenAccountData.Mint,
 		Amount:      uiAmount,
 		TokenSource: uint16(db.NetworkSolana),
-	}
+	})
 
 	*events = append(*events, event)
 }
@@ -232,10 +232,10 @@ func solProcessDriftIx(
 		decimals := solDecimalsMust(ctx, tokenAccountData.Mint)
 
 		event := solNewEvent(ctx)
-		event.UiAppName = app
-		event.UiMethodName = "fee"
+		event.App = app
+		event.Method = "fee"
 		event.Type = db.EventTypeTransfer
-		event.Data = &db.EventTransfer{
+		event.Transfers = append(event.Transfers, &db.EventTransfer{
 			Direction:   db.EventTransferOutgoing,
 			FromWallet:  owner,
 			ToWallet:    to,
@@ -244,7 +244,7 @@ func solProcessDriftIx(
 			Token:       tokenAccountData.Mint,
 			Amount:      newDecimalFromRawAmount(amount, decimals),
 			TokenSource: uint16(db.NetworkSolana),
-		}
+		})
 
 		*events = append(*events, event)
 		return

@@ -111,10 +111,10 @@ func solMeteoraFarmsNewStakingEvent(
 	}
 
 	event := solNewEvent(ctx)
-	event.UiAppName = app
-	event.UiMethodName = method
+	event.App = app
+	event.Method = method
 	event.Type = db.EventTypeTransfer
-	event.Data = &db.EventTransfer{
+	event.Transfers = append(event.Transfers, &db.EventTransfer{
 		Direction:   db.EventTransferInternal,
 		FromWallet:  tokenAccountData.Owner,
 		ToWallet:    tokenAccountData.Owner,
@@ -123,7 +123,7 @@ func solMeteoraFarmsNewStakingEvent(
 		Token:       tokenAccountData.Mint,
 		Amount:      newDecimalFromRawAmount(amount, decimals),
 		TokenSource: uint16(db.NetworkSolana),
-	}
+	})
 
 	*events = append(*events, event)
 }
@@ -154,8 +154,8 @@ func solProcessMeteoraFarmsIx(
 			return
 		}
 
-		event.UiAppName = app
-		event.UiMethodName = "create_user"
+		event.App = app
+		event.Method = "create_user"
 
 		*events = append(*events, event)
 	// stake
@@ -198,17 +198,17 @@ func solProcessMeteoraFarmsIx(
 		decimals := solDecimalsMust(ctx, toAccountData.Mint)
 
 		event := solNewEvent(ctx)
-		event.UiAppName = app
-		event.UiMethodName = "claim"
+		event.App = app
+		event.Method = "claim"
 		event.Type = db.EventTypeTransfer
-		event.Data = &db.EventTransfer{
+		event.Transfers = append(event.Transfers, &db.EventTransfer{
 			Direction:   db.EventTransferIncoming,
 			ToWallet:    toAccountData.Owner,
 			ToAccount:   to,
 			Token:       toAccountData.Mint,
 			Amount:      newDecimalFromRawAmount(amount, decimals),
 			TokenSource: uint16(db.NetworkSolana),
-		}
+		})
 
 		*events = append(*events, event)
 	}
@@ -238,24 +238,19 @@ func solProcessMercurialIx(
 		return
 	}
 
-	wallet, incomingTransfers, outgoingTransfers := solParseTransfers(
+	transfers, outgoingCount, incomingCount := solParseTransfers(
 		ctx,
 		ix.InnerInstructions,
 	)
 
-	if len(incomingTransfers) == 0 && len(outgoingTransfers) == 0 {
+	if outgoingCount == 0 && incomingCount == 0 {
 		return
 	}
 
 	event := solNewEvent(ctx)
-	event.UiAppName = "mercurial"
-	event.UiMethodName = method
+	event.App = "mercurial"
+	event.Method = method
 	event.Type = eventType
-	event.Data = &db.EventSwap{
-		Wallet:   wallet,
-		Incoming: incomingTransfers,
-		Outgoing: outgoingTransfers,
-	}
-
+	event.Transfers = transfers
 	*events = append(*events, event)
 }

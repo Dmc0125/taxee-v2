@@ -60,21 +60,21 @@ func evmProcessArbitrumDistributorTx(
 		}
 
 		event := evmNewEvent(ctx)
-		event.UiAppName = "arbitrum_distributor"
-		event.UiMethodName = "claim"
+		event.App = "arbitrum_distributor"
+		event.Method = "claim"
 		event.Type = db.EventTypeTransfer
 
 		transferLog := tx.Events[0]
 		amount := evmAmountFrom32Bytes(transferLog.Data[:32])
 
-		event.Data = &db.EventTransfer{
+		event.Transfers = append(event.Transfers, &db.EventTransfer{
 			Direction:   db.EventTransferIncoming,
 			ToWallet:    sender,
 			ToAccount:   sender,
 			Token:       transferLog.Address,
 			Amount:      amount,
 			TokenSource: uint16(db.NetworkArbitrum),
-		}
+		})
 
 		*events = append(*events, event)
 	}

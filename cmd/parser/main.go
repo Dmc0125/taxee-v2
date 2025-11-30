@@ -89,7 +89,7 @@ func setEventTransfer(
 	tokenSource uint16,
 ) {
 	event.Type = db.EventTypeTransfer
-	event.Data = &db.EventTransfer{
+	event.Transfers = append(event.Transfers, &db.EventTransfer{
 		Direction:   getTransferEventDirection(fromInternal, toInternal),
 		FromWallet:  fromWallet,
 		ToWallet:    toWallet,
@@ -98,7 +98,7 @@ func setEventTransfer(
 		Token:       token,
 		Amount:      amount,
 		TokenSource: tokenSource,
-	}
+	})
 }
 
 func devDeleteEvents(
@@ -193,32 +193,17 @@ func fetchDecimalsAndPrices(
 	logger.Info("Fetch EVM tokens decimals")
 	tokensByNetwork := make(map[db.Network][]string)
 
-	appendEvmTokensByNetwork := func(token string, tokenSource uint16) {
-		isEvm := tokenSource != tokenSourceCoingecko &&
-			tokenSource > uint16(db.NetworkEvmStart)
-		if isEvm {
-			tokens := tokensByNetwork[db.Network(tokenSource)]
-			if len(tokens) == 0 || !slices.Contains(tokens, token) {
-				tokens = append(tokens, token)
-				tokensByNetwork[db.Network(tokenSource)] = tokens
-			}
-		}
-	}
-
 	for _, event := range events {
-		switch data := event.Data.(type) {
-		case *db.EventTransfer:
-			appendEvmTokensByNetwork(data.Token, data.TokenSource)
-		case *db.EventSwap:
-			for _, t := range data.Outgoing {
-				appendEvmTokensByNetwork(t.Token, t.TokenSource)
+		for _, t := range event.Transfers {
+			isEvm := t.TokenSource != tokenSourceCoingecko &&
+				t.TokenSource > uint16(db.NetworkEvmStart)
+			if isEvm {
+				tokens := tokensByNetwork[db.Network(t.TokenSource)]
+				if len(tokens) == 0 || !slices.Contains(tokens, t.Token) {
+					tokens = append(tokens, t.Token)
+					tokensByNetwork[db.Network(t.TokenSource)] = tokens
+				}
 			}
-			for _, t := range data.Incoming {
-				appendEvmTokensByNetwork(t.Token, t.TokenSource)
-			}
-		default:
-			assert.True(false, "unknown event data: %T %#v", data, *event)
-			continue
 		}
 	}
 
@@ -291,9 +276,8 @@ func fetchDecimalsAndPrices(
 
 	handleQueriedPricepoint := func(
 		row pgx.Row,
-		token string,
 		roundedTimestamp time.Time,
-		price, value, amount *decimal.Decimal,
+		transfer *db.EventTransfer,
 	) error {
 		var cid, priceStr string
 		var missing bool
@@ -305,7 +289,7 @@ func fetchDecimalsAndPrices(
 		} else {
 			assert.NoErr(
 				err,
-				fmt.Sprintf("unable to scan pricepoint: %s", token),
+				fmt.Sprintf("unable to scan pricepoint: %s", transfer.Token),
 			)
 		}
 		if missing {
@@ -318,17 +302,17 @@ func fetchDecimalsAndPrices(
 				tokenPriceToFetch{
 					coingeckoId: cid,
 					timestamp:   roundedTimestamp.Unix(),
-					price:       price,
-					value:       value,
-					amount:      amount,
+					price:       &transfer.Price,
+					value:       &transfer.Value,
+					amount:      &transfer.Amount,
 				},
 			)
 		} else {
 			pricepoint, err := decimal.NewFromString(priceStr)
 			assert.NoErr(err, fmt.Sprintf("invalid price: %s", priceStr))
 
-			*price = pricepoint
-			*value = pricepoint.Mul(*amount)
+			transfer.Price = pricepoint
+			transfer.Value = pricepoint.Mul(transfer.Amount)
 		}
 
 		return nil
@@ -337,41 +321,39 @@ func fetchDecimalsAndPrices(
 	queryEventDataPrice := func(
 		roundedTimestamp time.Time,
 		network db.Network,
-		token string,
-		tokenSource uint16,
-		price, value, amount *decimal.Decimal,
+		transfer *db.EventTransfer,
 	) {
 		dbPriceQueriesCount += 1
 
-		if tokenSource == math.MaxUint16 {
+		if transfer.TokenSource == math.MaxUint16 {
 			q := queryPricesBatch.Queue(
 				db.GetPricepointByCoingeckoId,
-				token,
+				transfer.Token,
 				roundedTimestamp,
 			)
 			q.QueryRow(func(row pgx.Row) error {
 				return handleQueriedPricepoint(
 					row,
-					token,
 					roundedTimestamp,
-					price, value, amount,
+					transfer,
 				)
 			})
 		} else {
-			if tokenSource > uint16(db.NetworkEvmStart) {
-				n := db.Network(tokenSource)
+			if transfer.TokenSource > uint16(db.NetworkEvmStart) {
+				// TODO: cant just use network????
+				n := db.Network(transfer.TokenSource)
 				evmCtx, ok := evmContexts[n]
 				assert.True(ok, "missing evm context %s", n.String())
 
-				decimals, ok := evmCtx.decimals[token]
+				decimals, ok := evmCtx.decimals[transfer.Token]
 				assert.True(
 					ok,
 					"missing decimals for evm %d token: %s",
-					tokenSource, token,
+					transfer.TokenSource, transfer.Token,
 				)
 
-				*amount = decimal.NewFromBigInt(
-					amount.BigInt(),
+				transfer.Amount = decimal.NewFromBigInt(
+					transfer.Amount.BigInt(),
 					-int32(decimals),
 				)
 			}
@@ -380,14 +362,13 @@ func fetchDecimalsAndPrices(
 				db.GetPricepointByNetworkAndTokenAddress,
 				roundedTimestamp,
 				network,
-				token,
+				transfer.Token,
 			)
 			q.QueryRow(func(row pgx.Row) error {
 				return handleQueriedPricepoint(
 					row,
-					token,
 					roundedTimestamp,
-					price, value, amount,
+					transfer,
 				)
 			})
 		}
@@ -400,23 +381,8 @@ func fetchDecimalsAndPrices(
 			0,
 		)
 
-		switch data := event.Data.(type) {
-		case *db.EventSwap:
-			for _, t := range append(data.Outgoing, data.Incoming...) {
-				queryEventDataPrice(
-					roundedTimestamp, event.Network,
-					t.Token, t.TokenSource,
-					&t.Price, &t.Value, &t.Amount,
-				)
-			}
-		case *db.EventTransfer:
-			queryEventDataPrice(
-				roundedTimestamp, event.Network,
-				data.Token, data.TokenSource,
-				&data.Price, &data.Value, &data.Amount,
-			)
-		default:
-			assert.True(false, "unknown event data: %T %#v", data, *event)
+		for _, t := range event.Transfers {
+			queryEventDataPrice(roundedTimestamp, event.Network, t)
 		}
 	}
 
@@ -653,22 +619,21 @@ func Parse(
 		id, err := uuid.NewRandom()
 		assert.NoErr(err, "unable to generate event id")
 		return &db.Event{
-			Id:           id,
-			Timestamp:    tx.Timestamp,
-			Network:      tx.Network,
-			UiAppName:    "native",
-			UiMethodName: "fee",
-			Type:         db.EventTypeTransfer,
-			Data: &db.EventTransfer{
+			Id:        id,
+			Timestamp: tx.Timestamp,
+			Network:   tx.Network,
+			App:       "native",
+			Method:    "fee",
+			Type:      db.EventTypeTransfer,
+			Transfers: []*db.EventTransfer{{
 				Direction:   db.EventTransferOutgoing,
 				FromWallet:  from,
 				FromAccount: from,
 				Token:       token,
 				Amount:      amount,
 				TokenSource: tokenSource,
-			},
+			}},
 		}
-
 	}
 
 	events := make([]*db.Event, 0)
@@ -755,37 +720,60 @@ func Parse(
 		assert.True(ok, "missing internal_tx id for: %s", tx.Id)
 
 		for _, event := range txEvents {
-			inv.processEvent(event)
+			for _, t := range event.Transfers {
+				if t.Id == uuid.Nil {
+					var err error
+					t.Id, err = uuid.NewRandom()
+					assert.NoErr(err, "unable to generate transfer uuid")
+				}
+			}
 
-			eventData, err := json.Marshal(event.Data)
-			assert.NoErr(err, "unable to marshal event data")
+			inv.processEvent(event)
 
 			const insertEventQuery = `
 				insert into event (
 					id, position, internal_tx_id,
-					ui_app_name, ui_method_name, type, data,
-					preceding_events_ids
+					app, method, type
 				) values (
-					$1, $2, $3, $4, $5, $6, $7, $8
+					$1, $2, $3, $4, $5, $6
 				)
 			`
-
-			if event.PrecedingEvents == nil {
-				event.PrecedingEvents = make([]uuid.UUID, 0)
-			}
+			// if event.PrecedingEvents == nil {
+			// 	event.PrecedingEvents = make([]uuid.UUID, 0)
+			// }
 
 			batch.Queue(
 				insertEventQuery,
+				// args
 				event.Id,
 				eventPosition,
 				internalTxId,
-				event.UiAppName,
-				event.UiMethodName,
+				event.App,
+				event.Method,
 				event.Type,
-				eventData,
-				event.PrecedingEvents,
 			)
 			eventPosition += 1
+
+			const insertTransferQuery = `
+				insert into event_transfer (
+					id, event_id, position,
+					direction, from_wallet, from_account, to_wallet, to_account,
+					token, amount, token_source,
+					price, value, profit, missing_amount
+				) values (
+					$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+				)
+			`
+			for i, t := range event.Transfers {
+				batch.Queue(
+					insertTransferQuery,
+					// args
+					t.Id, event.Id, i,
+					t.Direction, t.FromWallet, t.FromAccount, t.ToWallet, t.ToAccount,
+					t.Token, t.Amount, t.TokenSource,
+					t.Price, t.Value, t.Profit, t.MissingAmount,
+				)
+			}
 		}
 
 		/////////////////

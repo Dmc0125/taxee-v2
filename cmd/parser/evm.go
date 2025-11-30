@@ -398,7 +398,7 @@ func evmProcessSwap(
 	value decimal.Decimal,
 	itxs []*db.EvmInternalTx,
 	logs []*db.EvmTransactionEvent,
-) db.EventSwap {
+) []*db.EventTransfer {
 	amounts := make(map[string]decimal.Decimal)
 
 	if !value.Equal(decimal.Zero) {
@@ -429,17 +429,14 @@ func evmProcessSwap(
 		}
 	}
 
-	swapData := db.EventSwap{
-		Wallet: sender,
-	}
+	var transfers []*db.EventTransfer
 
 	for token, amount := range amounts {
 		if amount.Equal(decimal.Zero) {
 			continue
 		}
 
-		t := db.EventSwapTransfer{
-			Account:     sender,
+		t := db.EventTransfer{
 			Token:       token,
 			Amount:      amount.Abs(),
 			TokenSource: uint16(network),
@@ -449,13 +446,29 @@ func evmProcessSwap(
 		}
 
 		if amount.LessThan(decimal.Zero) {
-			swapData.Outgoing = append(swapData.Outgoing, &t)
+			t.Direction = db.EventTransferOutgoing
+			t.FromAccount = sender
+			t.FromWallet = sender
+			transfers = append(transfers, &t)
 		} else if amount.GreaterThan(decimal.Zero) {
-			swapData.Incoming = append(swapData.Incoming, &t)
+			t.Direction = db.EventTransferIncoming
+			t.ToAccount = sender
+			t.ToWallet = sender
+			transfers = append(transfers, &t)
 		}
 	}
 
-	return swapData
+	// sort so we have the same ordering each time
+	// outgoing first, incoming second and then by token
+	slices.SortFunc(transfers, func(a *db.EventTransfer, b *db.EventTransfer) int {
+		adir, bdir := a.Direction, b.Direction
+		if adir == bdir {
+			return strings.Compare(a.Token, b.Token)
+		}
+		return adir.Cmp(bdir)
+	})
+
+	return transfers
 }
 
 func evmProcessSwapTx(
@@ -469,20 +482,20 @@ func evmProcessSwapTx(
 		return
 	}
 
-	swapData := evmProcessSwap(
+	transfers := evmProcessSwap(
 		sender, ctx.network,
 		tx.Value, tx.InternalTxs, tx.Events,
 	)
 
-	if len(swapData.Incoming) == 0 && len(swapData.Outgoing) == 0 {
+	if len(transfers) == 0 {
 		return
 	}
 
 	event := evmNewEvent(ctx)
-	event.UiAppName = appName
-	event.UiMethodName = methodName
+	event.App = appName
+	event.Method = methodName
 	event.Type = db.EventTypeSwap
-	event.Data = &swapData
+	event.Transfers = transfers
 
 	*events = append(*events, event)
 }
@@ -503,8 +516,8 @@ func evmProcessTx(
 		}
 
 		event := evmNewEvent(ctx)
-		event.UiAppName = "native"
-		event.UiMethodName = "transfer"
+		event.App = "native"
+		event.Method = "transfer"
 
 		setEventTransfer(
 			event,

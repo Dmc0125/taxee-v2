@@ -2,6 +2,8 @@ begin;
 
 drop table parser_error;
 
+drop table event_transfer;
+
 drop table event;
 
 drop table internal_tx;

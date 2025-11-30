@@ -97,19 +97,17 @@ func evmProcessUniswapV3Tx(
 			return
 		}
 
-		swapData := evmProcessSwap(
+		transfers := evmProcessSwap(
 			sender, ctx.network,
 			tx.Value, tx.InternalTxs, tx.Events,
 		)
 
 		event := evmNewEvent(ctx)
-		event.UiAppName = "uniswap_v3"
-		event.UiMethodName = "swap"
+		event.App = "uniswap_v3"
+		event.Method = "swap"
 		event.Type = db.EventTypeSwap
-		event.Data = &swapData
+		event.Transfers = transfers
 
 		*events = append(*events, event)
-
 	}
-
 }

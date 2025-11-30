@@ -1,8 +1,6 @@
 package db
 
 import (
-	"encoding/json"
-	"fmt"
 	"taxee/pkg/assert"
 	"time"
 
@@ -156,40 +154,38 @@ const (
 	EventTransferInternal
 )
 
-type EventTransfer struct {
-	Direction   EventTransferDirection `json:"direction"`
-	FromWallet  string                 `json:"fromWallet"`
-	ToWallet    string                 `json:"toWallet"`
-	FromAccount string                 `json:"fromaccount"`
-	ToAccount   string                 `json:"toAccount"`
-	Token       string                 `json:"token"`
-	Amount      decimal.Decimal        `json:"amount"`
-	TokenSource uint16                 `json:"tokenSource"`
-
-	Price  decimal.Decimal `json:"price"`
-	Value  decimal.Decimal `json:"value"`
-	Profit decimal.Decimal `json:"profit"`
-
-	MissingAmount decimal.Decimal `json:"missingAmount"`
+// compares two directions, outgoing is always < incoming
+//
+// should ne be used to compare internal
+func (d1 *EventTransferDirection) Cmp(d2 EventTransferDirection) int {
+	if *d1 == d2 {
+		return 0
+	}
+	if *d1 == EventTransferOutgoing && d2 == EventTransferIncoming {
+		return -1
+	}
+	return 1
 }
 
-type EventSwapTransfer struct {
-	Account     string          `json:"account"`
+type EventTransfer struct {
+	Id uuid.UUID `json:"id"`
+
+	Direction   EventTransferDirection `json:"direction"`
+	FromWallet  string                 `json:"fromWallet"`
+	FromAccount string                 `json:"fromaccount"`
+	ToWallet    string                 `json:"toWallet"`
+	ToAccount   string                 `json:"toAccount"`
+
 	Token       string          `json:"token"`
 	Amount      decimal.Decimal `json:"amount"`
 	TokenSource uint16          `json:"tokenSource"`
 
-	Price  decimal.Decimal `json:"price"`
-	Value  decimal.Decimal `json:"value"`
-	Profit decimal.Decimal `json:"profit"`
-
+	Price         decimal.Decimal `json:"price"`
+	Value         decimal.Decimal `json:"value"`
+	Profit        decimal.Decimal `json:"profit"`
 	MissingAmount decimal.Decimal `json:"missingAmount"`
-}
 
-type EventSwap struct {
-	Wallet   string               `json:"wallet"`
-	Outgoing []*EventSwapTransfer `json:"outgoing"`
-	Incoming []*EventSwapTransfer `json:"incoming"`
+	PrecedingEventTransfers []uuid.UUID
 }
 
 type EventType int
@@ -200,40 +196,24 @@ const (
 	EventTypeMint
 	EventTypeBurn
 
-	EventTypeSwap
+	EventTypeStake
 
+	EventTypeSwapBr
+
+	EventTypeSwap
 	EventTypeAddLiquidity
 	EventTypeRemoveLiquidity
-
-	EventTypeStake
 )
 
 type Event struct {
-	Id              uuid.UUID
-	Timestamp       time.Time
-	Network         Network
-	UiAppName       string
-	UiMethodName    string
-	Type            EventType
-	Data            any
-	PrecedingEvents []uuid.UUID
-}
+	Id        uuid.UUID
+	Timestamp time.Time
+	Network   Network
 
-func (event *Event) UnmarshalData(src []byte) error {
-	var data any
-	switch event.Type {
-	case EventTypeTransfer, EventTypeCloseAccount, EventTypeMint, EventTypeBurn:
-		data = new(EventTransfer)
-	case EventTypeSwap, EventTypeAddLiquidity, EventTypeRemoveLiquidity:
-		data = new(EventSwap)
-	}
-
-	if err := json.Unmarshal(src, data); err != nil {
-		return fmt.Errorf("unable to unmarshal %d event data: %w", event.Type, err)
-	}
-
-	event.Data = data
-	return nil
+	App       string
+	Method    string
+	Type      EventType
+	Transfers []*EventTransfer
 }
 
 type SyncRequestType uint8

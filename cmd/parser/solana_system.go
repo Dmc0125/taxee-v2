@@ -117,8 +117,8 @@ func solProcessSystemIx(
 	}
 
 	event := solNewEvent(ctx)
-	event.UiAppName = "system"
-	event.UiMethodName = method
+	event.App = "system"
+	event.Method = method
 
 	// TODO: to can be arbitrary account, so it can have owner wallet
 	setEventTransfer(

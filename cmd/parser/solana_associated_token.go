@@ -133,8 +133,8 @@ func solProcessAssociatedTokenIx(
 	amount := binary.LittleEndian.Uint64(transferIx.Data[4:])
 
 	event := solNewEvent(ctx)
-	event.UiAppName = "associated_token"
-	event.UiMethodName = "create"
+	event.App = "associated_token"
+	event.Method = "create"
 
 	setEventTransfer(
 		event,

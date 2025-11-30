@@ -68,12 +68,41 @@ create table event (
     internal_tx_id integer not null,
     foreign key (internal_tx_id) references internal_tx (id) on delete cascade,
 
-    ui_app_name varchar not null,
-    ui_method_name varchar not null,
-    type smallint not null,
-    data jsonb not null,
+    app varchar not null,
+    method varchar not null,
+    type smallint not null
+);
 
-    preceding_events_ids uuid[] not null
+create table event_transfer (
+    id uuid primary key,
+    event_id uuid not null,
+    foreign key (event_id) references event (id) on delete cascade,
+    position integer not null,
+
+    -- parser
+
+    -- 0 => incoming 
+    -- 1 => outgoing
+    -- 2 => internal
+    direction smallint not null,
+    from_wallet varchar,
+    from_account varchar,
+    to_wallet varchar,
+    to_account varchar,
+
+    token varchar not null,
+    amount varchar not null,
+    -- has to be int because MaxUint16 > MaxInt16
+    token_source integer not null,
+
+    -- inventory
+    price varchar,
+    value varchar,
+    profit varchar,
+    missing_amount varchar
+
+    -- TODO: Separate table so we can tracked the actual used amount
+    -- preceding_transfers_ids uuid[] not null
 );
 
 create table parser_error (

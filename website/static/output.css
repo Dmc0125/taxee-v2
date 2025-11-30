@@ -20,13 +20,11 @@
     --color-gray-50: oklch(98.5% 0.002 247.839);
     --color-gray-100: oklch(96.7% 0.003 264.542);
     --color-gray-200: oklch(92.8% 0.006 264.531);
-    --color-gray-300: oklch(87.2% 0.01 258.338);
     --color-gray-400: oklch(70.7% 0.022 261.325);
     --color-gray-500: oklch(55.1% 0.027 264.364);
     --color-gray-600: oklch(44.6% 0.03 256.802);
     --color-gray-700: oklch(37.3% 0.034 259.733);
     --color-gray-800: oklch(27.8% 0.033 256.848);
-    --color-gray-900: oklch(21% 0.034 264.665);
     --color-white: #fff;
     --spacing: 0.25rem;
     --text-xs: 0.75rem;
@@ -37,8 +35,6 @@
     --text-xl--line-height: calc(1.75 / 1.25);
     --text-2xl: 1.5rem;
     --text-2xl--line-height: calc(2 / 1.5);
-    --text-3xl: 1.875rem;
-    --text-3xl--line-height: calc(2.25 / 1.875);
     --font-weight-medium: 500;
     --font-weight-semibold: 600;
     --radius-sm: 0.25rem;
@@ -287,10 +283,6 @@
     width: calc(var(--spacing) * 5);
     height: calc(var(--spacing) * 5);
   }
-  .size-6 {
-    width: calc(var(--spacing) * 6);
-    height: calc(var(--spacing) * 6);
-  }
   .h-4 {
     height: calc(var(--spacing) * 4);
   }
@@ -305,9 +297,6 @@
   }
   .h-\[1em\] {
     height: 1em;
-  }
-  .h-fit {
-    height: fit-content;
   }
   .h-full {
     height: 100%;
@@ -339,17 +328,8 @@
   .w-\[3rem\] {
     width: 3rem;
   }
-  .w-\[200px\] {
-    width: 200px;
-  }
-  .w-\[200px\]\! {
-    width: 200px !important;
-  }
   .w-\[300px\]\! {
     width: 300px !important;
-  }
-  .w-\[400px\]\! {
-    width: 400px !important;
   }
   .w-\[calc\(100\%\+1rem\)\] {
     width: calc(100% + 1rem);
@@ -395,12 +375,6 @@
   .grid-cols-\(--grid-cols\) {
     grid-template-columns: var(--grid-cols);
   }
-  .grid-cols-\[3rem_repeat\(6\,1fr\)\] {
-    grid-template-columns: 3rem repeat(6,1fr);
-  }
-  .grid-cols-\[10\%_repeat\(6\,1fr\)\] {
-    grid-template-columns: 10% repeat(6,1fr);
-  }
   .grid-cols-\[20\%_20\%_1fr_auto\] {
     grid-template-columns: 20% 20% 1fr auto;
   }
@@ -415,9 +389,6 @@
   }
   .grid-cols-\[repeat\(2\,1fr\)\] {
     grid-template-columns: repeat(2,1fr);
-  }
-  .grid-cols-\[repeat\(6\,1fr\)\] {
-    grid-template-columns: repeat(6,1fr);
   }
   .flex-col {
     flex-direction: column;
@@ -526,21 +497,6 @@
   .bg-white {
     background-color: var(--color-white);
   }
-  .bg-yellow-200 {
-    background-color: var(--color-yellow-200);
-  }
-  .bg-yellow-200\/20 {
-    background-color: color-mix(in srgb, oklch(94.5% 0.129 101.54) 20%, transparent);
-    @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--color-yellow-200) 20%, transparent);
-    }
-  }
-  .bg-yellow-200\/40 {
-    background-color: color-mix(in srgb, oklch(94.5% 0.129 101.54) 40%, transparent);
-    @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--color-yellow-200) 40%, transparent);
-    }
-  }
   .p-0\.5 {
     padding: calc(var(--spacing) * 0.5);
   }
@@ -631,15 +587,6 @@
   .text-red-800 {
     color: var(--color-red-800);
   }
-  .text-yellow-300 {
-    color: var(--color-yellow-300);
-  }
-  .text-yellow-500 {
-    color: var(--color-yellow-500);
-  }
-  .text-yellow-700 {
-    color: var(--color-yellow-700);
-  }
   .decoration-gray-400 {
     text-decoration-color: var(--color-gray-400);
   }
@@ -651,9 +598,6 @@
   }
   .\[--grid-cols\:3rem_repeat\(6\,1fr\)\] {
     --grid-cols: 3rem repeat(6,1fr);
-  }
-  .\[--grid-cols\:grid-cols-\[3rem_repeat\(6\,1fr\)\]\] {
-    --grid-cols: grid-cols-[3rem repeat(6,1fr)];
   }
   .hover\:bg-gray-200 {
     &:hover {

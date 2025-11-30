@@ -86,8 +86,8 @@ func evmProcessErc20Tx(
 	}
 
 	event := evmNewEvent(ctx)
-	event.UiAppName = "erc20"
-	event.UiMethodName = method
+	event.App = "erc20"
+	event.Method = method
 
 	setEventTransfer(
 		event,
