@@ -56,9 +56,11 @@ function handleSync(requestId) {
     }
 
     requestConn.addEventListener("update", function(e) {
-        const btnComponentEl = document.querySelector("#progress-indicator")
+        const btnComponentEls = document.querySelectorAll("#progress-indicator")
         const html = decodeHex(e.data)
-        btnComponentEl.outerHTML = html
+        for (const el of btnComponentEls) {
+            el.outerHTML = html
+        }
     })
 
     const p = new Promise(async function(resolve) {
@@ -70,7 +72,15 @@ function handleSync(requestId) {
         requestConn.addEventListener("close", async function() {
             requestConn.close()
 
-            const tableRes = await fetch(`/events${window.location.search}&partial=true`)
+            let eventsUrl = "/events"
+            const q = window.location.search
+            if (q == "") {
+                eventsUrl += "?partial=true"
+            } else {
+                eventsUrl += `${q}&partial=true`
+            }
+
+            const tableRes = await fetch(eventsUrl)
             const tableHtml = await tableRes.text()
             document.querySelector("#events-table").innerHTML = tableHtml
 
@@ -82,55 +92,69 @@ function handleSync(requestId) {
     return p
 }
 
-let parsing = false
+{
+    let parsing = false
 
-document.addEventListener("DOMContentLoaded", async function() {
-    const progressIndicatorEl = document.querySelector("#progress-indicator")
+    document.addEventListener("DOMContentLoaded", async function() {
+        const progressIndicatorEl = document.querySelector("#progress-indicator")
 
-    if (progressIndicatorEl.hasAttribute("data-request-id")) {
+        if (progressIndicatorEl.hasAttribute("data-request-id")) {
+            parsing = true
+            const rid = progressIndicatorEl.getAttribute("data-request-id")
+
+            await handleSync(rid)
+            parsing = false
+        } else {
+            fetchTokensImages()
+        }
+    })
+
+    // let btnRefetchEl = document.querySelector("#btn-refetch")
+    let btnParseTxsEl = document.querySelector("#btn-parse-txs")
+    assertDefined(btnParseTxsEl, "#btn-parse-txs not defined")
+    // let btnParseEventsEl = document.querySelector("#btn-parse-events")
+
+    btnParseTxsEl.addEventListener("click", async function() {
+        if (parsing) {
+            return
+        }
+
         parsing = true
-        const rid = progressIndicatorEl.getAttribute("data-request-id")
+        const result = await sendSyncRequest(1)
+        if (result == null) {
+            return
+        }
 
-        await handleSync(rid)
+        const { rid, html } = result
+        const els = document.querySelectorAll("#progress-indicator")
+        for (const el of els) {
+            el.outerHTML = html
+        }
+
+        const err = await handleSync(rid)
+        if (err != null) {
+            console.error(err)
+        }
         parsing = false
-    } else {
-        fetchTokensImages()
-    }
-})
-
-// let btnRefetchEl = document.querySelector("#btn-refetch")
-let btnParseTxsEl = document.querySelector("#btn-parse-txs")
-assertDefined(btnParseTxsEl, "#btn-parse-txs not defined")
-// let btnParseEventsEl = document.querySelector("#btn-parse-events")
-
-btnParseTxsEl.addEventListener("click", async function() {
-    if (parsing) {
-        return
-    }
-
-    parsing = true
-    const result = await sendSyncRequest(1)
-    if (result == null) {
-        return
-    }
-
-    const { rid, html } = result
-    document.querySelector("#progress-indicator").outerHTML = html
-
-    const err = await handleSync(rid)
-    if (err != null) {
-        console.error(err)
-    }
-    parsing = false
-})
-
+    })
+}
 
 ////////////////
 // sticky table nav
-// window.addEventListener("resize", function() {
-//
-// })
-//
+{
+    const floatingTableNav = document.querySelector("#table-nav-floating")
+    let applied = false
+
+    window.addEventListener("scroll", function() {
+        if (window.scrollY > 100 && !applied) {
+            floatingTableNav.classList.remove("pointer-events-none", "opacity-0")
+            applied = true
+        } else if (applied && window.scrollY < 100) {
+            floatingTableNav.classList.add("pointer-events-none", "opacity-0")
+            applied = false
+        }
+    })
+}
 
 ////////////////
 // Sticky header

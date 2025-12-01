@@ -58,10 +58,10 @@ func newAccountLifetime(slot uint64, ixIdx uint32) accountLifetime {
 }
 
 func (acc *accountLifetime) open(slot uint64, ixIdx uint32) bool {
-	if acc.MinSlot == slot && acc.MinIxIdx < ixIdx {
+	if acc.MinSlot == slot && acc.MinIxIdx <= ixIdx {
 		return true
 	}
-	if acc.MaxSlot == slot && acc.MaxIxIdx > ixIdx {
+	if acc.MaxSlot == slot && acc.MaxIxIdx >= ixIdx {
 		return true
 	}
 	return acc.MinSlot < slot && slot < acc.MaxSlot
@@ -137,7 +137,7 @@ func (ctx *solContext) init(address string, owned bool, data any) {
 	ctx.accounts[address] = lifetimes
 }
 
-func (ctx *solContext) close(closedAddress, receiverAddress string) {
+func (ctx *solContext) close(closedAddress string) {
 	lifetimes, ok := ctx.accounts[closedAddress]
 	if !ok || len(lifetimes) == 0 {
 		solNewErrMissingAccount(ctx, closedAddress)
@@ -154,8 +154,6 @@ func (ctx *solContext) close(closedAddress, receiverAddress string) {
 	acc.MaxSlot = ctx.slot
 	acc.MaxIxIdx = ctx.ixIdx
 	ctx.accounts[closedAddress] = lifetimes
-
-	ctx.receiveSol(receiverAddress, acc.Balance)
 }
 
 // 0 -> not owned, 1 -> owned, 2 -> whatever
@@ -276,6 +274,8 @@ func solPreprocessIx(ctx *solContext, ix *db.SolanaInstruction) {
 		solPreprocessMeteoraFarmsIx(ctx, ix)
 	case SOL_DRIFT_PROGRAM_ADDRESS:
 		solPreprocessDriftIx(ctx, ix)
+	case SOL_JUP_DCA_PROGRAM_ADDRESS:
+		solPreprocessJupDcaIx(ctx, ix)
 	}
 }
 
@@ -363,10 +363,111 @@ func (iter *solInnerIxIterator) hasNext() bool {
 	return len(iter.innerIxs) > iter.pos
 }
 
+func (iter *solInnerIxIterator) peekNext() (*db.SolanaInnerInstruction, bool) {
+	if !iter.hasNext() {
+		return nil, false
+	}
+	return iter.innerIxs[iter.pos], true
+}
+
 func (iter *solInnerIxIterator) next() *db.SolanaInnerInstruction {
 	ix := iter.innerIxs[iter.pos]
 	iter.pos += 1
 	return ix
+}
+
+func (iter *solInnerIxIterator) nextSafe() (*db.SolanaInnerInstruction, bool) {
+	if iter.hasNext() {
+		return iter.next(), true
+	}
+	return nil, false
+}
+
+func solParseCreateAssociatedTokenAccount(
+	accounts []string,
+	innerIxs *solInnerIxIterator,
+) (payer, owner, tokenAccount, mint string, amount uint64) {
+	if _, ok := innerIxs.nextSafe(); !ok {
+		return
+	}
+
+	// ixs:
+	// 1. get account len
+	//
+	// if new account is empty
+	// 	2. create account
+	// if has balance but not enough
+	// 	2. transfer
+	//  3. allocate
+	// 	4. assign
+	// if has enough balance
+	// 	2. allocate
+	// 	3. assign
+	//
+	// .. init immutable owner
+	// .. init account
+
+	// skip getAccountDataSize
+	transferIx, ok := innerIxs.nextSafe()
+	if !ok {
+		// err
+		return
+	}
+
+	switch transferIx.ProgramAddress {
+	case SOL_SYSTEM_PROGRAM_ADDRESS:
+		ixType, _, ok := solSystemIxFromData(transferIx.Data)
+		if !ok {
+			// err
+			return
+		}
+
+		switch ixType {
+		case solSystemIxCreate:
+		case solSystemIxTransfer:
+			// skip allocate and assign
+			_, ok1 := innerIxs.nextSafe()
+			_, ok2 := innerIxs.nextSafe()
+			if !ok1 || !ok2 {
+				// error
+				return
+			}
+		default:
+			// error
+			return
+		}
+
+		payer, tokenAccount, amount, ok = solParseSystemIxSolTransfer(
+			ixType,
+			transferIx.Accounts,
+			transferIx.Data,
+		)
+		if !ok {
+			// error
+			return
+		}
+	default:
+		// skip allocate and assign
+		_, ok1 := innerIxs.nextSafe()
+		_, ok2 := innerIxs.nextSafe()
+		if !ok1 || !ok2 {
+			// error
+			return
+		}
+
+		payer, tokenAccount = accounts[0], accounts[1]
+	}
+
+	// skip init immutable owner and init account
+	_, ok1 := innerIxs.nextSafe()
+	_, ok2 := innerIxs.nextSafe()
+	if !ok1 || !ok2 {
+		// error
+		return
+	}
+
+	owner, mint = accounts[2], accounts[3]
+	return
 }
 
 // NOTE: implemented based on
@@ -398,12 +499,12 @@ func solAnchorInitAccountValidate(
 	case solSystemIxCreate:
 	case solSystemIxTransfer:
 		// NOTE: skip over allocate and assign
-		innerIxs.next()
-		if !innerIxs.hasNext() {
+		_, ok1 := innerIxs.nextSafe()
+		_, ok2 := innerIxs.nextSafe()
+		if !ok1 || !ok2 {
 			err = errors.New("invalid anchor init ix")
 			return
 		}
-		innerIxs.next()
 	default:
 		assert.True(false, "invalid anchor init ix: %d", ixType)
 	}
@@ -429,7 +530,10 @@ func solProcessAnchorInitAccount(
 		return nil, false, err
 	}
 
-	fromInternal, toInternal := ctx.walletOwned(from), ctx.walletOwned(to)
+	// NOTE: can only happen if unknown account is being created (squads tx)
+	fromInternal := ctx.walletOwned(from)
+	toInternal := slices.Contains(ctx.wallets, to) ||
+		ctx.findOwned(ctx.slot, ctx.ixIdx, to) != nil
 	if !fromInternal && !toInternal {
 		return nil, false, nil
 	}
@@ -616,5 +720,7 @@ func solProcessIx(
 		solProcessMercurialIx(ctx, ix, events)
 	case SOL_DRIFT_PROGRAM_ADDRESS:
 		solProcessDriftIx(ctx, ix, events)
+	case SOL_JUP_DCA_PROGRAM_ADDRESS:
+		solProcessJupDcaIx(ctx, ix, events)
 	}
 }

@@ -42,8 +42,11 @@ var appImgUrls = map[string]string{
 	"0-system":           "/static/logo_solana.svg",
 	"0-token":            "/static/logo_solana.svg",
 	"0-associated_token": "/static/logo_solana.svg",
-	"0-meteora_pools":    "/static/logo_sol_meteora.svg",
-	"0-meteora_farms":    "/static/logo_sol_meteora.svg",
+	"0-meteora_pools":    "/static/logo_meteora.svg",
+	"0-meteora_farms":    "/static/logo_meteora.svg",
+	"0-jupiter":          "/static/logo_jupiter.svg",
+	"0-jupiter_dca":      "/static/logo_jupiter.svg",
+	"0-drift":            "/static/logo_drift.svg",
 	"3-native":           "/static/logo_arbitrum.svg",
 }
 
@@ -560,8 +563,8 @@ func renderEvents(
 					if t.MissingAmount.GreaterThan(decimal.Zero) {
 						tokenData := &eventTokenAmountComponentData{
 							Account:    t.FromAccount,
-							Amount:     t.Amount.String(),
-							LongAmount: t.Amount.String(),
+							Amount:     t.MissingAmount.String(),
+							LongAmount: t.MissingAmount.String(),
 						}
 						getTokenSymbolAndImg(
 							t.Token, t.TokenSource, network,
@@ -575,6 +578,8 @@ func renderEvents(
 					}
 
 					if t.Direction == db.EventTransferInternal {
+						eventComponentData.Profits = append(eventComponentData.Profits, profitData)
+
 						outgoingTransfers.Wallet = shorten(t.FromWallet, 4, 4)
 						incomingTransfers.Wallet = shorten(t.ToWallet, 4, 4)
 

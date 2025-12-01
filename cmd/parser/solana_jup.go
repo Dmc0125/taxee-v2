@@ -31,6 +31,9 @@ func solProcessJupV6(
 	// routeV2
 	case [8]uint8{187, 100, 250, 204, 49, 196, 175, 20}:
 		owner = ix.Accounts[0]
+	// route
+	case [8]uint8{229, 23, 203, 151, 122, 227, 173, 42}:
+		owner = ix.Accounts[1]
 	default:
 		return
 	}

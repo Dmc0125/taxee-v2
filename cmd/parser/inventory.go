@@ -50,10 +50,9 @@ func invSubFromAccount(
 	inv *inventory,
 	event *db.Event,
 	transfer *db.EventTransfer,
-	account string,
 	increaseProfits bool,
 ) decimal.Decimal {
-	accountId := inventoryAccountId{event.Network, account, transfer.Token}
+	accountId := inventoryAccountId{event.Network, transfer.FromAccount, transfer.Token}
 	records := inv.accounts[accountId]
 
 	remainingAmount := transfer.Amount
@@ -94,7 +93,7 @@ func invSubFromAccount(
 
 		if increaseProfits {
 			remainingValue := remainingAmount.Mul(transfer.Price)
-			transfer.Profit = remainingValue
+			transfer.Profit = transfer.Profit.Add(remainingValue)
 			inv.income = inv.income.Add(remainingValue)
 
 			value = value.Add(remainingValue)
@@ -184,12 +183,16 @@ func (inv *inventory) processEvent(event *db.Event) {
 				},
 			)
 		case db.EventTransferOutgoing:
+			increaseProfits := false
+			switch event.Type {
+			case db.EventTypeTransfer, db.EventTypeCloseAccount:
+				increaseProfits = true
+			}
 			invSubFromAccount(
 				inv,
 				event,
 				transfer,
-				transfer.FromAccount,
-				event.Type == db.EventTypeTransfer,
+				increaseProfits,
 			)
 		default:
 			assert.True(false, "invalid direction: %d", transfer.Direction)
@@ -247,13 +250,7 @@ func (inv *inventory) processEvent(event *db.Event) {
 						t.Price = tokensValue.Div(t.Amount)
 					}
 
-					value := invSubFromAccount(
-						inv,
-						event,
-						t,
-						t.FromAccount,
-						true,
-					)
+					value := invSubFromAccount(inv, event, t, true)
 					if event.Type == db.EventTypeAddLiquidity {
 						tokensValue = tokensValue.Add(value)
 					}

@@ -711,82 +711,75 @@ func Parse(
 	eventPosition := 0
 
 	for _, tx := range txs {
-		txEvents, ok := groupedEvents[tx.Id]
-		if !ok {
-			continue
-		}
+		if txEvents, ok := groupedEvents[tx.Id]; ok {
+			internalTxId, ok := internalTxsByTxId[tx.Id]
+			assert.True(ok, "missing internal_tx id for: %s", tx.Id)
 
-		internalTxId, ok := internalTxsByTxId[tx.Id]
-		assert.True(ok, "missing internal_tx id for: %s", tx.Id)
-
-		for _, event := range txEvents {
-			for _, t := range event.Transfers {
-				if t.Id == uuid.Nil {
-					var err error
-					t.Id, err = uuid.NewRandom()
-					assert.NoErr(err, "unable to generate transfer uuid")
+			for _, event := range txEvents {
+				for _, t := range event.Transfers {
+					if t.Id == uuid.Nil {
+						var err error
+						t.Id, err = uuid.NewRandom()
+						assert.NoErr(err, "unable to generate transfer uuid")
+					}
 				}
-			}
 
-			inv.processEvent(event)
+				inv.processEvent(event)
 
-			const insertEventQuery = `
-				insert into event (
-					id, position, internal_tx_id,
-					app, method, type
-				) values (
-					$1, $2, $3, $4, $5, $6
-				)
-			`
-			// if event.PrecedingEvents == nil {
-			// 	event.PrecedingEvents = make([]uuid.UUID, 0)
-			// }
-
-			batch.Queue(
-				insertEventQuery,
-				// args
-				event.Id,
-				eventPosition,
-				internalTxId,
-				event.App,
-				event.Method,
-				event.Type,
-			)
-			eventPosition += 1
-
-			const insertTransferQuery = `
-				insert into event_transfer (
-					id, event_id, position,
-					direction, from_wallet, from_account, to_wallet, to_account,
-					token, amount, token_source,
-					price, value, profit, missing_amount
-				) values (
-					$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
-				)
-			`
-			const insertTransferSourceQuery = `
-				insert into event_transfer_source (
-					transfer_id, source_transfer_id, used_amount
-				) values (
-					$1, $2, $3
-				)
-			`
-			for i, t := range event.Transfers {
-				batch.Queue(
-					insertTransferQuery,
-					// args
-					t.Id, event.Id, i,
-					t.Direction, t.FromWallet, t.FromAccount, t.ToWallet, t.ToAccount,
-					t.Token, t.Amount, t.TokenSource,
-					t.Price, t.Value, t.Profit, t.MissingAmount,
-				)
-
-				for _, s := range t.Sources {
-					batch.Queue(
-						insertTransferSourceQuery,
-						// args
-						t.Id, s.TransferId, s.UsedAmount,
+				const insertEventQuery = `
+					insert into event (
+						id, position, internal_tx_id,
+						app, method, type
+					) values (
+						$1, $2, $3, $4, $5, $6
 					)
+				`
+				batch.Queue(
+					insertEventQuery,
+					// args
+					event.Id,
+					eventPosition,
+					internalTxId,
+					event.App,
+					event.Method,
+					event.Type,
+				)
+				eventPosition += 1
+
+				const insertTransferQuery = `
+					insert into event_transfer (
+						id, event_id, position,
+						direction, from_wallet, from_account, to_wallet, to_account,
+						token, amount, token_source,
+						price, value, profit, missing_amount
+					) values (
+						$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+					)
+				`
+				const insertTransferSourceQuery = `
+					insert into event_transfer_source (
+						transfer_id, source_transfer_id, used_amount
+					) values (
+						$1, $2, $3
+					)
+				`
+				for i, t := range event.Transfers {
+					batch.Queue(
+						insertTransferQuery,
+						// args
+						t.Id, event.Id, i,
+						t.Direction, t.FromWallet, t.FromAccount, t.ToWallet, t.ToAccount,
+						t.Token, t.Amount, t.TokenSource,
+						t.Price, t.Value, t.Profit, t.MissingAmount,
+					)
+
+					for _, s := range t.Sources {
+						batch.Queue(
+							insertTransferSourceQuery,
+							// args
+							t.Id, s.TransferId, s.UsedAmount,
+						)
+					}
 				}
 			}
 		}

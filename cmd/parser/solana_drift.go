@@ -10,8 +10,9 @@ import (
 const SOL_DRIFT_PROGRAM_ADDRESS = "dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH"
 
 var (
-	solDriftIxInitializeUserStats = [8]uint8{254, 243, 72, 98, 251, 130, 168, 213}
-	solDriftIxInitializeUser      = [8]uint8{111, 17, 185, 250, 60, 122, 38, 254}
+	solDriftIxInitializeUserStats    = [8]uint8{254, 243, 72, 98, 251, 130, 168, 213}
+	solDriftIxInitializeUser         = [8]uint8{111, 17, 185, 250, 60, 122, 38, 254}
+	solDriftIxInitInsuranceFundStake = [8]uint8{187, 179, 243, 70, 248, 90, 92, 147}
 )
 
 func solPreprocessDriftIx(ctx *solContext, ix *db.SolanaInstruction) {
@@ -27,6 +28,8 @@ func solPreprocessDriftIx(ctx *solContext, ix *db.SolanaInstruction) {
 		owner = ix.Accounts[2]
 	case solDriftIxInitializeUser:
 		owner = ix.Accounts[3]
+	case solDriftIxInitInsuranceFundStake:
+		owner = ix.Accounts[4]
 	default:
 		return
 	}
@@ -89,41 +92,24 @@ func solDriftProcessInit(
 	return true
 }
 
-// type solDriftLendingAccount struct {
-// 	deposits map[string]decimal.Decimal
-// }
-//
-// func (a solDriftLendingAccount) name() string {
-// 	return "drift_lending"
-// }
-
-// TODO: withdrawals should be handled differently, either with tracking balances
-// with accounts or with inventory
 func driftProcessBorrowLend(
 	ctx *solContext,
-	events *[]*db.Event,
-	accounts []string,
-	tokenAccountAddress string,
+	owner, driftAccountAddress, tokenAccountAddress string,
 	innerInstructions []*db.SolanaInnerInstruction,
+	// 0 => lend / stake
+	// 1 => withdraw
 	direction int,
-	app string,
-) {
-	owner := accounts[3]
+) *db.EventTransfer {
+	// owner := accounts[3]
 	if !ctx.walletOwned(owner) {
-		return
+		return nil
 	}
 
-	userAddress := accounts[1]
-	_, ok := ctx.findOwnedOrError(ctx.slot, ctx.ixIdx, userAddress)
+	// userAddress := accounts[1]
+	_, ok := ctx.findOwnedOrError(ctx.slot, ctx.ixIdx, driftAccountAddress)
 	if !ok {
-		return
+		return nil
 	}
-	// _, userData, ok := solAccountExactOrError[solDriftLendingAccount](
-	// 	ctx, userAddress,
-	// )
-	// if !ok {
-	// 	return
-	// }
 
 	transferIx := innerInstructions[0]
 	amount := binary.LittleEndian.Uint64(transferIx.Data[1:])
@@ -132,40 +118,21 @@ func driftProcessBorrowLend(
 		ctx, tokenAccountAddress,
 	)
 	if !ok {
-		return
+		return nil
 	}
 
 	decimals := solDecimalsMust(ctx, tokenAccountData.Mint)
 	uiAmount := newDecimalFromRawAmount(amount, decimals)
 
-	// switch direction {
-	// case 0:
-	// 	userData.deposits[tokenAccountData.Mint] = userData.deposits[tokenAccountData.Mint].Add(
-	// 		uiAmount,
-	// 	)
-	// case 1:
-	// 	balance := userData.deposits[tokenAccountData.Mint]
-	// 	if balance.LessThan(uiAmount) {
-	//
-	// 	}
-	// }
-
-	var fromAccount, toAccount, method string
-
+	var fromAccount, toAccount string
 	switch direction {
 	case 0:
-		method = "lend"
-		fromAccount, toAccount = tokenAccountAddress, userAddress
+		fromAccount, toAccount = tokenAccountAddress, driftAccountAddress
 	case 1:
-		method = "withdraw"
-		fromAccount, toAccount = userAddress, tokenAccountAddress
+		fromAccount, toAccount = driftAccountAddress, tokenAccountAddress
 	}
 
-	event := solNewEvent(ctx)
-	event.App = app
-	event.Method = method
-	event.Type = db.EventTypeTransfer
-	event.Transfers = append(event.Transfers, &db.EventTransfer{
+	return &db.EventTransfer{
 		Direction:   db.EventTransferInternal,
 		FromWallet:  owner,
 		ToWallet:    owner,
@@ -174,9 +141,15 @@ func driftProcessBorrowLend(
 		Token:       tokenAccountData.Mint,
 		Amount:      uiAmount,
 		TokenSource: uint16(db.NetworkSolana),
-	})
+	}
 
-	*events = append(*events, event)
+	// event := solNewEvent(ctx)
+	// event.App = app
+	// event.Method = method
+	// event.Type = db.EventTypeTransfer
+	// event.Transfers = append(event.Transfers)
+	//
+	// *events = append(*events, event)
 }
 
 func solProcessDriftIx(
@@ -190,26 +163,34 @@ func solProcessDriftIx(
 	}
 
 	const app = "drift"
+	var method string
+	var transfer *db.EventTransfer
 
 	switch disc {
 	// Deposit (lend)
 	case [8]uint8{242, 35, 198, 137, 82, 225, 242, 182}:
+		owner := ix.Accounts[3]
+		driftAccountAddress := ix.Accounts[1]
 		tokenAccountAddress := ix.Accounts[5]
-		driftProcessBorrowLend(
-			ctx, events,
-			ix.Accounts, tokenAccountAddress, ix.InnerInstructions,
-			0, app,
+
+		method = "lend"
+		transfer = driftProcessBorrowLend(
+			ctx,
+			owner, driftAccountAddress, tokenAccountAddress,
+			ix.InnerInstructions, 0,
 		)
-		return
 	// Withdraw
 	case [8]uint8{183, 18, 70, 156, 148, 109, 161, 34}:
+		owner := ix.Accounts[3]
+		driftAccountAddress := ix.Accounts[1]
 		tokenAccountAddress := ix.Accounts[6]
-		driftProcessBorrowLend(
-			ctx, events,
-			ix.Accounts, tokenAccountAddress, ix.InnerInstructions,
-			1, app,
+
+		method = "withdraw"
+		transfer = driftProcessBorrowLend(
+			ctx,
+			owner, driftAccountAddress, tokenAccountAddress,
+			ix.InnerInstructions, 1,
 		)
-		return
 	// DepositIntoSpotMarketRevenuePool (fee ?)
 	case [8]uint8{92, 40, 151, 42, 122, 254, 139, 246}:
 		owner := ix.Accounts[2]
@@ -231,11 +212,8 @@ func solProcessDriftIx(
 
 		decimals := solDecimalsMust(ctx, tokenAccountData.Mint)
 
-		event := solNewEvent(ctx)
-		event.App = app
-		event.Method = "fee"
-		event.Type = db.EventTypeTransfer
-		event.Transfers = append(event.Transfers, &db.EventTransfer{
+		method = "fee"
+		transfer = &db.EventTransfer{
 			Direction:   db.EventTransferOutgoing,
 			FromWallet:  owner,
 			ToWallet:    to,
@@ -244,13 +222,44 @@ func solProcessDriftIx(
 			Token:       tokenAccountData.Mint,
 			Amount:      newDecimalFromRawAmount(amount, decimals),
 			TokenSource: uint16(db.NetworkSolana),
-		})
+		}
+	// deposit stake
+	case [8]uint8{251, 144, 115, 11, 222, 47, 62, 236}:
+		owner := ix.Accounts[4]
+		stakeAccountAddress := ix.Accounts[2]
+		tokenAccountAddress := ix.Accounts[8]
 
+		method = "if_stake"
+		transfer = driftProcessBorrowLend(
+			ctx,
+			owner, stakeAccountAddress, tokenAccountAddress,
+			ix.InnerInstructions, 0,
+		)
+	// withdraw stake
+	case [8]uint8{128, 166, 142, 9, 254, 187, 143, 174}:
+		owner := ix.Accounts[4]
+		stakeAccountAddress := ix.Accounts[2]
+		tokenAccountAddress := ix.Accounts[7]
+
+		method = "if_unstake"
+		transfer = driftProcessBorrowLend(
+			ctx,
+			owner, stakeAccountAddress, tokenAccountAddress,
+			ix.InnerInstructions, 1,
+		)
+	}
+
+	if transfer != nil {
+		event := solNewEvent(ctx)
+		event.App = app
+		event.Method = method
+		event.Type = db.EventTypeTransfer
+		event.Transfers = append(event.Transfers, transfer)
 		*events = append(*events, event)
 		return
 	}
 
-	var owner, payer, method string
+	var owner, payer string
 
 	switch disc {
 	case solDriftIxInitializeUserStats:
@@ -259,21 +268,16 @@ func solProcessDriftIx(
 	case solDriftIxInitializeUser:
 		owner, payer = ix.Accounts[3], ix.Accounts[4]
 		method = "init_user"
+	case solDriftIxInitInsuranceFundStake:
+		owner, payer = ix.Accounts[4], ix.Accounts[5]
+		method = "init_insurance_fund"
 	default:
 		return
 	}
 
-	if ok = solDriftProcessInit(
+	solDriftProcessInit(
 		ctx, events,
 		owner, payer, ix.InnerInstructions,
 		app, method,
-	); !ok {
-		return
-	}
-
-	// if user != "" {
-	// 	ctx.init(user, true, solDriftLendingAccount{
-	// 		deposits: make(map[string]decimal.Decimal),
-	// 	})
-	// }
+	)
 }

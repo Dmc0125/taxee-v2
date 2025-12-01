@@ -115,13 +115,11 @@ func solPreprocessTokenIx(ctx *solContext, ix *db.SolanaInstruction) {
 		owner = base58.Encode(ix.Data[1:33])
 	case solTokenIxClose:
 		tokenAccount, owner = ix.Accounts[0], ix.Accounts[2]
-		destination := ix.Accounts[1]
-
 		if !ctx.walletOwned(owner) {
 			return
 		}
 
-		ctx.close(tokenAccount, destination)
+		ctx.close(tokenAccount)
 		return
 	default:
 		return
