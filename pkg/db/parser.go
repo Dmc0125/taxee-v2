@@ -201,7 +201,8 @@ const (
 	EventTypeMint
 	EventTypeBurn
 
-	EventTypeStake
+	EventTypeBorrowRepay
+	// EventTypeStake
 
 	EventTypeSwapBr
 

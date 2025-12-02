@@ -213,14 +213,8 @@
   .top-0 {
     top: calc(var(--spacing) * 0);
   }
-  .right-2 {
-    right: calc(var(--spacing) * 2);
-  }
   .right-4 {
     right: calc(var(--spacing) * 4);
-  }
-  .bottom-2 {
-    bottom: calc(var(--spacing) * 2);
   }
   .bottom-4 {
     bottom: calc(var(--spacing) * 4);
@@ -381,9 +375,6 @@
   }
   .cursor-pointer {
     cursor: pointer;
-  }
-  .resize {
-    resize: both;
   }
   .grid-cols-\(--grid-cols\) {
     grid-template-columns: var(--grid-cols);
@@ -612,10 +603,6 @@
   .opacity-0 {
     opacity: 0%;
   }
-  .shadow-sm {
-    --tw-shadow: 0 1px 3px 0 var(--tw-shadow-color, rgb(0 0 0 / 0.1)), 0 1px 2px -1px var(--tw-shadow-color, rgb(0 0 0 / 0.1));
-    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
-  }
   .shadow-xs {
     --tw-shadow: 0 1px 2px 0 var(--tw-shadow-color, rgb(0 0 0 / 0.05));
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
@@ -628,14 +615,8 @@
     transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
     transition-duration: var(--tw-duration, var(--default-transition-duration));
   }
-  .\[--grid-cols\:3rem_6rem_repeat\(5\,1fr\)\] {
-    --grid-cols: 3rem 6rem repeat(5,1fr);
-  }
   .\[--grid-cols\:3rem_7rem_repeat\(5\,1fr\)\] {
     --grid-cols: 3rem 7rem repeat(5,1fr);
-  }
-  .\[--grid-cols\:3rem_repeat\(6\,1fr\)\] {
-    --grid-cols: 3rem repeat(6,1fr);
   }
   .hover\:bg-gray-200 {
     &:hover {
