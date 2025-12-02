@@ -320,7 +320,6 @@ func solPreprocessSquadsV4Ix(ctx *solContext, ix *db.SolanaInstruction) {
 func solProcessSquadsV4Ix(
 	ctx *solContext,
 	ix *db.SolanaInstruction,
-	events *[]*db.Event,
 ) {
 	ixType, method, ok := solSquadsV4IxFromData(ix.Data)
 	if !ok {
@@ -332,16 +331,11 @@ func solProcessSquadsV4Ix(
 	switch ixType {
 	case solSquadsV4VaultTransactionCreate:
 		innerIxs := solInnerIxIterator{innerIxs: ix.InnerInstructions}
-		event, ok, err := solProcessAnchorInitAccount(ctx, &innerIxs)
+		_, err := solProcessAnchorInitAccount(
+			ctx, &innerIxs,
+			ix.Accounts[2], app, method,
+		)
 		assert.NoErr(err, fmt.Sprintf("unable to process ix: %s", ctx.txId))
-		if !ok {
-			return
-		}
-
-		event.App = app
-		event.Method = method
-
-		*events = append(*events, event)
 	case solSquadsV4VaultTransactionExecute:
 		transaction := ix.Accounts[2]
 		transactionAccount := ctx.find(ctx.slot, ctx.ixIdx, transaction, 2)
@@ -361,7 +355,7 @@ func solProcessSquadsV4Ix(
 		}
 
 		for _, squadsIx := range *squadsInstructions {
-			solProcessIx(events, ctx, squadsIx)
+			solProcessIx(ctx, squadsIx)
 		}
 	}
 }

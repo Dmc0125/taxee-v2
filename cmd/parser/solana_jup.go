@@ -15,7 +15,6 @@ const (
 func solProcessJupV6(
 	ctx *solContext,
 	ix *db.SolanaInstruction,
-	events *[]*db.Event,
 ) {
 	disc, ok := solAnchorDisc(ix.Data)
 	if !ok {
@@ -45,7 +44,6 @@ func solProcessJupV6(
 	solSwapEventFromTransfers(
 		ctx,
 		ix.InnerInstructions,
-		events,
 		"jupiter",
 		"swap",
 		db.EventTypeSwap,

@@ -39,7 +39,6 @@ func solPreprocessAltIx(ctx *solContext, ix *db.SolanaInstruction) {
 func solProcessAltIx(
 	ctx *solContext,
 	ix *db.SolanaInstruction,
-	events *[]*db.Event,
 ) {
 	if len(ix.Data) < 4 {
 		return
@@ -50,7 +49,7 @@ func solProcessAltIx(
 	var method string
 
 	switch disc {
-	// create 
+	// create
 	case 0:
 		method = "create"
 	// extend
@@ -85,10 +84,7 @@ func solProcessAltIx(
 		toWallet = ix.Accounts[1]
 	}
 
-	event := solNewEvent(ctx)
-	event.App = app
-	event.Method = method
-	event.Type = db.EventTypeTransfer
+	event := solNewEvent(ctx, app, method, db.EventTypeTransfer)
 	event.Transfers = append(event.Transfers, &db.EventTransfer{
 		Direction:   direction,
 		FromWallet:  from,
@@ -99,6 +95,4 @@ func solProcessAltIx(
 		Amount:      newDecimalFromRawAmount(amount, 9),
 		TokenSource: uint16(db.NetworkSolana),
 	})
-
-	*events = append(*events, event)
 }

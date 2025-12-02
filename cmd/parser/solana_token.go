@@ -245,7 +245,6 @@ func solParseTokenBurn(accounts []string, data []byte) (amount uint64, from, min
 func solProcessTokenIx(
 	ctx *solContext,
 	ix *db.SolanaInstruction,
-	events *[]*db.Event,
 ) {
 	ixType, method, ok := solTokenIxFromByte(ix.Data[0])
 	if !ok {
@@ -378,11 +377,6 @@ func solProcessTokenIx(
 		return
 	}
 
-	event := solNewEvent(ctx)
-	event.App = "token"
-	event.Method = method
-	event.Type = eventType
+	event := solNewEvent(ctx,"token", method, eventType)
 	event.Transfers = append(event.Transfers, transfer)
-
-	*events = append(*events, event)
 }

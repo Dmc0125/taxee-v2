@@ -260,32 +260,36 @@ func solPreprocessAnchorInitAccount(
 func solProcessAnchorInitAccount(
 	ctx *solContext,
 	innerIxs *solInnerIxIterator,
-) (*db.Event, bool, error) {
+	owner, app, method string,
+) (bool, error) {
 	from, to, amount, err := solAnchorInitAccountValidate(innerIxs)
 	if err != nil {
-		return nil, false, err
+		return false, err
 	}
 
 	// NOTE: can only happen if unknown account is being created (squads tx)
 	fromInternal := ctx.walletOwned(from)
-	toInternal := slices.Contains(ctx.wallets, to) ||
-		ctx.findOwned(ctx.slot, ctx.ixIdx, to) != nil
+	toInternal := slices.Contains(ctx.wallets, to) || ctx.findOwned(ctx.slot, ctx.ixIdx, to) != nil
+
 	if !fromInternal && !toInternal {
-		return nil, false, nil
+		return false, nil
 	}
 
-	event := solNewEvent(ctx)
-	setEventTransfer(
-		event,
-		from, to,
-		from, to,
-		fromInternal, toInternal,
-		newDecimalFromRawAmount(amount, 9),
-		SOL_MINT_ADDRESS,
-		uint16(db.NetworkSolana),
-	)
+	direction := getTransferEventDirection(fromInternal, toInternal)
 
-	return event, true, nil
+	event := solNewEvent(ctx, app, method, db.EventTypeTransfer)
+	event.Transfers = append(event.Transfers, &db.EventTransfer{
+		Direction:   direction,
+		FromWallet:  from,
+		ToWallet:    owner,
+		FromAccount: from,
+		ToAccount:   to,
+		Token:       SOL_MINT_ADDRESS,
+		Amount:      newDecimalFromRawAmount(amount, 9),
+		TokenSource: uint16(db.NetworkSolana),
+	})
+
+	return true, nil
 }
 
 func solParseTransfers(
@@ -412,7 +416,6 @@ func solParseTransfers(
 func solSwapEventFromTransfers(
 	ctx *solContext,
 	innerInstructions []*db.SolanaInnerInstruction,
-	events *[]*db.Event,
 	app, method string,
 	eventType db.EventType,
 ) {
@@ -423,18 +426,12 @@ func solSwapEventFromTransfers(
 		return
 	}
 
-	event := solNewEvent(ctx)
-	event.App = app
-	event.Method = method
-	event.Type = eventType
+	event := solNewEvent(ctx, app, method, eventType)
 	event.Transfers = transfers
-
-	*events = append(*events, event)
 }
 
 func solNewLendingDepositWithdrawEvent(
 	ctx *solContext,
-	events *[]*db.Event,
 	owner, userAddress string,
 	transferIx *db.SolanaInnerInstruction,
 	app string,
@@ -455,10 +452,7 @@ func solNewLendingDepositWithdrawEvent(
 
 	decimals := solDecimalsMust(ctx, tokenAccount.Mint)
 
-	event := solNewEvent(ctx)
-	event.App = app
-	event.Method = "deposit"
-	event.Type = db.EventTypeTransfer
+	event := solNewEvent(ctx, app, "deposit", db.EventTypeTransfer)
 	event.Transfers = append(event.Transfers, &db.EventTransfer{
 		Direction:   db.EventTransferInternal,
 		FromWallet:  owner,
@@ -469,13 +463,10 @@ func solNewLendingDepositWithdrawEvent(
 		Amount:      newDecimalFromRawAmount(amount, decimals),
 		TokenSource: uint16(db.NetworkSolana),
 	})
-
-	*events = append(*events, event)
 }
 
 func solNewLendingBorrowRepayEvent(
 	ctx *solContext,
-	events *[]*db.Event,
 	owner string,
 	transferIx *db.SolanaInnerInstruction,
 	direction db.EventTransferDirection,
@@ -514,10 +505,7 @@ func solNewLendingBorrowRepayEvent(
 
 	decimals := solDecimalsMust(ctx, account.Mint)
 
-	event := solNewEvent(ctx)
-	event.App = app
-	event.Method = method
-	event.Type = db.EventTypeBorrowRepay
+	event := solNewEvent(ctx, app, method, db.EventTypeBorrowRepay)
 	event.Transfers = append(event.Transfers, &db.EventTransfer{
 		Direction:   direction,
 		FromWallet:  fromWallet,
@@ -528,6 +516,4 @@ func solNewLendingBorrowRepayEvent(
 		Amount:      newDecimalFromRawAmount(amount, decimals),
 		TokenSource: uint16(db.NetworkSolana),
 	})
-
-	*events = append(*events, event)
 }

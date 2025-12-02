@@ -41,7 +41,6 @@ func solPreprocessKaminoLendIx(ctx *solContext, ix *db.SolanaInstruction) {
 func solProcessKaminoLendIx(
 	ctx *solContext,
 	ix *db.SolanaInstruction,
-	events *[]*db.Event,
 ) {
 	disc, ok := solAnchorDisc(ix.Data)
 	if !ok {
@@ -73,12 +72,10 @@ func solProcessKaminoLendIx(
 			}
 
 			innerIxsIter := solInnerIxIterator{innerIxs: innerIxs}
-			event, _, err := solProcessAnchorInitAccount(ctx, &innerIxsIter)
+			_, err := solProcessAnchorInitAccount(
+				ctx, &innerIxsIter, owner, app, method,
+			)
 			assert.NoErr(err, "")
-
-			event.App = app
-			event.Method = method
-			*events = append(*events, event)
 			return
 		}
 	}
@@ -103,7 +100,7 @@ func solProcessKaminoLendIx(
 
 		if method != "" {
 			solNewLendingBorrowRepayEvent(
-				ctx, events,
+				ctx,
 				ix.Accounts[0], ix.InnerInstructions[0],
 				direction, app, method,
 			)
@@ -115,7 +112,7 @@ func solProcessKaminoLendIx(
 	// deposit
 	case [8]uint8{129, 199, 4, 2, 222, 39, 26, 46}:
 		solNewLendingDepositWithdrawEvent(
-			ctx, events,
+			ctx,
 			ix.Accounts[0], ix.Accounts[1],
 			ix.InnerInstructions[0],
 			app,

@@ -87,7 +87,6 @@ func solPreprocessSystemIx(ctx *solContext, ix *db.SolanaInstruction) {
 func solProcessSystemIx(
 	ctx *solContext,
 	ix *db.SolanaInstruction,
-	events *[]*db.Event,
 ) {
 	ixType, method, ok := solSystemIxFromData(ix.Data)
 	if !ok {
@@ -116,20 +115,15 @@ func solProcessSystemIx(
 		return
 	}
 
-	event := solNewEvent(ctx)
-	event.App = "system"
-	event.Method = method
-
-	// TODO: to can be arbitrary account, so it can have owner wallet
-	setEventTransfer(
-		event,
-		from, toWallet,
-		from, to,
-		fromInternal, toInternal,
-		newDecimalFromRawAmount(amount, 9),
-		SOL_MINT_ADDRESS,
-		uint16(db.NetworkSolana),
-	)
-
-	*events = append(*events, event)
+	event := solNewEvent(ctx, "system", method, db.EventTypeTransfer)
+	event.Transfers = append(event.Transfers, &db.EventTransfer{
+		Direction:   getTransferEventDirection(fromInternal, toInternal),
+		FromWallet:  from,
+		ToWallet:    toWallet,
+		FromAccount: from,
+		ToAccount:   to,
+		Token:       SOL_MINT_ADDRESS,
+		Amount:      newDecimalFromRawAmount(amount, 9),
+		TokenSource: uint16(db.NetworkSolana),
+	})
 }

@@ -53,7 +53,6 @@ func solPreprocessDriftIx(ctx *solContext, ix *db.SolanaInstruction) {
 
 func solDriftProcessInit(
 	ctx *solContext,
-	events *[]*db.Event,
 	owner, payer string,
 	innerIxs []*db.SolanaInnerInstruction,
 	app, method string,
@@ -72,10 +71,7 @@ func solDriftProcessInit(
 		amount += binary.LittleEndian.Uint64(transferIx.Data[4:])
 	}
 
-	event := solNewEvent(ctx)
-	event.App = app
-	event.Method = method
-	event.Type = db.EventTypeTransfer
+	event := solNewEvent(ctx, app, method, db.EventTypeTransfer)
 	event.Transfers = append(event.Transfers, &db.EventTransfer{
 		Direction:   getTransferEventDirection(payerInternal, true),
 		FromWallet:  payer,
@@ -86,8 +82,6 @@ func solDriftProcessInit(
 		Amount:      newDecimalFromRawAmount(amount, 9),
 		TokenSource: uint16(db.NetworkSolana),
 	})
-
-	*events = append(*events, event)
 
 	return true
 }
@@ -142,20 +136,11 @@ func driftProcessBorrowLend(
 		Amount:      uiAmount,
 		TokenSource: uint16(db.NetworkSolana),
 	}
-
-	// event := solNewEvent(ctx)
-	// event.App = app
-	// event.Method = method
-	// event.Type = db.EventTypeTransfer
-	// event.Transfers = append(event.Transfers)
-	//
-	// *events = append(*events, event)
 }
 
 func solProcessDriftIx(
 	ctx *solContext,
 	ix *db.SolanaInstruction,
-	events *[]*db.Event,
 ) {
 	disc, ok := solAnchorDisc(ix.Data)
 	if !ok {
@@ -250,12 +235,8 @@ func solProcessDriftIx(
 	}
 
 	if transfer != nil {
-		event := solNewEvent(ctx)
-		event.App = app
-		event.Method = method
-		event.Type = db.EventTypeTransfer
+		event := solNewEvent(ctx, app, method, db.EventTypeTransfer)
 		event.Transfers = append(event.Transfers, transfer)
-		*events = append(*events, event)
 		return
 	}
 
@@ -276,7 +257,7 @@ func solProcessDriftIx(
 	}
 
 	solDriftProcessInit(
-		ctx, events,
+		ctx,
 		owner, payer, ix.InnerInstructions,
 		app, method,
 	)

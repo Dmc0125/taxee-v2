@@ -88,16 +88,16 @@ func evmProcessErc20Tx(
 	event := evmNewEvent(ctx)
 	event.App = "erc20"
 	event.Method = method
-
-	setEventTransfer(
-		event,
-		from, to,
-		from, to,
-		fromInternal, toInternal,
-		amount,
-		tx.To,
-		uint16(ctx.network),
-	)
-
+	event.Type = db.EventTypeTransfer
+	event.Transfers = append(event.Transfers, &db.EventTransfer{
+		Direction:   getTransferEventDirection(fromInternal, toInternal),
+		FromWallet:  from,
+		ToWallet:    to,
+		FromAccount: from,
+		ToAccount:   to,
+		Token:       tx.To,
+		Amount:      amount,
+		TokenSource: uint16(ctx.network),
+	})
 	*events = append(*events, event)
 }

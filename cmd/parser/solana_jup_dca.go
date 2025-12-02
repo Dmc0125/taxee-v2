@@ -87,7 +87,6 @@ func (_ jupDcaAccountData) name() string {
 func solProcessJupDcaIx(
 	ctx *solContext,
 	ix *db.SolanaInstruction,
-	events *[]*db.Event,
 ) {
 	disc, ok := solAnchorDisc(ix.Data)
 	if !ok {
@@ -103,14 +102,13 @@ func solProcessJupDcaIx(
 			return
 		}
 
-		innerIxIter := solInnerIxIterator{innerIxs: ix.InnerInstructions}
-		createDcaEvent, _, err := solProcessAnchorInitAccount(ctx, &innerIxIter)
-		assert.NoErr(err, "")
-
-		createDcaEvent.App = app
 		const method = "init_dca"
-		createDcaEvent.Method = method
-		*events = append(*events, createDcaEvent)
+
+		innerIxIter := solInnerIxIterator{innerIxs: ix.InnerInstructions}
+		_, err := solProcessAnchorInitAccount(
+			ctx, &innerIxIter, owner, app, method,
+		)
+		assert.NoErr(err, "")
 
 		processCreateDcaIx := func() {
 			createAtaIx, ok := innerIxIter.peekNext()
@@ -123,10 +121,7 @@ func solProcessJupDcaIx(
 				createAtaIx.Accounts, &innerIxIter,
 			)
 
-			event := solNewEvent(ctx)
-			event.App = app
-			event.Method = method
-			event.Type = db.EventTypeTransfer
+			event := solNewEvent(ctx, app, method, db.EventTypeTransfer)
 			event.Transfers = append(event.Transfers, &db.EventTransfer{
 				Direction:   db.EventTransferInternal,
 				FromWallet:  payer,
@@ -137,7 +132,6 @@ func solProcessJupDcaIx(
 				Amount:      newDecimalFromRawAmount(amount, 9),
 				TokenSource: uint16(db.NetworkSolana),
 			})
-			*events = append(*events, event)
 		}
 
 		// in ata
@@ -155,10 +149,7 @@ func solProcessJupDcaIx(
 
 			decimals := solDecimalsMust(ctx, mint)
 
-			event := solNewEvent(ctx)
-			event.App = app
-			event.Method = method
-			event.Type = db.EventTypeTransfer
+			event := solNewEvent(ctx, app, method, db.EventTypeTransfer)
 			event.Transfers = append(event.Transfers, &db.EventTransfer{
 				Direction:   db.EventTransferInternal,
 				FromWallet:  owner,
@@ -169,7 +160,6 @@ func solProcessJupDcaIx(
 				Amount:      newDecimalFromRawAmount(amount, decimals),
 				TokenSource: uint16(db.NetworkSolana),
 			})
-			*events = append(*events, event)
 		}
 	// Init flash fill
 	case [8]uint8{143, 205, 3, 191, 162, 215, 245, 49}:
@@ -246,13 +236,8 @@ func solProcessJupDcaIx(
 			},
 		}
 
-		event := solNewEvent(ctx)
-		event.App = app
-		event.Method = "swap"
-		event.Type = db.EventTypeSwap
+		event := solNewEvent(ctx, app, "swap", db.EventTypeSwap)
 		event.Transfers = transfers[:]
-
-		*events = append(*events, event)
 	case jupDcaClose:
 		dcaAddress := ix.Accounts[1]
 		dcaAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, dcaAddress)
@@ -262,10 +247,7 @@ func solProcessJupDcaIx(
 
 		owner := ix.Accounts[6]
 		newCloseEvent := func(account string) {
-			event := solNewEvent(ctx)
-			event.App = app
-			event.Method = "close_dca"
-			event.Type = db.EventTypeCloseAccount
+			event := solNewEvent(ctx, app, "close_dca", db.EventTypeCloseAccount)
 			event.Transfers = append(event.Transfers, &db.EventTransfer{
 				Direction:   db.EventTransferInternal,
 				FromWallet:  owner,
@@ -275,7 +257,6 @@ func solProcessJupDcaIx(
 				Token:       SOL_MINT_ADDRESS,
 				TokenSource: uint16(db.NetworkSolana),
 			})
-			*events = append(*events, event)
 		}
 
 		// in ata

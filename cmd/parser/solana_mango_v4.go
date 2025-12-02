@@ -28,7 +28,6 @@ func solPreprocessMangoV4Ix(ctx *solContext, ix *db.SolanaInstruction) {
 func solProcessMangoV4Ix(
 	ctx *solContext,
 	ix *db.SolanaInstruction,
-	events *[]*db.Event,
 ) {
 	disc, ok := solAnchorDisc(ix.Data)
 	if !ok {
@@ -38,19 +37,12 @@ func solProcessMangoV4Ix(
 	const app = "mango_v4"
 
 	if disc == mangoV4AccountCreate {
-		event, ok, err := solProcessAnchorInitAccount(
+		_, err := solProcessAnchorInitAccount(
 			ctx,
 			&solInnerIxIterator{innerIxs: ix.InnerInstructions},
+			ix.Accounts[2], app, "account_create",
 		)
 		assert.NoErr(err, "")
-		if !ok {
-			return
-		}
-
-		event.App = app
-		event.Method = "account_create"
-
-		*events = append(*events, event)
 		return
 	}
 
@@ -59,7 +51,7 @@ func solProcessMangoV4Ix(
 		// token deposit
 		case [8]uint8{117, 255, 154, 71, 245, 58, 95, 89}:
 			solNewLendingDepositWithdrawEvent(
-				ctx, events,
+				ctx,
 				ix.Accounts[2], ix.Accounts[1],
 				ix.InnerInstructions[0],
 				app,
@@ -92,7 +84,7 @@ func solProcessMangoV4Ix(
 
 	if len(method) != 0 {
 		solNewLendingBorrowRepayEvent(
-			ctx, events,
+			ctx,
 			ix.Accounts[1], ix.InnerInstructions[0],
 			direction, app, method,
 		)

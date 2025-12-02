@@ -518,17 +518,17 @@ func evmProcessTx(
 		event := evmNewEvent(ctx)
 		event.App = "native"
 		event.Method = "transfer"
-
-		setEventTransfer(
-			event,
-			txData.From, txData.To,
-			txData.From, txData.To,
-			fromInternal, toInternal,
-			txData.Value,
-			"ethereum",
-			tokenSourceCoingecko,
-		)
-
+		event.Type = db.EventTypeTransfer
+		event.Transfers = append(event.Transfers, &db.EventTransfer{
+			Direction:   getTransferEventDirection(fromInternal, toInternal),
+			FromWallet:  txData.From,
+			ToWallet:    txData.To,
+			FromAccount: txData.From,
+			ToAccount:   txData.To,
+			Token:       "ethereum",
+			Amount:      txData.Value,
+			TokenSource: tokenSourceCoingecko,
+		})
 		*events = append(*events, event)
 		return
 	}

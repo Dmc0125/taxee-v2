@@ -15,7 +15,6 @@ const (
 func solProcessMeteoraPoolsIx(
 	ctx *solContext,
 	ix *db.SolanaInstruction,
-	events *[]*db.Event,
 ) {
 	disc, ok := solAnchorDisc(ix.Data)
 	if !ok {
@@ -43,7 +42,7 @@ func solProcessMeteoraPoolsIx(
 	}
 
 	solSwapEventFromTransfers(
-		ctx, ix.InnerInstructions, events,
+		ctx, ix.InnerInstructions,
 		"meteora_pools", method, eventType,
 	)
 }
@@ -75,9 +74,7 @@ func solPreprocessMeteoraFarmsIx(ctx *solContext, ix *db.SolanaInstruction) {
 func solMeteoraFarmsNewStakingEvent(
 	ctx *solContext,
 	ix *db.SolanaInstruction,
-	events *[]*db.Event,
-	app,
-	tokenAccountAddress, stakeAccountAddress string,
+	app, tokenAccountAddress, stakeAccountAddress string,
 	stake bool,
 ) {
 	tokenAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, tokenAccountAddress)
@@ -110,10 +107,7 @@ func solMeteoraFarmsNewStakingEvent(
 		toAccount, fromAccount = tokenAccountAddress, stakeAccountAddress
 	}
 
-	event := solNewEvent(ctx)
-	event.App = app
-	event.Method = method
-	event.Type = db.EventTypeTransfer
+	event := solNewEvent(ctx, app, method, db.EventTypeTransfer)
 	event.Transfers = append(event.Transfers, &db.EventTransfer{
 		Direction:   db.EventTransferInternal,
 		FromWallet:  tokenAccountData.Owner,
@@ -124,14 +118,11 @@ func solMeteoraFarmsNewStakingEvent(
 		Amount:      newDecimalFromRawAmount(amount, decimals),
 		TokenSource: uint16(db.NetworkSolana),
 	})
-
-	*events = append(*events, event)
 }
 
 func solProcessMeteoraFarmsIx(
 	ctx *solContext,
 	ix *db.SolanaInstruction,
-	events *[]*db.Event,
 ) {
 	disc, ok := solAnchorDisc(ix.Data)
 	if !ok {
@@ -148,21 +139,13 @@ func solProcessMeteoraFarmsIx(
 		}
 
 		innerIxIter := solInnerIxIterator{innerIxs: ix.InnerInstructions}
-		event, ok, err := solProcessAnchorInitAccount(ctx, &innerIxIter)
+		_, err := solProcessAnchorInitAccount(ctx, &innerIxIter, owner, app, "create_user")
 		assert.NoErr(err, "")
-		if !ok {
-			return
-		}
-
-		event.App = app
-		event.Method = "create_user"
-
-		*events = append(*events, event)
 	// stake
 	case [8]uint8{242, 35, 198, 137, 82, 225, 242, 182}:
 		tokenAccountAddress, stakeAccountAddress := ix.Accounts[4], ix.Accounts[2]
 		solMeteoraFarmsNewStakingEvent(
-			ctx, ix, events,
+			ctx, ix,
 			app,
 			tokenAccountAddress, stakeAccountAddress,
 			true,
@@ -171,7 +154,7 @@ func solProcessMeteoraFarmsIx(
 	case [8]uint8{183, 18, 70, 156, 148, 109, 161, 34}:
 		tokenAccountAddress, stakeAccountAddress := ix.Accounts[4], ix.Accounts[2]
 		solMeteoraFarmsNewStakingEvent(
-			ctx, ix, events,
+			ctx, ix,
 			app,
 			tokenAccountAddress, stakeAccountAddress,
 			false,
@@ -197,10 +180,7 @@ func solProcessMeteoraFarmsIx(
 
 		decimals := solDecimalsMust(ctx, toAccountData.Mint)
 
-		event := solNewEvent(ctx)
-		event.App = app
-		event.Method = "claim"
-		event.Type = db.EventTypeTransfer
+		event := solNewEvent(ctx, app, "claim", db.EventTypeTransfer)
 		event.Transfers = append(event.Transfers, &db.EventTransfer{
 			Direction:   db.EventTransferIncoming,
 			ToWallet:    toAccountData.Owner,
@@ -209,15 +189,12 @@ func solProcessMeteoraFarmsIx(
 			Amount:      newDecimalFromRawAmount(amount, decimals),
 			TokenSource: uint16(db.NetworkSolana),
 		})
-
-		*events = append(*events, event)
 	}
 }
 
 func solProcessMercurialIx(
 	ctx *solContext,
 	ix *db.SolanaInstruction,
-	events *[]*db.Event,
 ) {
 	if len(ix.Data) == 0 {
 		return
@@ -247,10 +224,6 @@ func solProcessMercurialIx(
 		return
 	}
 
-	event := solNewEvent(ctx)
-	event.App = "mercurial"
-	event.Method = method
-	event.Type = eventType
+	event := solNewEvent(ctx, "mercurial", method, eventType)
 	event.Transfers = transfers
-	*events = append(*events, event)
 }

@@ -33,15 +33,22 @@ func newDecimalFromRawAmount(amount uint64, decimals uint8) decimal.Decimal {
 	return d
 }
 
-func solNewEvent(ctx *solContext) *db.Event {
+func solNewEvent(ctx *solContext, app, method string, t db.EventType) *db.Event {
+	assert.True(ctx.events != nil, "events are nil")
+
 	id, err := uuid.NewRandom()
 	assert.NoErr(err, "unable to generate event id")
 
-	return &db.Event{
+	event := &db.Event{
 		Id:        id,
 		Timestamp: ctx.timestamp,
 		Network:   db.NetworkSolana,
+		App:       app,
+		Method:    method,
+		Type:      t,
 	}
+	*ctx.events = append(*ctx.events, event)
+	return event
 }
 
 func evmNewEvent(ctx *evmContext) *db.Event {
@@ -77,28 +84,6 @@ func getTransferEventDirection(fromInternal, toInternal bool) db.EventTransferDi
 		direction = db.EventTransferIncoming
 	}
 	return direction
-}
-
-func setEventTransfer(
-	event *db.Event,
-	fromWallet, toWallet,
-	from, to string,
-	fromInternal, toInternal bool,
-	amount decimal.Decimal,
-	token string,
-	tokenSource uint16,
-) {
-	event.Type = db.EventTypeTransfer
-	event.Transfers = append(event.Transfers, &db.EventTransfer{
-		Direction:   getTransferEventDirection(fromInternal, toInternal),
-		FromWallet:  fromWallet,
-		ToWallet:    toWallet,
-		FromAccount: from,
-		ToAccount:   to,
-		Token:       token,
-		Amount:      amount,
-		TokenSource: tokenSource,
-	})
 }
 
 func devDeleteEvents(
@@ -521,12 +506,14 @@ func Parse(
 	}
 
 	parserErrors := make([]*db.ParserError, 0)
+	events := make([]*db.Event, 0)
 
 	logger.Info("Init parser state")
 	solCtx := solContext{
 		accounts:  make(map[string][]accountLifetime),
 		errors:    &parserErrors,
 		errOrigin: db.ErrOriginPreprocess,
+		events:    &events,
 	}
 	evmContexts := make(map[db.Network]*evmContext)
 
@@ -636,17 +623,16 @@ func Parse(
 		}
 	}
 
-	events := make([]*db.Event, 0)
 	groupedEvents := make(map[string][]*db.Event)
 	solCtx.errOrigin = db.ErrOriginProcess
 
 	for _, tx := range txs {
-		eventsGroup := make([]*db.Event, 0)
+		txEventsStart := len(events)
 
 		switch txData := tx.Data.(type) {
 		case *db.SolanaTransactionData:
 			if txData.Fee.GreaterThan(decimal.Zero) && solCtx.walletOwned(txData.Signer) {
-				eventsGroup = append(eventsGroup, newFeeEvent(
+				events = append(events, newFeeEvent(
 					tx, txData.Signer, SOL_MINT_ADDRESS,
 					uint16(db.NetworkSolana), txData.Fee,
 				))
@@ -660,7 +646,7 @@ func Parse(
 
 				for ixIdx, ix := range txData.Instructions {
 					solCtx.ixIdx = uint32(ixIdx)
-					solProcessIx(&eventsGroup, &solCtx, ix)
+					solProcessIx(&solCtx, ix)
 				}
 			}
 		case *db.EvmTransactionData:
@@ -673,22 +659,19 @@ func Parse(
 					tokenSourceCoingecko, txData.Fee,
 				)
 				// event.IxIdx = 0
-				eventsGroup = append(eventsGroup, event)
+				events = append(events, event)
 			}
 
 			if !tx.Err {
 				ctx.timestamp = tx.Timestamp
 				ctx.txId = tx.Id
 
-				evmProcessTx(ctx, &eventsGroup, txData)
+				evmProcessTx(ctx, &events, txData)
 			}
 		}
 
-		if len(eventsGroup) > 0 {
-			groupedEvents[tx.Id] = eventsGroup
-			for _, event := range eventsGroup {
-				events = append(events, event)
-			}
+		if txEventsStart != len(events) {
+			groupedEvents[tx.Id] = events[txEventsStart:]
 		}
 	}
 

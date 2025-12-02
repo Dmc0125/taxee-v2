@@ -103,7 +103,6 @@ func solPreprocessAssociatedTokenIx(ctx *solContext, ix *db.SolanaInstruction) {
 func solProcessAssociatedTokenIx(
 	ctx *solContext,
 	ix *db.SolanaInstruction,
-	events *[]*db.Event,
 ) {
 	ixType, ok := solAssociatedTokenIxFromData(ix.Data)
 	if !ok {
@@ -132,19 +131,15 @@ func solProcessAssociatedTokenIx(
 	transferIx := ix.InnerInstructions[1]
 	amount := binary.LittleEndian.Uint64(transferIx.Data[4:])
 
-	event := solNewEvent(ctx)
-	event.App = "associated_token"
-	event.Method = "create"
-
-	setEventTransfer(
-		event,
-		payer, owner,
-		payer, tokenAccount,
-		fromInternal, toInternal,
-		newDecimalFromRawAmount(amount, 9),
-		SOL_MINT_ADDRESS,
-		uint16(db.NetworkSolana),
-	)
-
-	*events = append(*events, event)
+	event := solNewEvent(ctx, "associated_token", "create", db.EventTypeTransfer)
+	event.Transfers = append(event.Transfers, &db.EventTransfer{
+		Direction:   getTransferEventDirection(fromInternal, toInternal),
+		FromWallet:  payer,
+		ToWallet:    owner,
+		FromAccount: payer,
+		ToAccount:   tokenAccount,
+		Token:       SOL_MINT_ADDRESS,
+		Amount:      newDecimalFromRawAmount(amount, 9),
+		TokenSource: uint16(db.NetworkSolana),
+	})
 }

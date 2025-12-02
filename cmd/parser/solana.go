@@ -67,6 +67,8 @@ type solContext struct {
 	errors    *[]*db.ParserError
 	errOrigin db.ErrOrigin
 
+	events *[]*db.Event
+
 	// volatile for each tx/ix
 	txId           string
 	slot           uint64
@@ -301,36 +303,35 @@ nativeBalancesLoop:
 }
 
 func solProcessIx(
-	events *[]*db.Event,
 	ctx *solContext,
 	ix *db.SolanaInstruction,
 ) {
 	switch ix.ProgramAddress {
 	case SOL_SYSTEM_PROGRAM_ADDRESS:
-		solProcessSystemIx(ctx, ix, events)
+		solProcessSystemIx(ctx, ix)
 	case SOL_TOKEN_PROGRAM_ADDRESS:
-		solProcessTokenIx(ctx, ix, events)
+		solProcessTokenIx(ctx, ix)
 	case SOL_ASSOCIATED_TOKEN_PROGRAM_ADDRESS:
-		solProcessAssociatedTokenIx(ctx, ix, events)
+		solProcessAssociatedTokenIx(ctx, ix)
 	case SOL_SQUADS_V4_PROGRAM_ADDRESS:
-		solProcessSquadsV4Ix(ctx, ix, events)
+		solProcessSquadsV4Ix(ctx, ix)
 	case SOL_METEORA_POOLS_PROGRAM_ADDRESS:
-		solProcessMeteoraPoolsIx(ctx, ix, events)
+		solProcessMeteoraPoolsIx(ctx, ix)
 	case SOL_JUP_V6_PROGRAM_ADDRESS:
-		solProcessJupV6(ctx, ix, events)
+		solProcessJupV6(ctx, ix)
 	case SOL_METEORA_FARMS_PROGRAM_ADDRESS:
-		solProcessMeteoraFarmsIx(ctx, ix, events)
+		solProcessMeteoraFarmsIx(ctx, ix)
 	case SOL_MERCURIAL_PROGRAM_ADDRESS:
-		solProcessMercurialIx(ctx, ix, events)
+		solProcessMercurialIx(ctx, ix)
 	case SOL_DRIFT_PROGRAM_ADDRESS:
-		solProcessDriftIx(ctx, ix, events)
+		solProcessDriftIx(ctx, ix)
 	case SOL_JUP_DCA_PROGRAM_ADDRESS:
-		solProcessJupDcaIx(ctx, ix, events)
+		solProcessJupDcaIx(ctx, ix)
 	case SOL_ALT_PROGRAM_ADDRESS:
-		solProcessAltIx(ctx, ix, events)
+		solProcessAltIx(ctx, ix)
 	case SOL_KAMINO_LEND_PROGRAM_ADDRESS:
-		solProcessKaminoLendIx(ctx, ix, events)
+		solProcessKaminoLendIx(ctx, ix)
 	case SOL_MANGO_V4_PROGRAM_ADDRESS:
-		solProcessMangoV4Ix(ctx, ix, events)
+		solProcessMangoV4Ix(ctx, ix)
 	}
 }
