@@ -222,8 +222,10 @@ func solPreprocessIx(ctx *solContext, ix *db.SolanaInstruction) {
 		solPreprocessAltIx(ctx, ix)
 	case SOL_KAMINO_LEND_PROGRAM_ADDRESS:
 		solPreprocessKaminoLendIx(ctx, ix)
-	case SOL_MANGO_V4_PROGRAM_ADDRESS:
+	case SOL_MANGO_V4_PROGRAM_ADDRESS, SOL_MANGO_V4_PROGRAM_ADDRESS_2:
 		solPreprocessMangoV4Ix(ctx, ix)
+	case SOL_CIRCUIT_PROGRAM_ADDRESS:
+		solPreprocessCircuitIx(ctx, ix)
 	}
 }
 
@@ -331,7 +333,11 @@ func solProcessIx(
 		solProcessAltIx(ctx, ix)
 	case SOL_KAMINO_LEND_PROGRAM_ADDRESS:
 		solProcessKaminoLendIx(ctx, ix)
-	case SOL_MANGO_V4_PROGRAM_ADDRESS:
+	case SOL_MANGO_V4_PROGRAM_ADDRESS, SOL_MANGO_V4_PROGRAM_ADDRESS_2:
 		solProcessMangoV4Ix(ctx, ix)
+	case SOL_CIRCUIT_PROGRAM_ADDRESS:
+		solProcessCircuitIx(ctx, ix)
+	case SOL_SANCTUM_PROGRAM_ADDRESS:
+		solProcessSanctumIx(ctx, ix)
 	}
 }

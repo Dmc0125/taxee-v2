@@ -430,11 +430,14 @@ func solSwapEventFromTransfers(
 	event.Transfers = transfers
 }
 
-func solNewLendingDepositWithdrawEvent(
+// deposit => 0
+// withdraw => 1
+func solNewLendingStakeEvent(
 	ctx *solContext,
 	owner, userAddress string,
 	transferIx *db.SolanaInnerInstruction,
-	app string,
+	direction int,
+	app, method string,
 ) {
 	if !slices.Contains(ctx.wallets, owner) {
 		return
@@ -444,21 +447,40 @@ func solNewLendingDepositWithdrawEvent(
 		return
 	}
 
-	amount, from, _ := solParseTokenTransfer(transferIx.Accounts, transferIx.Data)
-	_, tokenAccount, ok := solAccountExactOrError[solTokenAccountData](ctx, from)
+	var amount uint64
+	var tokenAccountAddress, fromAccount, toAccount string
+
+	switch direction {
+	// deposit
+	case 0:
+		amount, tokenAccountAddress, _ = solParseTokenTransfer(
+			transferIx.Accounts, transferIx.Data,
+		)
+		fromAccount, toAccount = tokenAccountAddress, userAddress
+	// withdraw
+	case 1:
+		amount, _, tokenAccountAddress = solParseTokenTransfer(
+			transferIx.Accounts, transferIx.Data,
+		)
+		fromAccount, toAccount = userAddress, tokenAccountAddress
+	}
+
+	_, tokenAccount, ok := solAccountExactOrError[solTokenAccountData](
+		ctx, tokenAccountAddress,
+	)
 	if !ok {
 		return
 	}
 
 	decimals := solDecimalsMust(ctx, tokenAccount.Mint)
 
-	event := solNewEvent(ctx, app, "deposit", db.EventTypeTransfer)
+	event := solNewEvent(ctx, app, method, db.EventTypeTransfer)
 	event.Transfers = append(event.Transfers, &db.EventTransfer{
 		Direction:   db.EventTransferInternal,
 		FromWallet:  owner,
-		FromAccount: from,
+		FromAccount: fromAccount,
 		ToWallet:    owner,
-		ToAccount:   userAddress,
+		ToAccount:   toAccount,
 		Token:       tokenAccount.Mint,
 		Amount:      newDecimalFromRawAmount(amount, decimals),
 		TokenSource: uint16(db.NetworkSolana),

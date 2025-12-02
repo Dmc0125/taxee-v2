@@ -693,6 +693,7 @@ func Parse(
 	batch := pgx.Batch{}
 	eventPosition := 0
 
+	// TODO: show an error if a transaction had an error
 	for _, tx := range txs {
 		if txEvents, ok := groupedEvents[tx.Id]; ok {
 			internalTxId, ok := internalTxsByTxId[tx.Id]

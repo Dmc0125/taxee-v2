@@ -111,11 +111,11 @@ func solProcessKaminoLendIx(
 	switch disc {
 	// deposit
 	case [8]uint8{129, 199, 4, 2, 222, 39, 26, 46}:
-		solNewLendingDepositWithdrawEvent(
+		solNewLendingStakeEvent(
 			ctx,
 			ix.Accounts[0], ix.Accounts[1],
 			ix.InnerInstructions[0],
-			app,
+			0, app, "lend",
 		)
 	}
 }
