@@ -200,7 +200,7 @@
         {{ else }}
             <div class="w-full flex flex-col gap-y-1">
                 <div class="opacity-0 h-[1em] text-sm"></div>
-                <div class="mt-1">-</div>
+                <div class="w-fit mt-1">-</div>
             </div>
         {{ end }}
     </button>
@@ -398,7 +398,7 @@
 					{{ template "event_token_amount_component" . }}
 				{{ end }}
 			{{ else }}
-				<div class="text-sm">-</div>
+				<div class="w-fit text-sm">-</div>
 			{{ end }}
 		</div>
 
@@ -409,7 +409,7 @@
 					{{ template "event_fiat_amount_component" . }}
 				{{ end }}
 			{{ else }}
-				<div class="text-sm">-</div>
+				<div class="w-fit text-sm">-</div>
 			{{ end }}
 		</div>
 	</div>

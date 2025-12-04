@@ -277,11 +277,17 @@ func solProcessAnchorInitAccount(
 
 	direction := getTransferEventDirection(fromInternal, toInternal)
 
+	toWallet := owner
+	if !toInternal {
+		toWallet = to
+	}
+
 	event := solNewEvent(ctx, app, method, db.EventTypeTransfer)
 	event.Transfers = append(event.Transfers, &db.EventTransfer{
-		Direction:   direction,
-		FromWallet:  from,
-		ToWallet:    owner,
+		Direction:  direction,
+		FromWallet: from,
+		// TODO: not correct
+		ToWallet:    toWallet,
 		FromAccount: from,
 		ToAccount:   to,
 		Token:       SOL_MINT_ADDRESS,
@@ -326,7 +332,7 @@ func solParseTransfers(
 
 	for _, innerIx := range innerIxs {
 		switch innerIx.ProgramAddress {
-		case SOL_TOKEN_PROGRAM_ADDRESS:
+		case SOL_TOKEN_PROGRAM_ADDRESS, SOL_TOKEN2022_PROGRAM_ADDRESS:
 			ixType, _, ok := solTokenIxFromByte(innerIx.Data[0])
 			if !ok {
 				continue
@@ -348,9 +354,9 @@ func solParseTransfers(
 				continue
 			}
 
-			validMint, ok := "", false
 			if from != "" {
-				if validMint, wallet, ok = getTokenAccount(from, mint); ok {
+				if validMint, w, ok := getTokenAccount(from, mint); ok {
+					wallet = w
 					decimals := solDecimalsMust(ctx, validMint)
 					amounts[validMint] = amounts[validMint].Sub(
 						newDecimalFromRawAmount(amount, decimals),
@@ -359,7 +365,8 @@ func solParseTransfers(
 				}
 			}
 			if to != "" {
-				if validMint, wallet, ok = getTokenAccount(to, mint); ok {
+				if validMint, w, ok := getTokenAccount(to, mint); ok {
+					wallet = w
 					decimals := solDecimalsMust(ctx, validMint)
 					amounts[validMint] = amounts[validMint].Add(
 						newDecimalFromRawAmount(amount, decimals),
@@ -449,20 +456,37 @@ func solNewLendingStakeEvent(
 
 	var amount uint64
 	var tokenAccountAddress, fromAccount, toAccount string
+	// NOTE: needs to be done because lending/staking is adding to the balance
+	// which we can not really track, if it were not stored on a separate account
+	// when withdrawal with interest happens, the "real" SOL balance needed for
+	// creating the account would be subtracted too, leaving and empty program
+	// account, even though it's not really empty
+	userAddress = fmt.Sprintf("%s:program_account", userAddress)
+
+	ixType, _, _ := solTokenIxFromByte(transferIx.Data[0])
+	switch ixType {
+	case solTokenIxTransfer:
+		amount, fromAccount, toAccount = solParseTokenTransfer(
+			transferIx.Accounts, transferIx.Data,
+		)
+	case solTokenIxTransferChecked:
+		amount, fromAccount, toAccount = solParseTokenTransferChecked(
+			transferIx.Accounts, transferIx.Data,
+		)
+	default:
+		// TODO: error ??
+		return
+	}
 
 	switch direction {
 	// deposit
 	case 0:
-		amount, tokenAccountAddress, _ = solParseTokenTransfer(
-			transferIx.Accounts, transferIx.Data,
-		)
-		fromAccount, toAccount = tokenAccountAddress, userAddress
+		tokenAccountAddress = fromAccount
+		toAccount = userAddress
 	// withdraw
 	case 1:
-		amount, _, tokenAccountAddress = solParseTokenTransfer(
-			transferIx.Accounts, transferIx.Data,
-		)
-		fromAccount, toAccount = userAddress, tokenAccountAddress
+		tokenAccountAddress = toAccount
+		fromAccount = userAddress
 	}
 
 	_, tokenAccount, ok := solAccountExactOrError[solTokenAccountData](
@@ -501,19 +525,28 @@ func solNewLendingBorrowRepayEvent(
 	var amount uint64
 	var fromWallet, toWallet, fromAccount, toAccount, userAccountAdress string
 
+	ixType, _, _ := solTokenIxFromByte(transferIx.Data[0])
+	switch ixType {
+	case solTokenIxTransfer:
+		amount, fromAccount, toAccount = solParseTokenTransfer(
+			transferIx.Accounts, transferIx.Data,
+		)
+	case solTokenIxTransferChecked:
+		amount, fromAccount, toAccount = solParseTokenTransferChecked(
+			transferIx.Accounts, transferIx.Data,
+		)
+	default:
+		// TODO: error ??
+		return
+	}
+
 	switch direction {
 	// incoming
 	case db.EventTransferIncoming:
-		amount, _, toAccount = solParseTokenTransfer(
-			transferIx.Accounts, transferIx.Data,
-		)
 		toWallet = owner
 		userAccountAdress = toAccount
 	// outgoing
 	case db.EventTransferOutgoing:
-		amount, fromAccount, _ = solParseTokenTransfer(
-			transferIx.Accounts, transferIx.Data,
-		)
 		fromWallet = owner
 		userAccountAdress = fromAccount
 	}

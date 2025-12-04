@@ -65,6 +65,7 @@ func solParseSystemIxSolTransfer(
 		offset := 44 + seedLen
 		amount = binary.LittleEndian.Uint64(data[offset:])
 	default:
+		// TODO: swap to assert
 		ok = false
 	}
 	return

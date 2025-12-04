@@ -3,6 +3,7 @@ package parser
 import (
 	"encoding/binary"
 	"fmt"
+	"slices"
 	"taxee/pkg/assert"
 	"taxee/pkg/db"
 
@@ -20,42 +21,28 @@ const (
 	solSquadsV4VaultTransactionExecute
 )
 
-func solSquadsV4IxFromData(data []byte) (ix solSquadsIx, method string, ok bool) {
-	assert.True(len(data) >= 8, "invalid data: %#v", data)
-	ok = true
-
-	var disc [8]byte
-	copy(disc[:], data[:8])
-
-	switch disc {
-	case [8]uint8{48, 250, 78, 168, 208, 226, 218, 211}:
-		ix, method = solSquadsV4VaultTransactionCreate, "vault_transaction_create"
-	case [8]uint8{194, 8, 161, 87, 153, 164, 25, 171}:
-		ix, method = solSquadsV4VaultTransactionExecute, "vault_transaction_execute"
-	default:
-		ok = false
-	}
-
-	return
-}
+var (
+	squadsV4VaultTxCreate    = [8]uint8{48, 250, 78, 168, 208, 226, 218, 211}
+	squadsV4VaultTxExecute   = [8]uint8{194, 8, 161, 87, 153, 164, 25, 171}
+	squadsV4ConfigTxCreate   = [8]uint8{155, 236, 87, 228, 137, 75, 81, 39}
+	squadsV4ProposalTxCreate = [8]uint8{220, 60, 73, 224, 30, 108, 79, 159}
+)
 
 func solSquadsV4IxRelatedAccounts(
 	relatedAccounts relatedAccounts,
-	walletAddress string,
+	_ string,
 	ix *db.SolanaInstruction,
 ) {
-	ixType, _, ok := solSquadsV4IxFromData(ix.Data)
+	disc, ok := solAnchorDisc(ix.Data)
 	if !ok {
 		return
 	}
 
-	_ = walletAddress
-
-	switch ixType {
-	case solSquadsV4VaultTransactionCreate:
+	switch disc {
+	case squadsV4VaultTxCreate:
 		transaction := ix.Accounts[1]
 		relatedAccounts.Append(transaction)
-	case solSquadsV4VaultTransactionExecute:
+	case squadsV4VaultTxExecute:
 		transaction := ix.Accounts[2]
 		relatedAccounts.Append(transaction)
 	}
@@ -158,14 +145,14 @@ func (acc *solSquadsV4CompiledTxAccountData) initFromData(data []byte) {
 // implemented based on:
 // https://github.com/Squads-Protocol/v4/blob/main/programs/squads_multisig_program
 func solPreprocessSquadsV4Ix(ctx *solContext, ix *db.SolanaInstruction) {
-	ixType, _, ok := solSquadsV4IxFromData(ix.Data)
+	disc, ok := solAnchorDisc(ix.Data)
 	if !ok {
 		return
 	}
 
-	switch ixType {
-	case solSquadsV4VaultTransactionCreate:
-		transaction, owner := ix.Accounts[1], ix.Accounts[2]
+	switch disc {
+	case squadsV4VaultTxCreate:
+		owner := ix.Accounts[2]
 		owned := ctx.walletOwned(owner)
 
 		var accountData solSquadsV4CompiledTxAccountData
@@ -176,8 +163,20 @@ func solPreprocessSquadsV4Ix(ctx *solContext, ix *db.SolanaInstruction) {
 		assert.NoErr(err, "")
 
 		ctx.receiveSol(to, amount)
-		ctx.init(transaction, owned, &accountData)
-	case solSquadsV4VaultTransactionExecute:
+		ctx.init(to, owned, &accountData)
+	case squadsV4ConfigTxCreate, squadsV4ProposalTxCreate:
+		owner := ix.Accounts[2]
+		if !slices.Contains(ctx.wallets, owner) {
+			return
+		}
+
+		innerIxsIter := solInnerIxIterator{innerIxs: ix.InnerInstructions}
+		_, to, amount, err := solAnchorInitAccountValidate(&innerIxsIter)
+		assert.NoErr(err, "")
+
+		ctx.receiveSol(to, amount)
+		ctx.init(to, true, nil)
+	case squadsV4VaultTxExecute:
 		transaction := ix.Accounts[2]
 		transactionAccount := ctx.find(ctx.slot, ctx.ixIdx, transaction, 2)
 		assert.True(
@@ -321,22 +320,14 @@ func solProcessSquadsV4Ix(
 	ctx *solContext,
 	ix *db.SolanaInstruction,
 ) {
-	ixType, method, ok := solSquadsV4IxFromData(ix.Data)
+	disc, ok := solAnchorDisc(ix.Data)
 	if !ok {
 		return
 	}
 
 	const app = "squads"
 
-	switch ixType {
-	case solSquadsV4VaultTransactionCreate:
-		innerIxs := solInnerIxIterator{innerIxs: ix.InnerInstructions}
-		_, err := solProcessAnchorInitAccount(
-			ctx, &innerIxs,
-			ix.Accounts[2], app, method,
-		)
-		assert.NoErr(err, fmt.Sprintf("unable to process ix: %s", ctx.txId))
-	case solSquadsV4VaultTransactionExecute:
+	if disc == squadsV4VaultTxExecute {
 		transaction := ix.Accounts[2]
 		transactionAccount := ctx.find(ctx.slot, ctx.ixIdx, transaction, 2)
 		assert.True(
@@ -357,5 +348,26 @@ func solProcessSquadsV4Ix(
 		for _, squadsIx := range *squadsInstructions {
 			solProcessIx(ctx, squadsIx)
 		}
+		return
 	}
+
+	var method string
+
+	switch disc {
+	case squadsV4VaultTxCreate:
+		method = "transaction_create"
+	case squadsV4ConfigTxCreate:
+		method = "config_create"
+	case squadsV4ProposalTxCreate:
+		method = "proposal_create"
+	default:
+		return
+	}
+
+	innerIxs := solInnerIxIterator{innerIxs: ix.InnerInstructions}
+	_, err := solProcessAnchorInitAccount(
+		ctx, &innerIxs,
+		ix.Accounts[2], app, method,
+	)
+	assert.NoErr(err, fmt.Sprintf("unable to process ix: %s", ctx.txId))
 }

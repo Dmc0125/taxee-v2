@@ -81,6 +81,8 @@ func solPreprocessAssociatedTokenIx(ctx *solContext, ix *db.SolanaInstruction) {
 			return
 		}
 
+		// TODO: this is wrong
+
 		// inner ixs
 		// https://github.com/solana-program/associated-token-account/blob/main/program/src/tools/account.rs#L19
 		//

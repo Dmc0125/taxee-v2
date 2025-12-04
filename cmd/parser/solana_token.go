@@ -8,6 +8,7 @@ import (
 )
 
 const SOL_TOKEN_PROGRAM_ADDRESS = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+const SOL_TOKEN2022_PROGRAM_ADDRESS = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 
 type solTokenIx uint8
 
@@ -377,6 +378,6 @@ func solProcessTokenIx(
 		return
 	}
 
-	event := solNewEvent(ctx,"token", method, eventType)
+	event := solNewEvent(ctx, "token", method, eventType)
 	event.Transfers = append(event.Transfers, transfer)
 }

@@ -24,6 +24,8 @@ func RelatedAccountsFromTx(
 			solAssociatedTokenIxRelatedAccounts(relatedAccounts, walletAddress, ix)
 		case SOL_SQUADS_V4_PROGRAM_ADDRESS:
 			solSquadsV4IxRelatedAccounts(relatedAccounts, walletAddress, ix)
+		case SOL_JUP_V6_PROGRAM_ADDRESS:
+			solJupV6RelatedAccounts(relatedAccounts, walletAddress, ix)
 		}
 	}
 }
@@ -206,7 +208,9 @@ func solPreprocessIx(ctx *solContext, ix *db.SolanaInstruction) {
 	switch ix.ProgramAddress {
 	case SOL_SYSTEM_PROGRAM_ADDRESS:
 		solPreprocessSystemIx(ctx, ix)
-	case SOL_TOKEN_PROGRAM_ADDRESS:
+	case SOL_TOKEN_PROGRAM_ADDRESS,
+		// TODO: probably will need special handling
+		SOL_TOKEN2022_PROGRAM_ADDRESS:
 		solPreprocessTokenIx(ctx, ix)
 	case SOL_ASSOCIATED_TOKEN_PROGRAM_ADDRESS:
 		solPreprocessAssociatedTokenIx(ctx, ix)
@@ -226,6 +230,12 @@ func solPreprocessIx(ctx *solContext, ix *db.SolanaInstruction) {
 		solPreprocessMangoV4Ix(ctx, ix)
 	case SOL_CIRCUIT_PROGRAM_ADDRESS:
 		solPreprocessCircuitIx(ctx, ix)
+	case SOL_JUP_V6_PROGRAM_ADDRESS:
+		solPreprocessJupV6(ctx, ix)
+	case SOL_SYNATRA_PROGRAM_ADDRESS:
+		solPreprocessSynatraIx(ctx, ix)
+	case SOL_LULO_PROGRAM_ADDRESS:
+		solPreprocessLuloIx(ctx, ix)
 	}
 }
 
@@ -311,7 +321,8 @@ func solProcessIx(
 	switch ix.ProgramAddress {
 	case SOL_SYSTEM_PROGRAM_ADDRESS:
 		solProcessSystemIx(ctx, ix)
-	case SOL_TOKEN_PROGRAM_ADDRESS:
+	case SOL_TOKEN_PROGRAM_ADDRESS,
+		SOL_TOKEN2022_PROGRAM_ADDRESS:
 		solProcessTokenIx(ctx, ix)
 	case SOL_ASSOCIATED_TOKEN_PROGRAM_ADDRESS:
 		solProcessAssociatedTokenIx(ctx, ix)
@@ -339,5 +350,15 @@ func solProcessIx(
 		solProcessCircuitIx(ctx, ix)
 	case SOL_SANCTUM_PROGRAM_ADDRESS:
 		solProcessSanctumIx(ctx, ix)
+	case SOL_DRIFT_DISTRIBUTOR:
+		solProcessMerkleDistributorIx(ctx, ix, "drift")
+	case SOL_SYNATRA_PROGRAM_ADDRESS:
+		solProcessSynatraIx(ctx, ix)
+	case SOL_CARROT_PROGRAM_ADDRESS:
+		solProcessCarrotIx(ctx, ix)
+	case SOL_LULO_PROGRAM_ADDRESS:
+		solProcessLuloIx(ctx, ix)
+	case SOL_DFLOW_PROGRAM_ADDRESS:
+		solProcessDflowIx(ctx, ix)
 	}
 }

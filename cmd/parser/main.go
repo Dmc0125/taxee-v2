@@ -398,6 +398,7 @@ func fetchDecimalsAndPrices(
 
 		if !ok {
 			coingeckoQueriesCount += 1
+			// TODO: prices can be missing
 			coingeckoPrices, timestampTo, err := coingecko.GetCoinOhlc(
 				token.coingeckoId,
 				coingecko.FiatCurrencyEur,

@@ -43,13 +43,28 @@ func solProcessCircuitIx(ctx *solContext, ix *db.SolanaInstruction) {
 		return
 	}
 
+	var transferIx *db.SolanaInnerInstruction
+	var method string
+	var direction int
+
 	switch disc {
 	// deposit
 	case [8]uint8{242, 35, 198, 137, 82, 225, 242, 182}:
-		solNewLendingStakeEvent(
-			ctx,
-			ix.Accounts[2], ix.Accounts[1], ix.InnerInstructions[0],
-			0, app, "deposit",
-		)
+		transferIx = ix.InnerInstructions[0]
+		method = "deposit"
+		direction = 0
+	// withdraw
+	case [8]uint8{183, 18, 70, 156, 148, 109, 161, 34}:
+		transferIx = ix.InnerInstructions[2]
+		method = "withdraw"
+		direction = 1
+	default:
+		return
 	}
+
+	solNewLendingStakeEvent(
+		ctx,
+		ix.Accounts[2], ix.Accounts[1], transferIx,
+		direction, app, method,
+	)
 }
