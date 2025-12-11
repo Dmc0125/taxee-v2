@@ -3,6 +3,7 @@ package solana
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,17 +24,11 @@ type ResponseError struct {
 	Data    any
 }
 
-type responseInternal[T any] struct {
+type Response[T any] struct {
 	Jsonrpc string
 	Id      uint64
 	Result  T
 	Error   *ResponseError
-}
-
-type Response[T any] struct {
-	Id     uint64
-	Result T
-	Error  *ResponseError
 }
 
 type request struct {
@@ -78,11 +73,11 @@ func (rpc *Rpc) newRequest(method string, params []any) *request {
 	}
 }
 
+var ERROR_STATUS_CODE_NOT_OK = errors.New("response status != 200")
+
 func (rpc *Rpc) sendRequest(reqData any, resData any) error {
 	reqBody, err := json.Marshal(reqData)
-	if err != nil {
-		return fmt.Errorf("unable to marshal body: %s", err)
-	}
+	assert.NoErr(err, "unable to marshal solana RPC request")
 
 	rpc.timer.Lock()
 
@@ -100,8 +95,7 @@ func (rpc *Rpc) sendRequest(reqData any, resData any) error {
 	}
 	if res.StatusCode != 200 {
 		return fmt.Errorf(
-			"response status != 200\nBody: %s",
-			string(resBody),
+			"%w\nBody: %s", ERROR_STATUS_CODE_NOT_OK, string(resBody),
 		)
 	}
 
@@ -144,17 +138,9 @@ func (rpc *Rpc) GetSignaturesForAddress(
 	}
 	req := rpc.newRequest("getSignaturesForAddress", []any{address, p})
 
-	resInternal := new(responseInternal[[]*GetSignaturesForAddressResponse])
-	err := rpc.sendRequest(req, resInternal)
-
-	if err == nil {
-		return &Response[[]*GetSignaturesForAddressResponse]{
-			Result: resInternal.Result,
-			Error:  resInternal.Error,
-		}, nil
-	}
-
-	return nil, err
+	res := new(Response[[]*GetSignaturesForAddressResponse])
+	err := rpc.sendRequest(req, res)
+	return res, err
 }
 
 type GetMultipleTransactionsParams struct {
@@ -214,7 +200,7 @@ type GetTransactionResponse struct {
 
 func (rpc *Rpc) GetMultipleTransactions(
 	params []*GetMultipleTransactionsParams,
-) ([]*Response[*Transaction], error) {
+) ([]*Response[*GetTransactionResponse], error) {
 	requests := make([]*request, len(params))
 	for i, p := range params {
 		reqParam := map[string]any{
@@ -229,44 +215,15 @@ func (rpc *Rpc) GetMultipleTransactions(
 		requests[i] = req
 	}
 
-	responses := []*responseInternal[*GetTransactionResponse]{}
+	responses := []*Response[*GetTransactionResponse]{}
 	err := rpc.sendRequest(requests, &responses)
-	if err != nil {
-		return nil, err
-	}
 
-	type r = *responseInternal[*GetTransactionResponse]
+	type r = *Response[*GetTransactionResponse]
 	slices.SortFunc(responses, func(a r, b r) int {
 		return int(a.Id - b.Id)
 	})
 
-	parsedResponses := make([]*Response[*Transaction], len(responses))
-	for i, res := range responses {
-		if res.Error != nil {
-			parsedResponses[i] = &Response[*Transaction]{
-				Error: res.Error,
-			}
-		} else {
-			compiledTx, err := parseTransaction(res.Result.Transaction[0])
-			if err != nil {
-				return nil, err
-			}
-			tx, err := decompileTransaction(
-				res.Result.Slot,
-				res.Result.BlockTime,
-				res.Result.Meta,
-				compiledTx,
-			)
-			if err != nil {
-				return nil, err
-			}
-			parsedResponses[i] = &Response[*Transaction]{
-				Result: tx,
-			}
-		}
-	}
-
-	return parsedResponses, nil
+	return responses, err
 }
 
 type GetMultipleBlocksSignaturesParams struct {
@@ -302,26 +259,18 @@ func (rpc *Rpc) GetMultipleBlocksSignatures(
 		requests[i] = req
 	}
 
-	responses := []*responseInternal[*GetBlockSignaturesResponse]{}
+	responses := []*Response[*GetBlockSignaturesResponse]{}
 	err := rpc.sendRequest(requests, &responses)
 	if err != nil {
 		return nil, err
 	}
 
-	type r = *responseInternal[*GetBlockSignaturesResponse]
+	type r = *Response[*GetBlockSignaturesResponse]
 	slices.SortFunc(responses, func(a r, b r) int {
 		return int(a.Id - b.Id)
 	})
 
-	res := make([]*Response[*GetBlockSignaturesResponse], len(responses))
-	for i, r := range responses {
-		res[i] = &Response[*GetBlockSignaturesResponse]{
-			Error:  r.Error,
-			Result: r.Result,
-		}
-	}
-
-	return res, nil
+	return responses, nil
 }
 
 func (rpc *Rpc) GetBlockSignatures(
@@ -334,18 +283,8 @@ func (rpc *Rpc) GetBlockSignatures(
 		"rewards":                        false,
 		"transactionDetails":             "signatures",
 	}
-	resInteral := new(responseInternal[*GetBlockSignaturesResponse])
+	res := new(Response[*GetBlockSignaturesResponse])
 	req := rpc.newRequest("getBlock", []any{slot, reqParams})
-
-	err := rpc.sendRequest(req, resInteral)
-	if err != nil {
-		return nil, err
-	}
-
-	res := &Response[*GetBlockSignaturesResponse]{
-		Result: resInteral.Result,
-		Error:  resInteral.Error,
-	}
-
-	return res, nil
+	err := rpc.sendRequest(req, res)
+	return res, err
 }

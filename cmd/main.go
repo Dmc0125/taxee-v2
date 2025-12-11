@@ -63,7 +63,7 @@ func abiProcessInputs(inputs []abiInput) string {
 	s := strings.Builder{}
 
 	for i, input := range inputs {
-		if input.Components != nil && len(input.Components) > 0 {
+		if len(input.Components) > 0 {
 			s.WriteRune('(')
 			s.WriteString(abiProcessInputs(input.Components))
 			s.WriteRune(')')
@@ -222,6 +222,8 @@ func main() {
 		}
 
 		walletAddress, network := cliArgs[2], cliArgs[3]
+		validNetwork, ok := db.NewNetwork(network)
+		assert.True(ok, "network is not valid: %s", network)
 
 		alchemyReqTimer := requesttimer.NewDefault(100)
 
@@ -233,16 +235,20 @@ func main() {
 			fresh = true
 		}
 
-		fetcher.Fetch(
+		walletId, walletData, err := db.DevSetWallet(
+			context.Background(), pool,
+			userAccountId, walletAddress, validNetwork,
+		)
+		assert.NoErr(err, "unable to set wallet")
+
+		err = fetcher.Fetch(
 			context.Background(),
-			pool,
+			pool, solanaRpc, etherscanClient,
 			userAccountId,
-			walletAddress,
-			network,
-			solanaRpc,
-			etherscanClient,
+			validNetwork, walletAddress, walletId, walletData,
 			fresh,
 		)
+		assert.NoErr(err, "unable to fetch transactions for wallet")
 	case "parse":
 		assert.True(appEnv != "prod", "this command must not be run in production env")
 

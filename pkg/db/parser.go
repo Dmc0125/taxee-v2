@@ -115,37 +115,6 @@ const InsertPricepoint string = `
 	) on conflict (timestamp, coingecko_id) do nothing
 `
 
-// SetMissingPricepoint
-//
-//	insert into missing_pricepoint (
-//		coingecko_id, timestamp_from, timestamp_to
-//	) values (
-//		$1, $2, $3
-//	) on conflict (coingecko_id) do update set
-//		timestamp_from = case
-//			when $2 < timestamp_from then $2
-//			else timestamp_from
-//		end,
-//		timestamp_to = case
-//			when $3 > timestamp_to then $3
-//			else timestamp_to
-//		end
-const SetMissingPricepoint string = `
-	insert into missing_pricepoint (
-		coingecko_id, timestamp_from, timestamp_to
-	) values (
-		$1, $2, $3
-	) on conflict (coingecko_id) do update set
-		timestamp_from = case
-			when $2 < missing_pricepoint.timestamp_from then $2
-			else missing_pricepoint.timestamp_from
-		end,
-		timestamp_to = case
-			when $3 > missing_pricepoint.timestamp_to then $3
-			else missing_pricepoint.timestamp_to
-		end
-`
-
 type EventTransferDirection uint8
 
 const (

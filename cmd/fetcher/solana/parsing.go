@@ -170,15 +170,23 @@ type CompiledTransaction struct {
 	Message    *CompiledTransactionMessage
 }
 
-func parseTransaction(data string) (*CompiledTransaction, error) {
+var ERROR_PARSE_TRANSACTION = errors.New("unable to parse transaction")
+
+func ParseTransaction(data string) (*CompiledTransaction, error) {
 	bytes, err := base64.StdEncoding.DecodeString(data)
 	if err != nil {
-		return nil, fmt.Errorf("unable to decode transaction data: %w", err)
+		return nil, fmt.Errorf(
+			"%w: unable to decode transaction data: %w",
+			ERROR_PARSE_TRANSACTION, err,
+		)
 	}
 
 	signaturesCount, offset, err := parseCompactUint16(bytes[:3])
 	if err != nil {
-		return nil, fmt.Errorf("unable to parse signatures: %w", err)
+		return nil, fmt.Errorf(
+			"%w: unable to parse signatures: %w",
+			ERROR_PARSE_TRANSACTION, err,
+		)
 	}
 
 	signatures := make([]string, signaturesCount)
@@ -190,6 +198,7 @@ func parseTransaction(data string) (*CompiledTransaction, error) {
 
 	msg, err := parseTransactionMessage(bytes[offset:])
 	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ERROR_PARSE_TRANSACTION, err)
 	}
 
 	tx := &CompiledTransaction{
@@ -460,7 +469,9 @@ func (tx *Transaction) parseLogs(logMessages []string) error {
 	return nil
 }
 
-func decompileTransaction(
+var ERROR_DECOMPILE_TRANSACTION = errors.New("unable to decompile tx")
+
+func DecompileTransaction(
 	slot uint64,
 	blockTime int64,
 	meta *TransactionMeta,
@@ -479,7 +490,7 @@ func decompileTransaction(
 			cix.Data,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("unable to decompile tx: %w", err)
+			return nil, fmt.Errorf("%w: unable to decompile ix: %w", ERROR_DECOMPILE_TRANSACTION, err)
 		}
 		ixs[i] = ix
 	}
@@ -494,7 +505,10 @@ func decompileTransaction(
 		for j, ciix := range innerInstructions.Instructions {
 			data, err := base58.Decode(ciix.Data)
 			if err != nil {
-				return nil, fmt.Errorf("unable to decompile inner ix: %w", err)
+				return nil, fmt.Errorf(
+					"%w: unable to decode inner ix data: %w",
+					ERROR_DECOMPILE_TRANSACTION, err,
+				)
 			}
 			iix, err := decompileInstruction(
 				accounts,
@@ -502,6 +516,12 @@ func decompileTransaction(
 				ciix.Accounts,
 				data,
 			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"%w: unable to decompile inner ix: %w",
+					ERROR_DECOMPILE_TRANSACTION, err,
+				)
+			}
 			ix.InnerInstructions[j] = &InnerInstruction{
 				ProgramAddress: iix.ProgramAddress,
 				Accounts:       iix.Accounts,
@@ -521,12 +541,18 @@ func decompileTransaction(
 		Ixs:       ixs,
 	}
 	if err := tx.parseBalances(meta); err != nil {
-		return nil, fmt.Errorf("unable to parse tx balance: %w", err)
+		return nil, fmt.Errorf(
+			"%w: unable to parse tx balances: %w",
+			ERROR_DECOMPILE_TRANSACTION, err,
+		)
 	}
 
 	if !tx.Err {
 		if err := tx.parseLogs(meta.LogMessages); err != nil {
-			return nil, fmt.Errorf("unable to parse tx logs: %w", err)
+			return nil, fmt.Errorf(
+				"%w: unable to parse tx logs: %w",
+				ERROR_DECOMPILE_TRANSACTION, err,
+			)
 		}
 	}
 

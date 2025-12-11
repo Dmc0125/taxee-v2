@@ -10,6 +10,10 @@
     font-family: "Geist-mono";
 }
 
+/* html { */
+/*     font-size: 24px !important; */
+/* } */
+
 .bg-crossed {
     background-image: repeating-linear-gradient(
         -55deg,

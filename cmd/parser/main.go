@@ -23,6 +23,30 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+// TODOs:
+//
+// 1. the parsers must stay alive in production, there should be no asserts
+// 	  if the instruction is not what we expect
+//    	- missing inner ixs
+//		- missing data
+//	  just skip parsing
+// 2. not sure how I feel about the errors
+//    - missing amount / missing price - good
+//	  - balance mismatch - good
+//
+//    - preprocess errors are kinda useless for the user, they can not change
+// 		them so those probably don't need to exist
+//	  - same for data mismatch / missing account
+//
+// 	  the alternative to these errors is just showing the balance mismatches,
+//	  missing amount and missing prices and having a good and easy way to fix
+//	  them with custom events
+//
+//    there could also be hints, like, some ix and therefore an event was
+// 	  expected, but something was missing (account, invalid data, ...) so it
+//    could not be parsed but the user would have an idea about whats going on
+//
+
 const tokenSourceCoingecko uint16 = math.MaxUint16
 
 func newDecimalFromRawAmount(amount uint64, decimals uint8) decimal.Decimal {
@@ -325,10 +349,8 @@ func fetchDecimalsAndPrices(
 			})
 		} else {
 			if transfer.TokenSource > uint16(db.NetworkEvmStart) {
-				// TODO: cant just use network????
-				n := db.Network(transfer.TokenSource)
-				evmCtx, ok := evmContexts[n]
-				assert.True(ok, "missing evm context %s", n.String())
+				evmCtx, ok := evmContexts[network]
+				assert.True(ok, "missing evm context %s", network.String())
 
 				decimals, ok := evmCtx.decimals[transfer.Token]
 				assert.True(
@@ -398,8 +420,7 @@ func fetchDecimalsAndPrices(
 
 		if !ok {
 			coingeckoQueriesCount += 1
-			// TODO: prices can be missing
-			coingeckoPrices, timestampTo, err := coingecko.GetCoinOhlc(
+			coingeckoPrices, missingPrices, err := coingecko.GetCoinOhlc(
 				token.coingeckoId,
 				coingecko.FiatCurrencyEur,
 				timestampFrom,
@@ -426,15 +447,20 @@ func fetchDecimalsAndPrices(
 				if p := coingeckoPrices[0]; p.Timestamp.Equal(timestampFrom) {
 					price, ok = p.Close, true
 				}
-			} else {
-				_, err := pool.Exec(
-					ctx,
-					db.SetMissingPricepoint,
-					token.coingeckoId,
-					timestampFrom,
-					timestampTo,
-				)
-				assert.NoErr(err, "unable to set missing pricepoint")
+			}
+
+			if len(missingPrices) > 0 {
+				for _, mp := range missingPrices {
+					const setMissingPricepointQuery = "call set_missing_pricepoint($1, $2, $3)"
+					_, err := pool.Exec(
+						ctx,
+						setMissingPricepointQuery,
+						token.coingeckoId,
+						mp.TimestampFrom,
+						mp.TimestampTo,
+					)
+					assert.NoErr(err, "unable to set missing pricepoint")
+				}
 				continue
 			}
 		}

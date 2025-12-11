@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -18,98 +19,60 @@ import (
 	"unsafe"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 )
 
-func enqueueInsertTx(
-	batch *pgx.Batch,
-	txId string,
-	network db.Network,
-	err bool,
-	signer, feePayer string,
-	timestamp time.Time,
-	txDataMarshalled []byte,
-) *pgx.QueuedQuery {
-	const query = `
-		insert into tx (
-			id, network, err, signer, fee_payer, timestamp, data
-		) values (
-			$1, $2, $3, $4, $5, $6, $7
-		) on conflict (id) do nothing
-	`
-	return batch.Queue(
-		query,
-		txId,
-		network,
-		err,
-		signer,
-		feePayer,
-		timestamp,
-		txDataMarshalled,
-	)
-}
+var (
+	ERROR_INVALID_DATA = errors.New("invalid network or wallet data")
+)
 
-func setUserTransactions(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	userAccountId int32,
-	txIds []string,
-	walletId int32,
-	relatedAccountAddress pgtype.Text,
-) error {
-	query := "call set_user_transactions($1, $2, $3, $4)"
-	_, err := pool.Exec(ctx, query, userAccountId, txIds, walletId, relatedAccountAddress)
-	if err != nil {
-		return fmt.Errorf("unable to query set_user_transactions: %w", err)
-	}
-	return nil
-}
+// insertTransactionQuery
+//
+//	insert into tx (
+//		id, network, err, signer, fee_payer, timestamp, data
+//	) values (
+//		$1, $2, $3, $4, $5, $6, $7
+//	) on conflict (id) do nothing
+const insertTransactionQuery string = `
+	insert into tx (
+		id, network, err, signer, fee_payer, timestamp, data
+	) values (
+		$1, $2, $3, $4, $5, $6, $7
+	) on conflict (id) do nothing
+`
 
-func setWalletData(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	walletId int32,
-	data any,
-) error {
-	const query = `
-		update 
-			wallet 
-		set
-			data = data || $1::jsonb
-		where
-			id = $2
-	`
+// setUserTransactionQuery
+//
+//	call set_user_transactions($1, $2, $3, $4)
+const setUserTransactionQuery string = `
+	call set_user_transactions($1, $2, $3, $4)
+`
 
-	d, err := json.Marshal(data)
-	assert.NoErr(err, "")
+// setWalletDataQuery
+//
+//	update wallet set
+//		data = data || $1::jsonb
+//	where
+//		id = $2
+const setWalletDataQuery string = `
+	update wallet set
+		data = data || $1::jsonb
+	where
+		id = $2
+`
 
-	if _, err = pool.Exec(ctx, query, d, walletId); err != nil {
-		return fmt.Errorf("unable to set latest wallet tx id: %w", err)
-	}
-
-	return nil
-}
-
-func setLatestSolanaRelatedAccountTxId(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	walletId int32,
-	address, latestTxId string,
-) error {
-	query := `
-		update solana_related_account set
-			latest_tx_id = $1
-		where wallet_id = $2 and address = $3
-	`
-	_, err := pool.Exec(ctx, query, latestTxId, walletId, address)
-	if err != nil {
-		return fmt.Errorf("unable to set latest solana related account tx id: %w", err)
-	}
-	return nil
-}
+// setLatestSolanaRelatedAccountTxId
+//
+//	update solana_related_account set
+//		latest_tx_id = $1
+//	where wallet_id = $2 and address = $3
+const setLatestSolanaRelatedAccountTxId string = `
+	update solana_related_account set
+		latest_tx_id = $1
+	where wallet_id = $2 and address = $3
+`
 
 type solanaAccount struct {
 	solanaRelatedAccount
@@ -138,7 +101,7 @@ func fetchSolanaAccount(
 	userAccountId,
 	walletId int32,
 	account solanaAccount,
-) {
+) error {
 	logger.Info("Starting fetching transactions for address: %s", account.Address)
 	relatedAccountAddress := pgtype.Text{
 		Valid:  account.related,
@@ -150,6 +113,12 @@ func fetchSolanaAccount(
 	retry := make([]string, 0)
 
 	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		logger.Info("Fetching signatures from: \"%s\"", before)
 		signaturesResponse, err := rpc.GetSignaturesForAddress(
 			account.Address,
@@ -160,14 +129,10 @@ func fetchSolanaAccount(
 				Until:      account.LatestTxId,
 			},
 		)
-		assert.NoErr(err, "unable to get signatures for address")
-		if signaturesResponse.Error != nil {
-			assert.True(
-				false,
-				"unable to get signatures for address: %#v",
-				*signaturesResponse.Error,
-			)
+		if err != nil {
+			return err
 		}
+
 		logger.Info("Fetched %d signatures ", len(signaturesResponse.Result))
 
 		if len(signaturesResponse.Result) > 0 {
@@ -191,14 +156,20 @@ func fetchSolanaAccount(
 			break
 		}
 
-		const BATCH_SIZE = 10
-		queue := pgx.Batch{}
+		const BATCH_SIZE = 100
+		insertTransactionsBatch := pgx.Batch{}
 		txIds := make([]string, 0)
 
 		logger.Info("Txs chunks %d", len(signaturesResponse.Result)/BATCH_SIZE+1)
 		chunkIdx := 0
 
 		for chunk := range slices.Chunk(signaturesResponse.Result, BATCH_SIZE) {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
 			chunkIdx += 1
 			batch := make([]*solana.GetMultipleTransactionsParams, len(chunk))
 			for i, sig := range chunk {
@@ -209,16 +180,34 @@ func fetchSolanaAccount(
 			}
 
 			batchRes, err := rpc.GetMultipleTransactions(batch)
-			assert.NoErr(err, "unable to get multiple transactions")
+			if err != nil {
+				return err
+			}
+
 			logger.Info("Fetched txs chunk %d", chunkIdx)
 
-			for i, res := range batchRes {
+			for i, txResponse := range batchRes {
 				switch {
-				case res.Error != nil:
-					logger.Error("Tx response err")
+				case txResponse.Error != nil:
+					// TODO: Find out what is an error that occurs on too many
+					// requests
+					logger.Error("Tx response err: %#v", *txResponse.Error)
 					retry = append(retry, batch[i].Signature)
 				default:
-					tx := res.Result
+					// TODO: is it needed to validate the response? probably yes
+					compiledTx, err := solana.ParseTransaction(txResponse.Result.Transaction[0])
+					if err != nil {
+						return fmt.Errorf("unbale to parse solana transaction: %w", err)
+					}
+					tx, err := solana.DecompileTransaction(
+						txResponse.Result.Slot,
+						txResponse.Result.BlockTime,
+						txResponse.Result.Meta,
+						compiledTx,
+					)
+					if err != nil {
+						return fmt.Errorf("unable to decompile solana transactions: %w", err)
+					}
 
 					ixs := make([]*db.SolanaInstruction, len(tx.Ixs))
 					for i, ix := range tx.Ixs {
@@ -278,14 +267,10 @@ func fetchSolanaAccount(
 					marshalled, err := json.Marshal(txData)
 					assert.NoErr(err, "unable to marshal solana tx data")
 
-					enqueueInsertTx(
-						&queue,
-						tx.Signature,
-						db.NetworkSolana,
-						tx.Err,
-						tx.Accounts[0],
-						tx.Accounts[0],
-						tx.Blocktime,
+					insertTransactionsBatch.Queue(
+						insertTransactionQuery,
+						tx.Signature, db.NetworkSolana, tx.Err,
+						tx.Accounts[0], tx.Accounts[0], tx.Blocktime,
 						marshalled,
 					)
 					txIds = append(txIds, tx.Signature)
@@ -293,23 +278,19 @@ func fetchSolanaAccount(
 			}
 		}
 
-		if queue.Len() > 0 {
-			br := pool.SendBatch(ctx, &queue)
-			for range queue.Len() {
-				_, err := br.Exec()
-				assert.NoErr(err, "unable to insert tx")
+		if insertTransactionsBatch.Len() > 0 {
+			br := pool.SendBatch(ctx, &insertTransactionsBatch)
+			if err := br.Close(); err != nil {
+				return fmt.Errorf("unable to insert transactions batch: %w", err)
 			}
-			br.Close()
 
-			err := setUserTransactions(
-				ctx,
-				pool,
-				userAccountId,
-				txIds,
-				walletId,
-				relatedAccountAddress,
+			_, err = pool.Exec(
+				ctx, setUserTransactionQuery,
+				userAccountId, txIds, walletId, relatedAccountAddress,
 			)
-			assert.NoErr(err, "")
+			if err != nil {
+				return fmt.Errorf("unable to set user transactions: %w", err)
+			}
 		}
 
 		if len(signaturesResponse.Result) < LIMIT && len(retry) == 0 {
@@ -318,81 +299,46 @@ func fetchSolanaAccount(
 	}
 
 	if newLastestTxId == "" {
-		return
+		return nil
 	}
 
-	var err error
 	if relatedAccountAddress.Valid {
-		err = setLatestSolanaRelatedAccountTxId(
-			ctx, pool, walletId, relatedAccountAddress.String, newLastestTxId,
+		_, err := pool.Exec(
+			ctx, setLatestSolanaRelatedAccountTxId,
+			// args,
+			newLastestTxId, walletId, relatedAccountAddress.String,
 		)
+		if err != nil {
+			return fmt.Errorf("unable to set latest tx id for solana related account: %w", err)
+		}
+
 		logger.Info(
 			"Set latest txId \"%s\" for related account %s",
 			newLastestTxId,
 			relatedAccountAddress.String,
 		)
 	} else {
-		err = setWalletData(ctx, pool, walletId, db.SolanaWalletData{newLastestTxId})
+		walletData, err := json.Marshal(db.SolanaWalletData{LatestTxId: newLastestTxId})
+		assert.NoErr(err, "")
+
+		_, err = pool.Exec(ctx, setWalletDataQuery, walletData, walletId)
+		if err != nil {
+			return fmt.Errorf("unable to set latest tx id for solana wallet: %w", err)
+		}
+
 		logger.Info(
 			"Set latest txId \"%s\" for wallet %s",
 			newLastestTxId,
 			account.Address,
 		)
 	}
-	assert.NoErr(err, "")
+
+	return nil
 }
 
 type solanaRelatedAccount struct {
 	Address    string
 	LatestTxId string
-}
-
-func getSolanaRelatedAccounts(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	walletId int32,
-) ([]*solanaRelatedAccount, error) {
-	const query = `
-		select 
-			address, latest_tx_id
-		from
-			solana_related_account
-		where
-			wallet_id = $1
-	`
-	rows, err := pool.Query(ctx, query, walletId)
-	if err != nil {
-		return nil, fmt.Errorf("unable to query solana accounts: %w", err)
-	}
-
-	res := make([]*solanaRelatedAccount, 0)
-	for rows.Next() {
-		acc := new(solanaRelatedAccount)
-		err := rows.Scan(&acc.Address, &acc.LatestTxId)
-		if err != nil {
-			return nil, fmt.Errorf("unable to scan solana related account: %w", err)
-		}
-		res = append(res, acc)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("unable to scan solana related accounts: %w", err)
-	}
-
-	return res, nil
-}
-
-func devDeleteUserTransactions(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	userAccountId, walletId int32,
-) error {
-	const q = "call dev_delete_user_transactions($1, $2)"
-	_, err := pool.Exec(ctx, q, userAccountId, walletId)
-	if err != nil {
-		return fmt.Errorf("unable to call dev_delete_user_transactions: %w", err)
-	}
-	return nil
 }
 
 type getSolanaTxsWithDuplicateSlotsRow struct {
@@ -446,16 +392,6 @@ func getSolanaTxsWithDuplicateSlots(
 	return res, nil
 }
 
-func enqueueUpdateTxBlockIndex(batch *pgx.Batch, id string, blockIndex int32) *pgx.QueuedQuery {
-	const query = `
-		update tx set
-		data = data || jsonb_build_object('blockIndex', $1::integer)
-		where
-			id = $2
-	`
-	return batch.Queue(query, blockIndex, id)
-}
-
 func fetchSolanaWallet(
 	ctx context.Context,
 	pool *pgxpool.Pool,
@@ -465,7 +401,7 @@ func fetchSolanaWallet(
 	walletAddress string,
 	latestTxId pgtype.Text,
 	fresh bool,
-) {
+) error {
 	accounts := make([]solanaAccount, 1)
 
 	if fresh {
@@ -477,8 +413,13 @@ func fetchSolanaWallet(
 			false,
 		}
 
-		err := devDeleteUserTransactions(ctx, pool, userAccountId, walletId)
-		assert.NoErr(err, "")
+		const deleteUserTransactionsQuery = "call dev_delete_user_transactions($1, $2)"
+		if _, err := pool.Exec(
+			ctx, deleteUserTransactionsQuery,
+			userAccountId, walletId,
+		); err != nil {
+			return fmt.Errorf("unable to delete user transactions: %w", err)
+		}
 	} else {
 		accounts[0] = solanaAccount{
 			solanaRelatedAccount{
@@ -488,15 +429,36 @@ func fetchSolanaWallet(
 			false,
 		}
 
-		relatedAccounts, err := getSolanaRelatedAccounts(ctx, pool, walletId)
-		assert.NoErr(err, "unable to get solana related accounts")
-		for _, ra := range relatedAccounts {
-			accounts = append(accounts, solanaAccount{*ra, true})
+		const getSolanaRelatedAccounts = `
+			select address, latest_tx_id from solana_related_account where
+				wallet_id = $1
+		`
+		rows, err := pool.Query(ctx, getSolanaRelatedAccounts, walletId)
+		if err != nil {
+			return fmt.Errorf("unable to query solana related accounts: %w", err)
+		}
+
+		for rows.Next() {
+			var acc solanaRelatedAccount
+			if err := rows.Scan(&acc.Address, &acc.LatestTxId); err != nil {
+				return fmt.Errorf("unable to scan solana related accounts: %w", err)
+			}
+			accounts = append(accounts, solanaAccount{acc, true})
+		}
+
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("unable to read solana related accounts: %w", err)
 		}
 	}
 
 	accountsCount := 0
 	for len(accounts) > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		accountsCount += 1
 
 		acc := accounts[0]
@@ -505,7 +467,7 @@ func fetchSolanaWallet(
 			acc.Address, acc.related, acc.LatestTxId,
 		)
 
-		fetchSolanaAccount(
+		err := fetchSolanaAccount(
 			ctx,
 			pool,
 			rpc,
@@ -514,6 +476,9 @@ func fetchSolanaWallet(
 			walletId,
 			acc,
 		)
+		if err != nil {
+			return err
+		}
 		accounts = accounts[1:]
 	}
 
@@ -526,10 +491,11 @@ func fetchSolanaWallet(
 
 	for {
 		dups, err := getSolanaTxsWithDuplicateSlots(ctx, pool, LIMIT)
-		assert.NoErr(err, "")
+		if err != nil {
+			return fmt.Errorf("unable to get solana txs with duplicate slots: %w", err)
+		}
 
 		slots := make(map[int64][]string)
-
 		for _, tx := range dups {
 			signatures, ok := slots[tx.Slot]
 			if !ok {
@@ -543,27 +509,35 @@ func fetchSolanaWallet(
 		batch := pgx.Batch{}
 
 		for slot, signatures := range slots {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
 			res, err := rpc.GetBlockSignatures(uint64(slot), solana.CommitmentConfirmed)
-			assert.NoErr(err, "unable to get solana block signatures")
-			if res.Error != nil {
-				assert.True(
-					false,
-					"unable to get solana block signatures: %#v",
-					*res.Error,
-				)
+			if err != nil {
+				return err
 			}
 
 			for idx, s := range res.Result.Signatures {
 				exists := slices.Contains(signatures, s)
 				if exists {
-					q := enqueueUpdateTxBlockIndex(&batch, s, int32(idx))
-					q.Exec(func(_ pgconn.CommandTag) error { return nil })
+					const query = `
+						update tx set
+						data = data || jsonb_build_object('blockIndex', $1::integer)
+						where
+							id = $2
+					`
+					batch.Queue(query, int32(idx), s)
 				}
 			}
 		}
 
 		br := pool.SendBatch(ctx, &batch)
-		assert.NoErr(br.Close(), "unable to update tx block indexes")
+		if err := br.Close(); err != nil {
+			return fmt.Errorf("unable to update solana txs with duplicate slots: %w", err)
+		}
 
 		if len(dups) < LIMIT {
 			break
@@ -571,6 +545,7 @@ func fetchSolanaWallet(
 	}
 
 	logger.Info("Fetching done")
+	return nil
 }
 
 func fetchEvmWallet(
@@ -908,40 +883,35 @@ func fetchEvmWallet(
 		data, err := json.Marshal(tx.data)
 		assert.NoErr(err, "unable to marshal tx data")
 
-		q := enqueueInsertTx(
-			&batch,
-			hash,
-			network,
-			tx.err,
-			tx.data.From,
-			tx.data.From,
-			tx.timestamp,
-			data,
+		batch.Queue(
+			insertTransactionQuery,
+			// args
+			hash, network, tx.err, tx.data.From, tx.data.From,
+			tx.timestamp, data,
 		)
-		q.Exec(func(ct pgconn.CommandTag) error { return nil })
 	}
 
 	br := pool.SendBatch(ctx, &batch)
 	err = br.Close()
 	assert.NoErr(err, "unable to insert txs")
 
-	// TODO: should be a tx with the wallet data and some for solana
-	err = setUserTransactions(
-		ctx,
-		pool,
-		userAccountId,
-		hashes,
-		walletId,
-		pgtype.Text{},
+	batch = pgx.Batch{}
+	batch.Queue(
+		setUserTransactionQuery,
+		// args
+		userAccountId, hashes, walletId, pgtype.Text{},
 	)
+
+	newWalletDataMarshaled, err := json.Marshal(newWalletData)
 	assert.NoErr(err, "")
 
-	err = setWalletData(
-		ctx,
-		pool,
-		walletId,
-		newWalletData,
+	batch.Queue(
+		setWalletDataQuery,
+		// args
+		pool, newWalletDataMarshaled, walletId,
 	)
+	br = pool.SendBatch(ctx, &batch)
+	err = br.Close()
 	assert.NoErr(err, "")
 
 	// TODO: later can validate balances at the end of the block with
@@ -954,44 +924,41 @@ func fetchEvmWallet(
 func Fetch(
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	userAccountId int32,
-	walletAddress string,
-	network string,
 	solanaRpc *solana.Rpc,
 	etherscanClient *evm.Client,
+	//
+	userAccountId int32,
+	network db.Network,
+	walletAddress string,
+	walletId int32,
+	walletDataSerialized json.RawMessage,
+	//
 	fresh bool,
-) {
-	n, ok := db.NewNetwork(network)
-	assert.True(ok, "invalid network: %s", network)
-
+) error {
 	logger.Info("Starting fetch for user: %d", userAccountId)
-
-	walletId, walletData, err := db.SetWallet(
-		ctx,
-		pool,
-		userAccountId,
-		walletAddress,
-		n,
-	)
-	assert.NoErr(err, "")
 
 	// logger.Info(
 	// 	"Wallet: %s %s (fresh: %t walletId: %d latestTxId: \"%s\")",
 	// 	walletAddress, n, fresh, walletId, latestTxId.String,
 	// )
 
-	switch n {
-	case db.NetworkSolana:
-		wd, ok := walletData.(*db.SolanaWalletData)
-		assert.True(ok, "")
-
-		latestTxId := pgtype.Text{}
-		if wd.LatestTxId != "" {
-			latestTxId.Valid = true
-			latestTxId.String = wd.LatestTxId
+	switch {
+	case network == db.NetworkSolana:
+		var walletData db.SolanaWalletData
+		if err := json.Unmarshal(walletDataSerialized, &walletData); err != nil {
+			return fmt.Errorf(
+				"%w: invalid wallet data for solana: %w",
+				ERROR_INVALID_DATA, err,
+			)
 		}
 
-		fetchSolanaWallet(
+		latestTxId := pgtype.Text{}
+		if walletData.LatestTxId != "" {
+			latestTxId.Valid = true
+			latestTxId.String = walletData.LatestTxId
+		}
+
+		err := fetchSolanaWallet(
 			ctx,
 			pool,
 			solanaRpc,
@@ -1001,9 +968,17 @@ func Fetch(
 			latestTxId,
 			fresh,
 		)
-	case db.NetworkArbitrum, db.NetworkAvaxC, db.NetworkBsc, db.NetworkEthereum:
-		wd, ok := walletData.(*db.EvmWalletData)
-		assert.True(ok, "")
+		if err != nil {
+			return err
+		}
+	case network > db.NetworkEvmStart:
+		var walletData db.EvmWalletData
+		if err := json.Unmarshal(walletDataSerialized, &walletData); err != nil {
+			return fmt.Errorf(
+				"%w: invalid wallet data for EVM (%s): %w",
+				ERROR_INVALID_DATA, network.String(), err,
+			)
+		}
 
 		fetchEvmWallet(
 			ctx,
@@ -1012,8 +987,12 @@ func Fetch(
 			userAccountId,
 			walletId,
 			walletAddress,
-			n,
-			wd,
+			network,
+			&walletData,
 		)
+	default:
+		return fmt.Errorf("%w: invalid network", ERROR_INVALID_DATA)
 	}
+
+	return nil
 }

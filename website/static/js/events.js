@@ -23,7 +23,7 @@ async function sendSyncRequest(requestType) {
         )
         if (res.status != 200) {
             console.error(await res.text())
-            return
+            return null
         }
 
         const data = await res.text()

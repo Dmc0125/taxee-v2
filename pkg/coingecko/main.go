@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"sync"
 	"taxee/pkg/assert"
+	"taxee/pkg/logger"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -204,28 +205,76 @@ func (dst *OhlcCoinData) UnmarshalJSON(src []byte) error {
 	return nil
 }
 
+type MissingPricepointsRange struct {
+	TimestampFrom time.Time
+	TimestampTo   time.Time
+}
+
+func getMissingPricepoints(ohlc []*OhlcCoinData, from, to time.Time) []*MissingPricepointsRange {
+	missing := make([]*MissingPricepointsRange, 0)
+
+	if len(ohlc) == 0 {
+		missing = append(missing, &MissingPricepointsRange{
+			TimestampFrom: from,
+			TimestampTo:   to,
+		})
+	} else {
+		for i := 0; i < len(ohlc); i += 1 {
+			pp := ohlc[i]
+
+			if !pp.Timestamp.Equal(from) {
+				missing = append(missing, &MissingPricepointsRange{
+					TimestampFrom: from,
+					TimestampTo:   pp.Timestamp.Add(-time.Hour),
+				})
+			}
+
+			from = pp.Timestamp.Add(time.Hour)
+		}
+
+		if from != to.Add(time.Hour) {
+			missing = append(missing, &MissingPricepointsRange{
+				TimestampFrom: from,
+				TimestampTo:   to,
+			})
+		}
+	}
+
+	return missing
+}
+
 func GetCoinOhlc(
 	coinId string,
 	vsCurrency FiatCurrency,
 	from time.Time,
-) ([]*OhlcCoinData, time.Time, error) {
+) ([]*OhlcCoinData, []*MissingPricepointsRange, error) {
 	fromUnix := from.Unix()
 	toUnix := fromUnix + 60*60*24*31
 	if now := time.Now().Unix(); toUnix > now {
 		toUnix = now
 	}
 
-	endpoint := fmt.Sprintf(
-		"/coins/%s/ohlc/range?vs_currency=%s&from=%d&to=%d&interval=hourly&precision=full",
-		coinId,
-		vsCurrency,
-		fromUnix,
-		toUnix,
-	)
-	res := make([]*OhlcCoinData, 0)
-	err := sendRequest(endpoint, &res)
+	if apiType == "demo" {
+		logger.Warn("Ingoring get coin ohlc - demo api")
 
-	return res, time.Unix(toUnix, 0), err
+		res := make([]*OhlcCoinData, 0)
+		missing := getMissingPricepoints(res, from, time.Unix(toUnix, 0))
+
+		return res, missing, nil
+	} else {
+		endpoint := fmt.Sprintf(
+			"/coins/%s/ohlc/range?vs_currency=%s&from=%d&to=%d&interval=hourly&precision=full",
+			coinId,
+			vsCurrency,
+			fromUnix,
+			toUnix,
+		)
+		res := make([]*OhlcCoinData, 0)
+		err := sendRequest(endpoint, &res)
+		missing := getMissingPricepoints(res, from, time.Unix(toUnix, 0))
+
+		return res, missing, err
+	}
 }
 
 type CoinMetadata struct {

@@ -9,6 +9,7 @@ import (
 	rpcsolana "taxee/cmd/fetcher/solana"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
@@ -129,18 +130,18 @@ type EvmWalletData struct {
 	InternalTxsLatestBlockNumber uint64 `json:"internalTxsLatestBlockNumber,omitempty"`
 }
 
-func SetWallet(
+func DevSetWallet(
 	ctx context.Context,
 	pool *pgxpool.Pool,
 	userAccountId int32,
 	walletAddress string,
 	network Network,
-) (int32, any, error) {
+) (int32, []byte, error) {
 	const q = `
 		select
 			wallet_id, wallet_data
 		from
-			set_wallet($1, $2, $3)
+			dev_set_wallet($1, $2, $3)
 	`
 	row := pool.QueryRow(ctx, q, userAccountId, walletAddress, network)
 
@@ -150,24 +151,7 @@ func SetWallet(
 		return 0, nil, fmt.Errorf("unable to scan wallet: %w", err)
 	}
 
-	var data any
-
-	switch network {
-	case NetworkSolana:
-		var d SolanaWalletData
-		if err := json.Unmarshal(walletData, &d); err != nil {
-			return 0, nil, fmt.Errorf("unable to unmarshal solana wallet data: %w", err)
-		}
-		data = &d
-	case NetworkArbitrum, NetworkBsc, NetworkAvaxC, NetworkEthereum:
-		var d EvmWalletData
-		if err := json.Unmarshal(walletData, &d); err != nil {
-			return 0, nil, fmt.Errorf("unable to unmarshal evm wallet data: %w", err)
-		}
-		data = &d
-	}
-
-	return walletId, data, nil
+	return walletId, walletData, nil
 }
 
 type WalletRow struct {
@@ -206,6 +190,28 @@ func GetWallets(ctx context.Context, pool *pgxpool.Pool, userAccountId int32) ([
 	}
 
 	return res, nil
+}
+
+func DeleteWallet(batch *pgx.Batch, walletId, userAccountId int32) {
+	// NOTE: want to keep message with errors
+	const updateMessagesQuery = `
+		update parser_message set 
+			active = false,
+			wallet_id = null
+		where
+			wallet_id = $1 and user_account_id = $2
+	`
+	batch.Queue(updateMessagesQuery, walletId, userAccountId)
+
+	const deleteUserTransactionsQuery = `
+		call dev_delete_user_transactions($1, $2)
+	`
+	batch.Queue(deleteUserTransactionsQuery, userAccountId, walletId)
+	const deleteWalletQuery = `
+		delete from wallet where 
+			id = $1 and user_account_id = $2
+	`
+	batch.Queue(deleteWalletQuery, walletId, userAccountId)
 }
 
 type Uint8Array []byte

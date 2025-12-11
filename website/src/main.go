@@ -69,7 +69,18 @@ func loadTemplates(templates *template.Template, dirPath string) {
 			fileData, err := os.ReadFile(fileName)
 			assert.NoErr(err, fmt.Sprintf("unable to read html for: %s", fileName))
 
-			templates, err = templates.Parse(string(fileData))
+			// NOTE: replace new lines with space so we can send SSE updates
+			// without encoding
+			sb := strings.Builder{}
+			for _, c := range fileData {
+				if c != '\n' {
+					sb.WriteByte(c)
+				} else {
+					sb.WriteByte(' ')
+				}
+			}
+
+			templates, err = templates.Parse(sb.String())
 			assert.NoErr(err, fmt.Sprintf("unable to parse html for: %s", fileName))
 		}
 	}
@@ -212,8 +223,16 @@ func main() {
 		http.Redirect(w, r, "/static/favicon.ico", http.StatusMovedPermanently)
 	})
 	http.HandleFunc(
+		"/wallets",
+		walletsHandler(pool, templates),
+	)
+	http.HandleFunc(
 		"/events",
 		eventsHandler(context.Background(), pool, templates),
+	)
+	http.HandleFunc(
+		"/jobs",
+		jobsHandle(pool, templates),
 	)
 	http.HandleFunc(
 		"/sync_request",

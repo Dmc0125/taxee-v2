@@ -28,14 +28,56 @@ create table pricepoint (
 
 -- TODO: this probaly shouldnt be just for coingecko tokens, idk
 create table missing_pricepoint (
-    coingecko_id varchar primary key,
+    coingecko_id varchar not null,
     foreign key (coingecko_id) references coingecko_token_data (coingecko_id) on delete cascade,
-    
-    -- TODO: not sure if this can be like that, if there awould be missing prices
-    -- somewhere in the middle, it won't be possible to save that
+
     timestamp_from timestamptz not null,
-    timestamp_to timestamptz not null
+    timestamp_to timestamptz not null,
+
+    primary key (coingecko_id, timestamp_from, timestamp_to)
 );
+
+create procedure set_missing_pricepoint(
+    p_coingecko_id varchar,
+    p_timestamp_from timestamptz,
+    p_timestamp_to timestamptz
+)
+language plpgsql
+as $$
+declare
+    v_overlaps_found boolean := false;
+    v_min_from timestamptz := p_timestamp_from;
+    v_max_to timestamptz := p_timestamp_to;
+begin
+    select 
+        true,
+        least(min(timestamp_from), p_timestamp_from),
+        greatest(max(timestamp_to), p_timestamp_to)
+    into
+        v_overlaps_found, v_min_from, v_max_to
+    from
+        missing_pricepoint
+    where
+        coingecko_id = p_coingecko_id and not (
+            -- non overlapping
+            p_timestamp_from > timestamp_to or p_timestamp_to < timestamp_from
+        );
+
+    if v_overlaps_found then
+        delete from missing_pricepoint where 
+            coingecko_id = p_coingecko_id and not (
+                -- non overlapping
+                p_timestamp_from > timestamp_to or p_timestamp_to < timestamp_from
+            );
+    end if;
+
+    insert into missing_pricepoint (
+        coingecko_id, timestamp_from, timestamp_to
+    ) values (
+        p_coingecko_id, v_min_from, v_max_to
+    );
+end;
+$$;
 
 -- intermediary table for events errors and transactions
 --

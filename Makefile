@@ -12,5 +12,5 @@ migrate.%:
 parse:
 	go run cmd/main.go parse
 
-parser-server:
-	go run cmd/parser_server/main.go
+worker:
+	go run cmd/worker/main.go

@@ -10,14 +10,11 @@
             </a>
         </div>
 
-        <div 
-            id="table-nav-floating"
-            class="
+        <div id="table-nav-floating" class="
                 opacity-0 transition-opacity pointer-events-none
                 fixed bottom-4 right-4 flex items-center gap-8 py-2 px-4
                 bg-white border border-gray-200 rounded-lg shadow-xs z-100
-            "
-        >
+            ">
             {{ template "events_progress_indicator" .ProgressIndicator }}
             <a href="{{ .NextUrl }}" class="text-gray-800 link">
                 Next
@@ -49,10 +46,7 @@
                 </div>
             </div>
 
-            <ul 
-                id="events-table"
-                class="w-fit min-w-full mt-4 flex flex-col gap-y-4"
-            >
+            <ul id="events-table" class="w-fit min-w-full mt-4 flex flex-col gap-y-4">
                 {{ template "events_rows" .Rows }}
             </ul>
         </div>
@@ -62,77 +56,70 @@
 
 {{ define "events_rows" }}
 {{ range . }}
-    {{ if eq .Type 0 }}
-        <li class="w-full py-1 px-4 bg-crossed rounded-lg">
-            <span class="text-sm text-gray-800">{{ formatDate .Timestamp }}</span>
-        </li>
-    {{ else }}
-        <!-- Timestamp + explorer -->
-        <li class="w-full pl-4 grid grid-cols-[150px_1fr] gap-y-4">
-            <div class="flex flex-col col-[1/2]">
-                <a
-                    href="{{ .ExplorerUrl }}"
-                    target="_blank"
-                    class="text-gray-800 decoration-gray-400 link"
-                >{{ .TxId }}</a>
-                <span class="text-sm text-gray-700">{{ formatTime .Timestamp }}</span>
-            </div>
+{{ if eq .Type 0 }}
+<li class="w-full py-1 px-4 bg-crossed rounded-lg">
+    <span class="text-sm text-gray-800">{{ formatDate .Timestamp }}</span>
+</li>
+{{ else }}
+<!-- Timestamp + explorer -->
+<li class="w-full pl-4 grid grid-cols-[150px_1fr] gap-y-4">
+    <div class="flex flex-col col-[1/2]">
+        <a href="{{ .ExplorerUrl }}" target="_blank" class="text-gray-800 decoration-gray-400 link">{{ .TxId }}</a>
+        <span class="text-sm text-gray-700">{{ formatTime .Timestamp }}</span>
+    </div>
 
-            <!-- event data -->
-            
-            {{ if .Events }}
-                {{ range .Events }}
-                    <div class="
+    <!-- event data -->
+
+    {{ if .Events }}
+    {{ range .Events }}
+    <div class="
                         w-full col-[2/-1] border border-gray-200 rounded-lg
                     ">
-                        {{ template "event_component" . }}
-                    </div>
-                {{ end }}
-            {{ else }}
-                <div class="
+        {{ template "event_component" . }}
+    </div>
+    {{ end }}
+    {{ else }}
+    <div class="
                     w-full col-[2/-1] min-h-14 relative
                     flex items-center justify-center 
                     border border-gray-200 rounded-lg text-gray-600
                 ">
-                    {{ template "events_network_component" .NetworkImgUrl }}
+        {{ template "events_network_component" .NetworkImgUrl }}
 
-                    This transaction does not have any events	
-                </div>
-            {{ end }}
+        This transaction does not have any events
+    </div>
+    {{ end }}
 
-            {{ if .HasErrors }}
-                <div class="
+    {{ if .HasErrors }}
+    <div class="
                     w-full col-[2/-1] grid grid-cols-[repeat(2,1fr)]
                     border border-gray-200 rounded-lg 
                 ">
-                    {{ template "event_error_group_component" .PreprocessErrors }}
-                    {{ template "event_error_group_component" .ProcessErrors }}
-                </div>
-            {{ end }}
-        </li>
+        {{ template "event_error_group_component" .PreprocessErrors }}
+        {{ template "event_error_group_component" .ProcessErrors }}
+    </div>
     {{ end }}
+</li>
+{{ end }}
 {{ end }}
 {{ end }}
 
 {{ define "events_progress_indicator" }}
-<div 
-    id="progress-indicator" 
-    class="flex gap-2 items-center"
-    {{ if not .Done }}data-request-id="{{ .RequestId }}"{{ end }}
->
+<div id="progress-indicator" class="flex gap-2 items-center" {{ if not .Done }}data-request-id="{{ .RequestId }}" {{ end
+    }}>
     {{ if .Done }}
-        <svg class="w-5 h-5 text-green-800" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12c0 1.268-.63 2.39-1.593 3.068a3.745 3.745 0 0 1-1.043 3.296 3.745 3.745 0 0 1-3.296 1.043A3.745 3.745 0 0 1 12 21c-1.268 0-2.39-.63-3.068-1.593a3.746 3.746 0 0 1-3.296-1.043 3.745 3.745 0 0 1-1.043-3.296A3.745 3.745 0 0 1 3 12c0-1.268.63-2.39 1.593-3.068a3.745 3.745 0 0 1 1.043-3.296 3.746 3.746 0 0 1 3.296-1.043A3.746 3.746 0 0 1 12 3c1.268 0 2.39.63 3.068 1.593a3.746 3.746 0 0 1 3.296 1.043 3.746 3.746 0 0 1 1.043 3.296A3.745 3.745 0 0 1 21 12Z" />
-        </svg>
-        <span>All fetched</span>
+    <svg class="w-5 h-5 text-green-800" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+        stroke-width="1.5" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round"
+            d="M9 12.75 11.25 15 15 9.75M21 12c0 1.268-.63 2.39-1.593 3.068a3.745 3.745 0 0 1-1.043 3.296 3.745 3.745 0 0 1-3.296 1.043A3.745 3.745 0 0 1 12 21c-1.268 0-2.39-.63-3.068-1.593a3.746 3.746 0 0 1-3.296-1.043 3.745 3.745 0 0 1-1.043-3.296A3.745 3.745 0 0 1 3 12c0-1.268.63-2.39 1.593-3.068a3.745 3.745 0 0 1 1.043-3.296 3.746 3.746 0 0 1 3.296-1.043A3.746 3.746 0 0 1 12 3c1.268 0 2.39.63 3.068 1.593a3.746 3.746 0 0 1 3.296 1.043 3.746 3.746 0 0 1 1.043 3.296A3.745 3.745 0 0 1 21 12Z" />
+    </svg>
+    <span>All fetched</span>
     {{ else }}
-        <div 
-            class="
+    <div class="
                 w-5 h-5 animate-spin rounded-full 
                 border-2 border-b-transparent border-gray-600 text-gray-600
-            "
-        ></div>
-        <span>{{ .Status }}</span>
+            "></div>
+    <span>{{ .Status }}</span>
     {{ end }}
 </div>
 {{ end }}
@@ -142,112 +129,104 @@
 	w-6 h-6 p-0.5 absolute top-0 left-0 -translate-y-1/3 -translate-x-1/3
 	bg-gray-100 border border-gray-200 rounded-full
 ">
-	<img 
-		src="{{ . }}" 
-		class="w-full h-full"
-	/>
+    <img src="{{ . }}" class="w-full h-full" />
 </div>
 {{ end }}
 
 {{ define "event_component" }}
-    <button 
-        {{ if .SourcesUi }}
-            data-event-with-sources 
-        {{ end }}
-        id="{{ .Id }}" class="
+<button {{ if .SourcesUi }} data-event-with-sources {{ end }} id="{{ .Id }}" class="
             w-full px-4 py-2 grid grid-cols-[300px_repeat(2,minmax(350px,1fr))_150px] relative
-            {{ tern (0 | gt (len .SourcesUi)) "cursor-pointer" "" }}
-        "
+            {{ tern (0 | gt (len .SourcesUi)) " cursor-pointer" "" }} "
     >
         {{ if not .Native }}
-            {{ template "events_network_component" .NetworkImgUrl }}
-        {{ end }}
-
-        <!-- App img, network img, event type, onchain method -->
-        <div class="flex">
-            <div class="
+            {{ template " events_network_component" .NetworkImgUrl }} {{ end }} <!-- App img, network img, event type,
+    onchain method -->
+    <div class="flex">
+        <div class="
                 w-10 h-10 p-1 flex items-center justify-center 
                 rounded-full bg-gray-100 border border-gray-200 overflow-hidden
             ">
-                {{ if .AppImgUrl }}
-                    <img src="{{ .AppImgUrl }}" class="w-full aspect-square" />
-                {{ else }}
-                    <span class="text-gray-400 text-xl font-semibold">?</span>
-                {{ end }}
-            </div>
-
-            <div class="flex flex-col ml-4">
-                <span class="w-fit text-gray-800 font-medium">{{ toTitle .Method }}</span>
-                <span class="w-fit text-gray-600 text-sm">{{ toTitle .App }}</span>
-            </div>
+            {{ if .AppImgUrl }}
+            <img src="{{ .AppImgUrl }}" class="w-full aspect-square" />
+            {{ else }}
+            <span class="text-gray-400 text-xl font-semibold">?</span>
+            {{ end }}
         </div>
 
-        <!-- Outgoing -->
-        {{ template "event_transfers_component" .OutgoingTransfers }}
-
-        <!-- Incoming -->
-        {{ template "event_transfers_component" .IncomingTransfers }}
-
-        {{ if .Profits }}
-            <div class="w-full flex flex-col gap-y-1">
-                <div class="opacity-0 h-[1em] text-sm"></div>
-                <div class="mt-1">
-                    {{ range .Profits }}
-                        {{ template "event_fiat_amount_component" . }}
-                    {{ end }}
-                </div>
-            </div>
-        {{ else }}
-            <div class="w-full flex flex-col gap-y-1">
-                <div class="opacity-0 h-[1em] text-sm"></div>
-                <div class="w-fit mt-1">-</div>
-            </div>
-        {{ end }}
-    </button>
-
-    {{ if .SourcesUi }}
-        <div class="hidden w-full px-4 py-2 border-t border-gray-200">
-            <span class="text-sm text-gray-600">Sources</span>
-            <ul class="w-full mt-2 flex flex-col gap-2 [--grid-cols:3rem_7rem_repeat(5,1fr)]">
-                <li class="grid grid-cols-(--grid-cols) -mx-2 px-2 py-0.5 rounded-lg text-sm text-gray-800 bg-gray-100">
-                    <span></span>
-                    <span>Date</span>
-                    <span>Time</span>
-                    <span>Type</span>
-                    <span>Token</span>
-                    <span>Amount</span>
-                    <span>Used amount</span>
-                </li>
-                {{ range .SourcesUi }}
-                    {{ template "event_source_component" . }}
-                {{ end }}
-            </ul>
+        <div class="flex flex-col ml-4">
+            <span class="w-fit text-gray-800 font-medium">{{ toTitle .Method }}</span>
+            <span class="w-fit text-gray-600 text-sm">{{ toTitle .App }}</span>
         </div>
+    </div>
+
+    <!-- Outgoing -->
+    {{ template "event_transfers_component" .OutgoingTransfers }}
+
+    <!-- Incoming -->
+    {{ template "event_transfers_component" .IncomingTransfers }}
+
+    {{ if .Profits }}
+    <div class="w-full flex flex-col gap-y-1">
+        <div class="opacity-0 h-[1em] text-sm"></div>
+        <div class="mt-1">
+            {{ range .Profits }}
+            {{ template "event_fiat_amount_component" . }}
+            {{ end }}
+        </div>
+    </div>
+    {{ else }}
+    <div class="w-full flex flex-col gap-y-1">
+        <div class="opacity-0 h-[1em] text-sm"></div>
+        <div class="w-fit mt-1">-</div>
+    </div>
     {{ end }}
+</button>
 
-    {{ if .MissingBalances }}
-        <div class="w-full px-4 py-2 bg-red-100 rounded-b-[.45rem]">
-            {{ range .MissingBalances }}
-                <div class="flex items-center gap-2">
-                    <span class="
+{{ if .SourcesUi }}
+<div class="hidden w-full px-4 py-2 border-t border-gray-200">
+    <span class="text-sm text-gray-600">Sources</span>
+    <ul class="w-full mt-2 flex flex-col gap-2 [--grid-cols:3rem_7rem_repeat(5,1fr)]">
+        <li class="grid grid-cols-(--grid-cols) -mx-2 px-2 py-0.5 rounded-lg text-sm text-gray-800 bg-gray-100">
+            <span></span>
+            <span>Date</span>
+            <span>Time</span>
+            <span>Type</span>
+            <span>Token</span>
+            <span>Amount</span>
+            <span>Used amount</span>
+        </li>
+        {{ range .SourcesUi }}
+        {{ template "event_source_component" . }}
+        {{ end }}
+    </ul>
+</div>
+{{ end }}
+
+{{ if .MissingBalances }}
+<div class="w-full px-4 py-2 bg-red-100 rounded-b-[.45rem]">
+    {{ range .MissingBalances }}
+    <div class="flex items-center gap-2">
+        <span class="
                         w-4 h-4 rounded-full text-xs bg-red-700/20 text-red-700
                         flex items-center justify-center flex-shrink-0
                     ">!</span>
-                    <span class="text-gray-700 text-sm flex items-center gap-2">
-                        Missing balance
-                        {{ template "event_token_amount_component" . }}
-                    </span>
-                </div>
-            {{ end }}
-        </div>
+        <span class="text-gray-700 text-sm flex items-center gap-2">
+            Missing balance
+            {{ template "event_token_amount_component" . }}
+        </span>
+    </div>
     {{ end }}
+</div>
+{{ end }}
 {{ end }}
 
 {{ define "event_source_component" }}
 <li class="grid grid-cols-(--grid-cols) text-gray-700 text-sm">
     <a href="/events?id={{ .EventId }}" target="_blank">
-        <svg class="size-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
+        <svg class="size-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
+            stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round"
+                d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
         </svg>
     </a>
     <span>{{ formatDate .Timestamp }}</span>
@@ -265,173 +244,168 @@
 {{ define "event_error_group_component" }}
 <div class="
     w-full p-4 border-gray-200 flex flex-col
-    {{ tern (.Type | eq 0) "border-r" "" }}
-">
-    <span class="text-gray-600 text-sm">
-        {{ if eq .Type 0 }}
-            Preprocess
-        {{ else }}
-            Process
-        {{ end }}
-        errors
+    {{ tern (.Type | eq 0) " border-r" "" }} ">
+    <span class=" text-gray-600 text-sm">
+    {{ if eq .Type 0 }}
+    Preprocess
+    {{ else }}
+    Process
+    {{ end }}
+    errors
     </span>
 
     {{ if not .Empty }}
-        {{ $groupHeader := "-mx-2 px-2 py-0.5 text-sm text-gray-800 bg-red-100 rounded-lg" }}
-        <ul class="mt-2 flex flex-col gap-3">
-            {{ if .MissingSwapTransfers }}
-                <li class="{{ $groupHeader }}">
-                    Missing accounts
-                </li>
+    {{ $groupHeader := "-mx-2 px-2 py-0.5 text-sm text-gray-800 bg-red-100 rounded-lg" }}
+    <ul class="mt-2 flex flex-col gap-3">
+        {{ if .MissingSwapTransfers }}
+        <li class="{{ $groupHeader }}">
+            Missing accounts
+        </li>
 
-                {{ range .MissingSwapTransfers }}
-                    <li class="text-sm text-gray-700 flex items-center justify-between gap-2">
-                        <span class="hoverable flex items-center justify-center gap-2">
-                            <span class="
+        {{ range .MissingSwapTransfers }}
+        <li class="text-sm text-gray-700 flex items-center justify-between gap-2">
+            <span class="hoverable flex items-center justify-center gap-2">
+                <span class="
                                 size-5 text-sm rounded-full text-orange-500 bg-orange-200/40
                                 flex items-center justify-center
                                 ">i</span>
-                            Missing transfers for swap
+                Missing transfers for swap
 
-                            <div class="floating w-[300px]! text-wrap!">
-                                This instruction was supposed to be a swap but incoming or
-                                outgoing transfer(s) are missing. The reason is most likely
-                                that some token account is not being parsed properly prior to
-                                this instruction.
-                            </div>
-                        </span>
-                        <span class="flex-shrink-0">Ix: {{ . }}</span>
-                    </li>
+                <div class="floating w-[300px]! text-wrap!">
+                    This instruction was supposed to be a swap but incoming or
+                    outgoing transfer(s) are missing. The reason is most likely
+                    that some token account is not being parsed properly prior to
+                    this instruction.
+                </div>
+            </span>
+            <span class="flex-shrink-0">Ix: {{ . }}</span>
+        </li>
+        {{ end }}
+        {{ end }}
+
+        {{ if .MissingAccounts }}
+        <li class="{{ $groupHeader }}">
+            Missing accounts
+        </li>
+
+        {{ range .MissingAccounts }}
+        <li class="text-sm text-gray-700 flex items-center justify-between">
+            <span>{{ shorten .Account 4 4 }}</span>
+            <span>Ix: {{ .IxIdx }}</span>
+        </li>
+        {{ end }}
+        {{ end }}
+
+        {{ if .BalanceMismatches }}
+        <li class="{{ $groupHeader }} grid grid-cols-[20%_20%_2fr_1fr_1fr]">
+            <span class="col-[1/4]">Balance mismatches</span>
+            <span class="text-gray-600">Local</span>
+            <span class="text-gray-600">External</span>
+        </li>
+
+        {{ range .BalanceMismatches }}
+        <li class="text-sm text-gray-700 grid grid-cols-[20%_20%_2fr_1fr_1fr]">
+            <span>{{ shorten .Wallet 4 4 }}</span>
+            <span>{{ shorten .Account 4 4 }}</span>
+            <span class="flex gap-2 items-center">
+                {{ template "event_token_img" .ImgData }}
+                {{ upper .Token }}
+            </span>
+            <span class="w-fit hoverable">
+                {{ if .LocalZero }}
+                -
+                {{ else }}
+                {{ .LocalAmount }}
+                <div class="floating">
+                    {{ .LocalAmountLong }}
+                </div>
                 {{ end }}
-            {{ end }}
-
-            {{ if .MissingAccounts }}
-                <li class="{{ $groupHeader }}">
-                    Missing accounts
-                </li>
-
-                {{ range .MissingAccounts }}
-                    <li class="text-sm text-gray-700 flex items-center justify-between">
-                        <span>{{ shorten .Account 4 4 }}</span>
-                        <span>Ix: {{ .IxIdx }}</span>
-                    </li>
+            </span>
+            <span class="w-fit hoverable">
+                {{ if .ExternalZero }}
+                -
+                {{ else }}
+                {{ .ExternalAmount }}
+                <div class="floating">
+                    {{ .ExternalAmountLong }}
+                </div>
                 {{ end }}
-            {{ end }}
+            </span>
+        </li>
+        {{ end }}
+        {{ end }}
 
-            {{ if .BalanceMismatches }}
-                <li class="{{ $groupHeader }} grid grid-cols-[20%_20%_2fr_1fr_1fr]">
-                    <span class="col-[1/4]">Balance mismatches</span>
-                    <span class="text-gray-600">Local</span>
-                    <span class="text-gray-600">External</span>
-                </li>
-                
-                {{ range .BalanceMismatches }}
-                    <li class="text-sm text-gray-700 grid grid-cols-[20%_20%_2fr_1fr_1fr]">
-                        <span>{{ shorten .Wallet 4 4 }}</span>
-                        <span>{{ shorten .Account 4 4 }}</span>
-                        <span class="flex gap-2 items-center">
-                            {{ template "event_token_img" .ImgData }}
-                            {{ upper .Token }}
-                        </span>
-                        <span class="w-fit hoverable">
-                            {{ if .LocalZero }}
-                                -
-                            {{ else }}
-                                {{ .LocalAmount }}
-                                <div class="floating">
-                                    {{ .LocalAmountLong }}
-                                </div>
-                            {{ end }}
-                        </span>
-                        <span class="w-fit hoverable">
-                            {{ if .ExternalZero }}
-                                -
-                            {{ else }}
-                                {{ .ExternalAmount }}
-                                <div class="floating">
-                                    {{ .ExternalAmountLong }}
-                                </div>
-                            {{ end }}
-                        </span>
-                    </li>
-                {{ end }}
-            {{ end }}
+        {{ if .DataMismatches }}
+        <li class="{{ $groupHeader }}">
+            Data mismatches
+        </li>
 
-            {{ if .DataMismatches }}
-                <li class="{{ $groupHeader }}">
-                    Data mismatches
-                </li>
-
-                {{ range .DataMismatches }}
-                    <li class="text-sm text-gray-700 grid grid-cols-[20%_20%_1fr_auto]">
-                        <span>{{ shorten .Wallet 4 4 }}</span>
-                        <span>{{ shorten .Account 4 4 }}</span>
-                        <span>{{ .Message }}</span>
-                        <span>Ix: {{ .IxIdx }}</span>
-                    </li>
-                {{ end }}
-            {{ end }}
-        </ul>
+        {{ range .DataMismatches }}
+        <li class="text-sm text-gray-700 grid grid-cols-[20%_20%_1fr_auto]">
+            <span>{{ shorten .Wallet 4 4 }}</span>
+            <span>{{ shorten .Account 4 4 }}</span>
+            <span>{{ .Message }}</span>
+            <span>Ix: {{ .IxIdx }}</span>
+        </li>
+        {{ end }}
+        {{ end }}
+    </ul>
     {{ else }}
-        <div class="w-full mt-2 text-gray-600 text-sm flex-grow flex items-center justify-center">
-            No errors of this kind
-        </div>
+    <div class="w-full mt-2 text-gray-600 text-sm flex-grow flex items-center justify-center">
+        No errors of this kind
+    </div>
     {{ end }}
 </div>
 {{ end }}
 
 {{ define "event_transfers_component" }}
 <div class="w-full flex flex-col gap-y-1">
-	<div class="w-fit text-sm h-[1em]">
-		<span class="text-left text-gray-500 font-medium">
-			{{ if . }}
-                {{ .Wallet }}
-			{{ end }}
-		</span>
-	</div>
+    <div class="w-fit text-sm h-[1em]">
+        <span class="text-left text-gray-500 font-medium">
+            {{ if . }}
+            {{ .Wallet }}
+            {{ end }}
+        </span>
+    </div>
 
-	<div class="flex items-center mt-1">
-		<!-- Token amounts -->
-		<div class="w-1/2">
-			{{ if and . .Tokens }}
-				{{ range .Tokens }}
-					{{ template "event_token_amount_component" . }}
-				{{ end }}
-			{{ else }}
-				<div class="w-fit text-sm">-</div>
-			{{ end }}
-		</div>
+    <div class="flex items-center mt-1">
+        <!-- Token amounts -->
+        <div class="w-1/2">
+            {{ if and . .Tokens }}
+            {{ range .Tokens }}
+            {{ template "event_token_amount_component" . }}
+            {{ end }}
+            {{ else }}
+            <div class="w-fit text-sm">-</div>
+            {{ end }}
+        </div>
 
-		<!-- Fiat amounts -->
-		<div>
-			{{ if . }}
-				{{ range .Fiats }}
-					{{ template "event_fiat_amount_component" . }}
-				{{ end }}
-			{{ else }}
-				<div class="w-fit text-sm">-</div>
-			{{ end }}
-		</div>
-	</div>
+        <!-- Fiat amounts -->
+        <div>
+            {{ if . }}
+            {{ range .Fiats }}
+            {{ template "event_fiat_amount_component" . }}
+            {{ end }}
+            {{ else }}
+            <div class="w-fit text-sm">-</div>
+            {{ end }}
+        </div>
+    </div>
 </div>
 {{ end }}
 
 {{ define "event_token_img" }}
-<div 
-    class="w-5 h-5 rounded-sm overflow-hidden"
-    {{ if (not .ImgUrl) | and .CoingeckoId }}
-    data-coingecko-id="{{ .CoingeckoId }}"
-    {{ end }}
->
+<div class="w-5 h-5 rounded-sm overflow-hidden" {{ if (not .ImgUrl) | and .CoingeckoId }}
+    data-coingecko-id="{{ .CoingeckoId }}" {{ end }}>
     {{ if .ImgUrl }}
-        <img src="{{ .ImgUrl }}" class="w-5 h-5" />
+    <img src="{{ .ImgUrl }}" class="w-5 h-5" />
     {{ else }}
-        <div class="
+    <div class="
             w-full h-full flex items-center justify-center
             text-sm text-gray-600 bg-gray-200
         ">
-            ?
-        </div>
+        ?
+    </div>
     {{ end }}
 </div>
 {{ end }}
@@ -440,9 +414,7 @@
 <div class="w-fit flex items-center gap-2 relative">
     {{ template "event_token_img" .ImgData }}
 
-	<span
-        class="text-gray-800 text-sm hoverable"
-    >
+    <span class="text-gray-800 text-sm hoverable">
         {{ .Amount }} {{ upper .Symbol }}
         <div class="flex-col floating">
             <span class="text-gray-500 text-xs font-semibold">Account</span>
@@ -456,35 +428,32 @@
 
 {{ define "event_fiat_amount_component" }}
 <div class="h-5 flex items-center gap-x-2 relative">
-{{ if .Zero }}
-	{{ if .Missing }}
-		<div class="w-full flex items-center gap-x-1">
-			<span class="
+    {{ if .Zero }}
+    {{ if .Missing }}
+    <div class="w-full flex items-center gap-x-1">
+        <span class="
 				w-4 h-4 rounded-full text-xs bg-red-700/20 text-red-700
 				flex items-center justify-center flex-shrink-0
 			">!</span>
-			<span class="
+        <span class="
 				w-full px-2 py-1 text-sm text-red-800
 			">Missing price</span>
-		</div>
-	{{ else }}
-		<span class="text-gray-800 text-sm">-</span>
-	{{ end }}
-{{ else }}
-	<span class="
+    </div>
+    {{ else }}
+    <span class="text-gray-800 text-sm">-</span>
+    {{ end }}
+    {{ else }}
+    <span class="
 		text-sm hoverable
-		{{ tern (eq .Sign 0) "text-gray-800" (eq .Sign -1) "text-red-800" "text-green-800" }}
-	">
+		{{ tern (eq .Sign 0) " text-gray-800" (eq .Sign -1) "text-red-800" "text-green-800" }} ">
         {{ .Amount }} {{ upper .Currency }}
         {{ if not .IsProfit }}
-            <div class="flex-col floating">
-                <span class="text-gray-500 text-xs font-semibold">Price</span>
-                {{ .Price }} {{ upper .Currency }}
-            </div>
-        {{ end }}
-    </span>
+            <div class=" flex-col floating">
+        <span class="text-gray-500 text-xs font-semibold">Price</span>
+        {{ .Price }} {{ upper .Currency }}
+</div>
+{{ end }}
+</span>
 {{ end }}
 </div>
 {{ end }}
-
-

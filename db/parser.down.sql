@@ -10,6 +10,8 @@ drop table event;
 
 drop table internal_tx;
 
+drop procedure set_missing_pricepoint;
+
 drop table missing_pricepoint;
 
 drop table pricepoint;

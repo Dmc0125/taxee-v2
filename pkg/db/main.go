@@ -6,6 +6,7 @@ import (
 	"os"
 	"taxee/pkg/assert"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -55,4 +56,22 @@ func InitPool(ctx context.Context, appEnv string) (*pgxpool.Pool, error) {
 	)
 
 	return pool, err
+}
+
+func ExecuteTx(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	f func(ctx context.Context, tx pgx.Tx) error,
+) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+
+	if err := f(ctx, tx); err != nil {
+		tx.Rollback(ctx)
+		return err
+	}
+
+	return tx.Commit(ctx)
 }
