@@ -185,15 +185,26 @@ func jobsHandle(pool *pgxpool.Pool, templates *template.Template) http.HandlerFu
 
 				const setJobAsQueuedQuery = `
 					update worker_job set
-						status = 0
+						status = 0,
+						data = data || (
+							case
+								when (status = $3 or status = $4) then '{"fresh": true}'::jsonb 
+								else '{"fresh": false}'::jsonb
+							end
+						)
 					where
 						id = $1 and 
 						user_account_id = $2 and
-						(status = 1 or status = 2 or status = 3 or status = 5)
+						status = any($5)
 					returning
 						type, data
 				`
-				row := tx.QueryRow(r.Context(), setJobAsQueuedQuery, jobId, userAccountId)
+				row := tx.QueryRow(
+					r.Context(), setJobAsQueuedQuery,
+					jobId, userAccountId,
+					db.WorkerJobCanceled, db.WorkerJobError,
+					[]uint8{db.WorkerJobSuccess, db.WorkerJobError, db.WorkerJobCanceled},
+				)
 				var jobType uint8
 				var dataSerialized json.RawMessage
 				if err := row.Scan(&jobType, &dataSerialized); err != nil {
@@ -307,7 +318,7 @@ func jobsHandle(pool *pgxpool.Pool, templates *template.Template) http.HandlerFu
 					))
 					w.Write(html)
 				case db.WorkerJobInProgress:
-					w.Header().Add("location", fmt.Sprintf("/job/%s", jobId))
+					w.Header().Add("location", fmt.Sprintf("/jobs?id=%s", jobId))
 					w.WriteHeader(202)
 				}
 			default:

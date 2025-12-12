@@ -43,6 +43,7 @@ func tryWalletFetch(
 	}
 	defer tx.Rollback(context.Background())
 
+	// TODO: there is a bug where this starts fethching when wallet is scheduled for delete
 	const consumeQueuedJobQuery = `
 		update worker_job set
 			status = 1

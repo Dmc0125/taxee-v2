@@ -413,7 +413,7 @@ func fetchSolanaWallet(
 			false,
 		}
 
-		const deleteUserTransactionsQuery = "call dev_delete_user_transactions($1, $2)"
+		const deleteUserTransactionsQuery = "call delete_user_transactions($1, $2)"
 		if _, err := pool.Exec(
 			ctx, deleteUserTransactionsQuery,
 			userAccountId, walletId,

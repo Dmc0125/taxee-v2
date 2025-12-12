@@ -42,10 +42,11 @@ type walletComponent struct {
 	NetworkImgUrl string
 	Id            int32
 	Status        uint8
-	ShowFetch     bool
 	Insert        bool
 	JobId         string
-	SseUrl        string
+
+	ShowFetch  bool
+	ShowSseUrl bool
 }
 
 func newWalletComponent(
@@ -70,12 +71,28 @@ func newWalletComponent(
 	case db.WorkerJobSuccess, db.WorkerJobError, db.WorkerJobCanceled:
 		walletData.ShowFetch = true
 	case db.WorkerJobQueued, db.WorkerJobInProgress:
-		walletData.SseUrl = fmt.Sprintf("/jobs?id=%s", jobId.String())
+		walletData.ShowSseUrl = true
 
 		// TODO: schduled cancel
 	}
 
 	return walletData
+}
+
+type walletsComponent struct {
+	WalletsCount int
+	Wallets      []*walletComponent
+}
+
+func newResponseHtml(fragments ...[]byte) []byte {
+	var sum []byte
+	for i, f := range fragments {
+		sum = append(sum, f...)
+		if i < len(fragments)-1 {
+			sum = append(sum, []byte("<!--delimiter-->")...)
+		}
+	}
+	return sum
 }
 
 func walletsHandler(
@@ -266,10 +283,16 @@ func walletsHandler(
 
 			var html []byte
 			if walletsCount == 1 {
-				html = executeTemplateMust(templates, "wallets_table", []walletComponent{walletData})
+				html = executeTemplateMust(templates, "wallets", walletsComponent{
+					WalletsCount: 1,
+					Wallets:      []*walletComponent{&walletData},
+				})
 			} else {
 				walletData.Insert = true
-				html = executeTemplateMust(templates, "wallet", walletData)
+				html = newResponseHtml(
+					executeTemplateMust(templates, "wallet", walletData),
+					executeTemplateMust(templates, "wallets_count", walletsCount),
+				)
 			}
 
 			w.Header().Add("location", fmt.Sprintf("/jobs?id=%s", jobId.String()))
@@ -337,7 +360,12 @@ func walletsHandler(
 				return
 			}
 
-			walletsPageContent := executeTemplateMust(templates, "wallets_page", walletsRows)
+			walletsPage := walletsComponent{
+				WalletsCount: len(walletsRows),
+				Wallets:      walletsRows,
+			}
+
+			walletsPageContent := executeTemplateMust(templates, "wallets_page", walletsPage)
 
 			page := executeTemplateMust(templates, "dashboard_layout", pageLayoutComponentData{
 				Content: template.HTML(walletsPageContent),
@@ -408,7 +436,9 @@ func walletsHandler(
 
 			var html []byte
 			if walletsCount == 0 {
-				html = executeTemplateMust(templates, "wallets_table", nil)
+				html = executeTemplateMust(templates, "wallets", walletsComponent{})
+			} else {
+				html = executeTemplateMust(templates, "wallets_count", walletsCount)
 			}
 
 			w.WriteHeader(200)
