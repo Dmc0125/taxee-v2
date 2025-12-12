@@ -72,8 +72,6 @@ func newWalletComponent(
 		walletData.ShowFetch = true
 	case db.WorkerJobQueued, db.WorkerJobInProgress:
 		walletData.ShowSseUrl = true
-
-		// TODO: schduled cancel
 	}
 
 	return walletData
@@ -407,18 +405,26 @@ func walletsHandler(
 				return row.Scan(&walletsCount)
 			})
 
-			// TODO: maybe return wallet with canceled state if this sets anything ?
+			// NOTE: it's not actually needed to set as cancelled in in queue,
+			// because worker checks for scheduled delete
 			const setJobScheduledForCancelQuery = `
 				update worker_job set
-					status = $1::smallint
+					status = (
+						case
+							when status = $2::smallint then $3::smallint
+							when status = $4::smallint then $5::smallint
+						end
+					)
 				where
-					type = 0 and 
-					(data->>'walletId')::integer = $2 and
-					status = $3::smallint
+					type = 0 and
+					(data->>'walletId')::integer = $1 and
+					(status = $2::smallint or status = $4::smallint)
 			`
 			batch.Queue(
 				setJobScheduledForCancelQuery,
-				db.WorkerJobCancelScheduled, walletId, db.WorkerJobInProgress,
+				walletId,
+				db.WorkerJobQueued, db.WorkerJobCanceled,
+				db.WorkerJobInProgress, db.WorkerJobCancelScheduled,
 			)
 
 			br := tx.SendBatch(r.Context(), &batch)

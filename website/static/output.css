@@ -9,7 +9,6 @@
       "Courier New", monospace;
     --color-red-100: oklch(93.6% 0.032 17.717);
     --color-red-300: oklch(80.8% 0.114 19.571);
-    --color-red-500: oklch(63.7% 0.237 25.331);
     --color-red-700: oklch(50.5% 0.213 27.518);
     --color-red-800: oklch(44.4% 0.177 26.899);
     --color-orange-200: oklch(90.1% 0.076 70.697);
@@ -521,21 +520,6 @@
   .bg-gray-200 {
     background-color: var(--color-gray-200);
   }
-  .bg-gray-800 {
-    background-color: var(--color-gray-800);
-  }
-  .bg-gray-800\/20 {
-    background-color: color-mix(in srgb, oklch(27.8% 0.033 256.848) 20%, transparent);
-    @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--color-gray-800) 20%, transparent);
-    }
-  }
-  .bg-gray-800\/50 {
-    background-color: color-mix(in srgb, oklch(27.8% 0.033 256.848) 50%, transparent);
-    @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--color-gray-800) 50%, transparent);
-    }
-  }
   .bg-orange-200\/40 {
     background-color: color-mix(in srgb, oklch(90.1% 0.076 70.697) 40%, transparent);
     @supports (color: color-mix(in lab, red, red)) {
@@ -680,9 +664,6 @@
   .\[--grid-cols\:3rem_7rem_repeat\(5\,1fr\)\] {
     --grid-cols: 3rem 7rem repeat(5,1fr);
   }
-  .\[--loading-width\:calc\(100\%\)\] {
-    --loading-width: calc(100%);
-  }
   .hover\:cursor-pointer {
     &:hover {
       @media (hover: hover) {
@@ -704,21 +685,9 @@
       }
     }
   }
-  .hover\:bg-gray-400 {
-    &:hover {
-      @media (hover: hover) {
-        background-color: var(--color-gray-400);
-      }
-    }
-  }
   .disabled\:pointer-events-none {
     &:disabled {
       pointer-events: none;
-    }
-  }
-  .disabled\:border-gray-200 {
-    &:disabled {
-      border-color: var(--color-gray-200);
     }
   }
   .disabled\:border-red-100 {
@@ -739,11 +708,6 @@
   .disabled\:text-gray-400 {
     &:disabled {
       color: var(--color-gray-400);
-    }
-  }
-  .disabled\:opacity-50 {
-    &:disabled {
-      opacity: 50%;
     }
   }
 }

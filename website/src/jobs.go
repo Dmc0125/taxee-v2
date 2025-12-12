@@ -301,26 +301,28 @@ func jobsHandle(pool *pgxpool.Pool, templates *template.Template) http.HandlerFu
 
 				switch oldStatus {
 				case db.WorkerJobQueued:
-					var data db.WorkerJobFetchWalletData
-					if err := json.Unmarshal(dataSerialized, &data); err != nil {
-						w.WriteHeader(500)
-						w.Write(fmt.Appendf(nil, "unable to unmarshal data: %s", err))
-						return
-					}
-
 					w.WriteHeader(200)
-					html := executeTemplateMust(templates, "wallet", newWalletComponent(
-						data.WalletAddress,
-						data.WalletId,
-						data.Network,
-						db.WorkerJobCanceled,
-						jobId,
-					))
-					w.Write(html)
 				case db.WorkerJobInProgress:
 					w.Header().Add("location", fmt.Sprintf("/jobs?id=%s", jobId))
 					w.WriteHeader(202)
 				}
+
+				var data db.WorkerJobFetchWalletData
+				if err := json.Unmarshal(dataSerialized, &data); err != nil {
+					w.WriteHeader(500)
+					w.Write(fmt.Appendf(nil, "unable to unmarshal data: %s", err))
+					return
+				}
+
+				html := executeTemplateMust(templates, "wallet", newWalletComponent(
+					data.WalletAddress,
+					data.WalletId,
+					data.Network,
+					db.WorkerJobCanceled,
+					jobId,
+				))
+				w.Write(html)
+
 			default:
 				w.WriteHeader(400)
 			}

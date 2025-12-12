@@ -36,53 +36,49 @@ func tryWalletFetch(
 	state.runningFetchWallets.Add(1)
 	defer state.runningFetchWallets.Store(state.runningFetchWallets.Load() - 1)
 
-	tx, err := pool.Begin(context.Background())
-	if err != nil {
-		logger.Error("unable to begin tx: %s", err.Error())
-		return
-	}
-	defer tx.Rollback(context.Background())
-
-	// TODO: there is a bug where this starts fethching when wallet is scheduled for delete
 	const consumeQueuedJobQuery = `
-		update worker_job set
-			status = 1
+		update worker_job wj set
+			status = $1
+		from
+			wallet w
 		where
-			status = 0 and
-			type = 0
+			wj.status = $2 and
+			wj.type = 0 and
+			w.id = (wj.data->>'walletId')::integer and
+			w.delete_scheduled = false
 		returning
-			id, data, user_account_id
+			wj.id, 
+			wj.user_account_id, 
+			(wj.data->>'fresh')::boolean, 
+			(wj.data->>'walletId')::integer, 
+			(wj.data->>'walletAddress')::varchar, 
+			w.data,
+			w.network
 	`
-	row := tx.QueryRow(context.Background(), consumeQueuedJobQuery)
+	row := pool.QueryRow(
+		context.Background(), consumeQueuedJobQuery,
+		db.WorkerJobInProgress, db.WorkerJobQueued,
+	)
 
-	var jobId uuid.UUID
-	var userAccountId int32
-	var dataSerialized json.RawMessage
-	if err := row.Scan(&jobId, &dataSerialized, &userAccountId); err != nil {
+	var (
+		jobId                uuid.UUID
+		userAccountId        int32
+		fresh                bool
+		walletId             int32
+		walletAddress        string
+		walletDataSerialized json.RawMessage
+		network              db.Network
+	)
+
+	if err := row.Scan(
+		&jobId, &userAccountId,
+		&fresh, &walletId, &walletAddress,
+		&walletDataSerialized, &network,
+	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return
 		}
 		logger.Error("unable to consume queued job: %s", err.Error())
-		return
-	}
-
-	// TODO: validate data
-	var data db.WorkerJobFetchWalletData
-	if err := json.Unmarshal(dataSerialized, &data); err != nil {
-		logger.Error("unable to unmarshal job data: %s", err.Error())
-		return
-	}
-
-	const selectWalletDataQuery = "select data from wallet where id = $1"
-	var walletDataSerialized json.RawMessage
-	row = tx.QueryRow(context.Background(), selectWalletDataQuery, data.WalletId)
-	if err := row.Scan(&walletDataSerialized); err != nil {
-		logger.Error("unable to select wallet: %s", err.Error())
-		return
-	}
-
-	if err = tx.Commit(context.Background()); err != nil {
-		logger.Error("unable to commit: %s", err.Error())
 		return
 	}
 
@@ -94,8 +90,8 @@ func tryWalletFetch(
 	errgroup.Go(func() error {
 		err := fetcher.Fetch(
 			fetchCtx, pool, solanaRpc, evmClient,
-			userAccountId, data.Network, data.WalletAddress, data.WalletId,
-			walletDataSerialized, data.Fresh,
+			userAccountId, network, walletAddress, walletId,
+			walletDataSerialized, fresh,
 		)
 		groupCtxCancel()
 		return err
@@ -114,11 +110,11 @@ func tryWalletFetch(
 
 			const selectJobScheduledForCancelQuery = `
 				select 1 from worker_job where
-					id = $1 and status = 4 
+					id = $1 and status = $2
 			`
 			tag, err := pool.Exec(
 				context.Background(), selectJobScheduledForCancelQuery,
-				jobId,
+				jobId, db.WorkerJobCancelScheduled,
 			)
 			if err != nil {
 				// NOTE: should this return an error and cancel the process ?
@@ -134,7 +130,7 @@ func tryWalletFetch(
 		}
 	})
 
-	err = errgroup.Wait()
+	err := errgroup.Wait()
 
 	const updateWorkerJobQuery = `
 		update worker_job set
