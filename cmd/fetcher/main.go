@@ -43,11 +43,11 @@ const insertTransactionQuery string = `
 	) on conflict (id) do nothing
 `
 
-// setUserTransactionQuery
+// setTransactionsForWallet
 //
-//	call set_user_transactions($1, $2, $3, $4)
-const setUserTransactionQuery string = `
-	call set_user_transactions($1, $2, $3, $4)
+//	call set_transactions_for_wallet($1, $2, $3)
+const setTransactionsForWallet string = `
+	call set_transactions_for_wallet($1, $2, $3)
 `
 
 // setWalletDataQuery
@@ -284,12 +284,22 @@ func fetchSolanaAccount(
 				return fmt.Errorf("unable to insert transactions batch: %w", err)
 			}
 
-			_, err = pool.Exec(
-				ctx, setUserTransactionQuery,
-				userAccountId, txIds, walletId, relatedAccountAddress,
-			)
-			if err != nil {
-				return fmt.Errorf("unable to set user transactions: %w", err)
+			if relatedAccountAddress.Valid {
+				_, err := pool.Exec(
+					ctx, "call set_transactions_for_related_account($1, $2, $3, $4)",
+					userAccountId, txIds, walletId, relatedAccountAddress,
+				)
+				if err != nil {
+					return fmt.Errorf("unable to transactions for related account: %w", err)
+				}
+			} else {
+				_, err := pool.Exec(
+					ctx, setTransactionsForWallet,
+					userAccountId, txIds, walletId,
+				)
+				if err != nil {
+					return fmt.Errorf("unable to transactions for wallet: %w", err)
+				}
 			}
 		}
 
@@ -413,12 +423,27 @@ func fetchSolanaWallet(
 			false,
 		}
 
-		const deleteUserTransactionsQuery = "call delete_user_transactions($1, $2)"
-		if _, err := pool.Exec(
-			ctx, deleteUserTransactionsQuery,
-			userAccountId, walletId,
-		); err != nil {
-			return fmt.Errorf("unable to delete user transactions: %w", err)
+		batch := pgx.Batch{}
+
+		const deleteRelatedAccountsQuery = `
+			delete from solana_related_account where
+				user_account_id = $1 and wallet_id = $2
+		`
+		const deleteWalletTxRefsQuery = `
+			delete from tx_ref where
+				user_account_id = $1 and wallet_id = $2
+		`
+		const updateWalletTxCountQuery = `
+			update wallet set
+				tx_count = 0
+			where
+				user_account_id = $1 and id = $2
+		`
+		batch.Queue(deleteRelatedAccountsQuery, userAccountId, walletId)
+		batch.Queue(deleteWalletTxRefsQuery, userAccountId, walletId)
+		batch.Queue(updateWalletTxCountQuery, userAccountId, walletId)
+		if err := pool.SendBatch(ctx, &batch).Close(); err != nil {
+			return fmt.Errorf("unable to delete wallet transactions: %w", err)
 		}
 	} else {
 		accounts[0] = solanaAccount{
@@ -431,9 +456,12 @@ func fetchSolanaWallet(
 
 		const getSolanaRelatedAccounts = `
 			select address, latest_tx_id from solana_related_account where
-				wallet_id = $1
+				user_account_id = $1 and wallet_id = $2
 		`
-		rows, err := pool.Query(ctx, getSolanaRelatedAccounts, walletId)
+		rows, err := pool.Query(
+			ctx, getSolanaRelatedAccounts,
+			userAccountId, walletId,
+		)
 		if err != nil {
 			return fmt.Errorf("unable to query solana related accounts: %w", err)
 		}
@@ -897,7 +925,7 @@ func fetchEvmWallet(
 
 	batch = pgx.Batch{}
 	batch.Queue(
-		setUserTransactionQuery,
+		setTransactionsForWallet,
 		// args
 		userAccountId, hashes, walletId, pgtype.Text{},
 	)
@@ -932,15 +960,16 @@ func Fetch(
 	walletAddress string,
 	walletId int32,
 	walletDataSerialized json.RawMessage,
-	//
 	fresh bool,
 ) error {
-	logger.Info("Starting fetch for user: %d", userAccountId)
-
-	// logger.Info(
-	// 	"Wallet: %s %s (fresh: %t walletId: %d latestTxId: \"%s\")",
-	// 	walletAddress, n, fresh, walletId, latestTxId.String,
-	// )
+	logger.Info(
+		"Starting fetch: ",
+		"user", userAccountId,
+		"wallet", walletId,
+		"address", walletAddress,
+		"network", network,
+		"fresh", fresh,
+	)
 
 	switch {
 	case network == db.NetworkSolana:

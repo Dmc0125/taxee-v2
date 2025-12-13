@@ -17,8 +17,8 @@ import (
 	requesttimer "taxee/pkg/request_timer"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
 )
@@ -36,44 +36,35 @@ func tryWalletFetch(
 	state.runningFetchWallets.Add(1)
 	defer state.runningFetchWallets.Store(state.runningFetchWallets.Load() - 1)
 
-	const consumeQueuedJobQuery = `
-		update worker_job wj set
-			status = $1
-		from
-			wallet w
+	const consumeQueuedWalletQuery = `
+		update wallet set
+			status = 'in_progress'
 		where
-			wj.status = $2 and
-			wj.type = 0 and
-			w.id = (wj.data->>'walletId')::integer and
-			w.delete_scheduled = false
+			id = (
+				select id from wallet w where
+					status = 'queued' and
+					delete_scheduled = false
+				order by
+					queued_at asc
+				limit
+					1
+			)
 		returning
-			wj.id, 
-			wj.user_account_id, 
-			(wj.data->>'fresh')::boolean, 
-			(wj.data->>'walletId')::integer, 
-			(wj.data->>'walletAddress')::varchar, 
-			w.data,
-			w.network
+			id, user_account_id, address, network, fresh, data
 	`
-	row := pool.QueryRow(
-		context.Background(), consumeQueuedJobQuery,
-		db.WorkerJobInProgress, db.WorkerJobQueued,
-	)
+	row := pool.QueryRow(context.Background(), consumeQueuedWalletQuery)
 
 	var (
-		jobId                uuid.UUID
-		userAccountId        int32
-		fresh                bool
-		walletId             int32
-		walletAddress        string
-		walletDataSerialized json.RawMessage
-		network              db.Network
+		walletId, userAccountId int32
+		walletAddress           string
+		network                 db.Network
+		fresh                   bool
+		walletDataSerialized    json.RawMessage
 	)
 
 	if err := row.Scan(
-		&jobId, &userAccountId,
-		&fresh, &walletId, &walletAddress,
-		&walletDataSerialized, &network,
+		&walletId, &userAccountId, &walletAddress,
+		&network, &fresh, &walletDataSerialized,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return
@@ -86,6 +77,8 @@ func tryWalletFetch(
 
 	var errgroup errgroup.Group
 	groupCtx, groupCtxCancel := context.WithCancel(context.Background())
+
+	startedAt := time.Now()
 
 	errgroup.Go(func() error {
 		err := fetcher.Fetch(
@@ -108,13 +101,13 @@ func tryWalletFetch(
 			case <-ticker.C:
 			}
 
-			const selectJobScheduledForCancelQuery = `
-				select 1 from worker_job where
-					id = $1 and status = $2
+			const selectWalletScheduledForCancelQuery = `
+				select 1 from wallet where
+					id = $1 and status = 'cancel_scheduled'
 			`
 			tag, err := pool.Exec(
-				context.Background(), selectJobScheduledForCancelQuery,
-				jobId, db.WorkerJobCancelScheduled,
+				context.Background(), selectWalletScheduledForCancelQuery,
+				walletId,
 			)
 			if err != nil {
 				// NOTE: should this return an error and cancel the process ?
@@ -123,50 +116,84 @@ func tryWalletFetch(
 			}
 
 			if tag.RowsAffected() > 0 {
-				logger.Info("canceled job: %s", jobId)
+				logger.Info("canceled job for wallet: %d", walletId)
 				fetchCtxCancel()
 				return fetchCtx.Err()
 			}
 		}
 	})
 
-	err := errgroup.Wait()
+	workerError := errgroup.Wait()
 
-	const updateWorkerJobQuery = `
-		update worker_job set
-			status = $1
-		where
-			id = $2
-	`
-	const insertWorkerErrorQuery = `
-		insert into worker_error (
-			job_id, error_message
-		) values (
-			$1, $2
-		)
-	`
-	batch := pgx.Batch{}
-
-	switch {
-	case err == nil:
-		batch.Queue(updateWorkerJobQuery, db.WorkerJobSuccess, jobId)
-	case errors.Is(err, context.Canceled):
-		batch.Queue(updateWorkerJobQuery, db.WorkerJobCanceled, jobId)
-	default:
-		batch.Queue(updateWorkerJobQuery, db.WorkerJobError, jobId)
-		batch.Queue(insertWorkerErrorQuery, jobId, err.Error())
-	}
-
-	err = db.ExecuteTx(
+	db.ExecuteTx(
 		context.Background(), pool,
 		func(ctx context.Context, tx pgx.Tx) error {
-			br := tx.SendBatch(ctx, &batch)
-			return br.Close()
+			const updateWalletQuery = `
+				update wallet set
+					status = $1, finished_at = now()
+				where
+					id = $2
+				returning
+					tx_count
+			`
+			const insertWorkerResultQuery = `
+				insert into worker_result (
+					type, canceled, error_message, started_at, finished_at, data
+				) values (
+					'fetch_wallet', $1, $2, $3, now(), $4
+				)
+			`
+			var status db.Status
+			var canceled bool
+			var errorMessage pgtype.Text
+
+			switch {
+			case workerError == nil:
+				status = db.StatusSuccess
+			case errors.Is(workerError, context.Canceled):
+				status = db.StatusCanceled
+				canceled = true
+			default:
+				status = db.StatusError
+				errorMessage = pgtype.Text{
+					Valid:  true,
+					String: workerError.Error(),
+				}
+			}
+
+			row := tx.QueryRow(ctx, updateWalletQuery, status, walletId)
+			var txCount int32
+			if err := row.Scan(&txCount); err != nil {
+				logger.Error("unable to update wallet: %s", err.Error())
+				return err
+			}
+
+			type workerData struct {
+				WalletId      int32      `json:"walletId"`
+				WalletAddress string     `json:"walletAddress"`
+				Network       db.Network `json:"network"`
+				TxCount       int32      `json:"txCount"`
+			}
+			workerDataSerialized, err := json.Marshal(workerData{
+				WalletId:      walletId,
+				WalletAddress: walletAddress,
+				Network:       network,
+				TxCount:       txCount,
+			})
+			assert.NoErr(err, "unable to marshal worker data")
+
+			_, err = tx.Exec(
+				ctx, insertWorkerResultQuery,
+				canceled, errorMessage, startedAt, workerDataSerialized,
+			)
+			if err != nil {
+				logger.Error("unable to insert worker data: %s", err.Error())
+				return err
+			}
+
+			return nil
 		},
 	)
-	if err != nil {
-		logger.Error("unable set worker result: %s", err)
-	}
 }
 
 func main() {
@@ -200,30 +227,18 @@ func main() {
 		///////////////////
 		// try delete wallet
 		func() {
-			tx, err := pool.Begin(context.Background())
-			if err != nil {
-				logger.Error("unable to begin tx: %s", err)
-				return
-			}
-			defer tx.Rollback(context.Background())
-
-			// select wallets which are scheduled for delete and do not have
-			// a job thats is currently running or is scheduled for cancel
 			const selectWalletsScheduledForDelete = `
-				select user_account_id, id from wallet w where
-					w.delete_scheduled = true and not exists (
-						select 1 from worker_job wj where
-							(wj.status = 1 or wj.status = 4) and
-							(wj.data->>'walletId')::integer = w.id 
-					)
+				delete from wallet where
+					status != 'cancel_scheduled' and
+					delete_scheduled = true
+				returning
+					user_account_id, id
 			`
-			rows, err := tx.Query(context.Background(), selectWalletsScheduledForDelete)
+			rows, err := pool.Query(context.Background(), selectWalletsScheduledForDelete)
 			if err != nil {
 				logger.Error("unable to delete wallets: %s", err)
 				return
 			}
-
-			batch := pgx.Batch{}
 
 			for rows.Next() {
 				var userAccountId, walletId int32
@@ -231,39 +246,7 @@ func main() {
 					logger.Error("unable to scan wallet id: %s", err)
 					return
 				}
-
-				logger.Info("deleting wallet %d for user %d", walletId, userAccountId)
-
-				const deleteWalletQuery = "call delete_wallet($1, $2)"
-				batch.Queue(deleteWalletQuery, userAccountId, walletId)
-
-				const deleteJobQuery = `
-					delete from worker_job wj where 
-						(wj.data->>'walletId')::integer = $1 and
-						wj.user_account_id = $2
-				`
-				batch.Queue(deleteJobQuery, walletId, userAccountId)
-			}
-
-			if err := rows.Err(); err != nil {
-				logger.Error("unable to read rows: %s", err)
-				return
-			}
-
-			if batch.Len() > 0 {
-				br := tx.SendBatch(context.Background(), &batch)
-				if err := br.Close(); err != nil {
-					logger.Error("unable to delete wallets: %s", err)
-					return
-				}
-			}
-
-			if err := tx.Commit(context.Background()); err != nil {
-				logger.Error("unable to commit: %s", err)
-			}
-
-			if batch.Len() > 0 {
-				logger.Info("wallets deleted")
+				logger.Info("deleted wallet %d for user %d", walletId, userAccountId)
 			}
 		}()
 

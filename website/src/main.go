@@ -227,12 +227,12 @@ func main() {
 		walletsHandler(pool, templates),
 	)
 	http.HandleFunc(
-		"/events",
-		eventsHandler(context.Background(), pool, templates),
+		"/wallets/sse",
+		walletsSseHandler(pool, templates),
 	)
 	http.HandleFunc(
-		"/jobs",
-		jobsHandle(pool, templates),
+		"/events",
+		eventsHandler(context.Background(), pool, templates),
 	)
 	http.HandleFunc(
 		"/sync_request",

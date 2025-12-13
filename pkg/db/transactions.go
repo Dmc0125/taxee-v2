@@ -42,6 +42,74 @@ func GetUserAccount(ctx context.Context, pool *pgxpool.Pool, id int32) (*GetUser
 	return res, nil
 }
 
+type Status uint8
+
+const (
+	StatusQueued Status = iota
+	StatusInProgress
+	StatusSuccess
+	StatusError
+	StatusCancelScheduled
+	StatusCanceled
+)
+
+func (dst *Status) Scan(src any) error {
+	if src == nil {
+		return nil
+	}
+
+	n, ok := src.(string)
+	if !ok {
+		return fmt.Errorf("invalid status type: %T", src)
+	}
+
+	switch n {
+	case "queued":
+		*dst = StatusQueued
+	case "in_progress":
+		*dst = StatusInProgress
+	case "success":
+		*dst = StatusSuccess
+	case "error":
+		*dst = StatusError
+	case "cancel_scheduled":
+		*dst = StatusCancelScheduled
+	case "canceled":
+		*dst = StatusCanceled
+	default:
+		return fmt.Errorf("invalid status: %s", n)
+	}
+
+	return nil
+}
+
+func (src *Status) String() (string, bool) {
+	switch *src {
+	case StatusQueued:
+		return "queued", true
+	case StatusInProgress:
+		return "in_progress", true
+	case StatusSuccess:
+		return "success", true
+	case StatusError:
+		return "error", true
+	case StatusCancelScheduled:
+		return "cancel_scheduled", true
+	case StatusCanceled:
+		return "canceled", true
+	default:
+		return "", false
+	}
+}
+
+func (src Status) Value() (driver.Value, error) {
+	v, ok := src.String()
+	if !ok {
+		return nil, fmt.Errorf("invalid status: %d", src)
+	}
+	return v, nil
+}
+
 type Network uint16
 
 const (
