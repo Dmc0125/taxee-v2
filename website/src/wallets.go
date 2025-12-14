@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
 	"strconv"
+	"strings"
 	"taxee/pkg/assert"
 	"taxee/pkg/db"
 	"taxee/pkg/logger"
@@ -230,17 +232,33 @@ func walletsHandler(
 
 			walletAddress := r.FormValue("wallet_address")
 
-			switch network {
-			case db.NetworkSolana:
+			switch {
+			case network == db.NetworkSolana:
 				walletBytes, err := base58.Decode(walletAddress)
 				if err != nil {
 					w.WriteHeader(400)
-					w.Write([]byte("walletAddress is not valid base58"))
+					w.Write([]byte("walletAddress: not valid base58"))
 					return
 				}
 				if len(walletBytes) != 32 {
 					w.WriteHeader(400)
-					w.Write([]byte("walletAddress invalid len"))
+					w.Write([]byte("walletAddress: invalid len"))
+					return
+				}
+			case network > db.NetworkEvmStart && network < db.NetworksCount:
+				if len(walletAddress) != 42 {
+					w.WriteHeader(400)
+					w.Write([]byte("walletAddress: invalid len"))
+					return
+				}
+				if !strings.HasPrefix(walletAddress, "0x") {
+					w.WriteHeader(400)
+					w.Write([]byte("walletAddress: invalid prefix"))
+					return
+				}
+				if _, err := hex.DecodeString(walletAddress[2:]); err != nil {
+					w.WriteHeader(400)
+					w.Write([]byte("walletAddress: not valid hex"))
 					return
 				}
 			default:

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"math/big"
 	"slices"
@@ -585,15 +586,13 @@ func fetchEvmWallet(
 	walletAddress string,
 	network db.Network,
 	walletData *db.EvmWalletData,
-) {
-	// TODO:  !!!!!!!!! IMPORTANT !!!!!!!!!!
-	// fetch the events and internal txs in batches instead of sequentially!!!!!
-	chainId, nativeDecimals := evm.ChainIdAndNativeDecimals(network)
+) error {
+	chainId, nativeDecimals, err := evm.ChainIdAndNativeDecimals(network)
+	if err != nil {
+		return err
+	}
 
-	const endBlock = uint64(math.MaxInt64)
-	startBlock := walletData.TxsLatestBlockNumber
-
-	feePaid := func(gasUsed, gasPrice *big.Int) decimal.Decimal {
+	calcFeePaid := func(gasUsed, gasPrice *big.Int) decimal.Decimal {
 		g := decimal.NewFromBigInt(
 			gasUsed,
 			-int32(nativeDecimals),
@@ -603,28 +602,46 @@ func fetchEvmWallet(
 	}
 
 	type evmTx struct {
-		data      *db.EvmTransactionData
-		timestamp time.Time
-		err       bool
+		data          *db.EvmTransactionData
+		timestamp     time.Time
+		err           bool
+		fetchNormalTx bool
+		gasPrice      *big.Int
 	}
 	fetchedTxs := make(map[string]*evmTx)
-	newWalletData := db.EvmWalletData{}
+
+	const endBlock = uint64(math.MaxInt64)
+
+	//////////////////
+	// fetch all normal transactions
+	txsStartBlock := walletData.TxsLatestBlockNumber
+	txsStartTxHash := walletData.TxsLatestHash
 
 	for {
-		txs, err := client.GetWalletNormalTransactions(
-			chainId,
-			walletAddress,
-			startBlock,
-			endBlock,
-		)
-		assert.NoErr(err, "unable to fetch evm txs")
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 
-		if startBlock == walletData.TxsLatestBlockNumber && walletData.TxsLatestHash != "" {
-			for i, tx := range txs {
-				if tx.Hash == walletData.TxsLatestHash {
-					txs = txs[i+1:]
-					break
-				}
+		logger.Info("fetching normal txs from block: %d", txsStartBlock)
+		txs, err := client.GetWalletNormalTransactions(
+			chainId, walletAddress,
+			txsStartBlock, endBlock,
+		)
+		if err != nil {
+			return fmt.Errorf("unable to fetch normal transactions: %w", err)
+		}
+
+		// TODO: find out how etherscan handles paginatino, are blocks inclusive
+		// or not, limits, ....
+
+		// NOTE: this is sufficient, because the start tx hash has the same
+		// block as start block and the start block is used in the request
+		for i, tx := range txs {
+			if tx.Hash == txsStartTxHash {
+				txs = txs[i+1:]
+				break
 			}
 		}
 
@@ -632,155 +649,78 @@ func fetchEvmWallet(
 			break
 		}
 
-		logger.Info(
-			"Fetched %d txs for %s (%s): from: %d until %d\n",
-			len(txs), walletAddress, network, startBlock, endBlock,
-		)
-
-		for i, tx := range txs {
-			logger.Info("Processing tx %d / %d", i+1, len(txs))
-
-			fee := feePaid((*big.Int)(tx.GasUsed), (*big.Int)(tx.GasPrice))
-			value := decimal.NewFromBigInt(
-				(*big.Int)(tx.Value),
-				-int32(nativeDecimals),
-			)
-
-			data := db.EvmTransactionData{
-				Block: uint64(tx.BlockNumber),
-				TxIdx: int32(tx.TxIdx),
-				Fee:   fee,
-				Value: value,
-				From:  tx.From,
-				To:    tx.To,
-				Input: db.Uint8Array(tx.Input),
-			}
-
-			receipt, err := client.GetTransactionReceipt(network, tx.Hash)
-			assert.NoErr(err, "unable to get transaction receipt")
-
-			for _, log := range receipt.Logs {
-				var topics [4]db.Uint8Array
-				for i, topic := range log.Topics {
-					topics[i] = db.Uint8Array(topic)
-				}
-				data.Events = append(
-					data.Events,
-					&db.EvmTransactionEvent{
-						Address: log.Address,
-						Topics:  topics,
-						Data:    db.Uint8Array(log.Data),
-					},
-				)
-			}
-
-			internalTxs, err := client.GetInternalTransactionsByHash(
-				chainId,
-				tx.Hash,
-			)
-			assert.NoErr(err, "")
-
-			for _, itx := range internalTxs {
-				value := decimal.NewFromBigInt(
-					(*big.Int)(itx.Value),
-					-int32(nativeDecimals),
-				)
-				data.InternalTxs = append(
-					data.InternalTxs,
-					&db.EvmInternalTx{
-						From:            itx.From,
-						To:              itx.To,
-						Value:           value,
-						ContractAddress: itx.ContractAddress,
-						Input:           db.Uint8Array(itx.Input),
-					},
-				)
-			}
+		for _, tx := range txs {
+			fee := calcFeePaid((*big.Int)(tx.GasUsed), (*big.Int)(tx.GasPrice))
+			value := decimal.NewFromBigInt((*big.Int)(tx.Value), -int32(nativeDecimals))
 
 			fetchedTxs[tx.Hash] = &evmTx{
-				err:       bool(tx.Err),
+				data: &db.EvmTransactionData{
+					Block: uint64(tx.BlockNumber),
+					TxIdx: int32(tx.TxIdx),
+					Input: db.Uint8Array(tx.Input),
+					Fee:   fee,
+					Value: value,
+					From:  tx.From,
+					To:    tx.To,
+				},
 				timestamp: time.Time(tx.Timestamp),
-				data:      &data,
-			}
-
-			if i == len(txs)-1 {
-				startBlock = uint64(tx.BlockNumber) + 1
-				newWalletData.TxsLatestHash = tx.Hash
-				newWalletData.TxsLatestBlockNumber = uint64(tx.BlockNumber)
 			}
 		}
+
+		last := txs[len(txs)-1]
+		txsStartBlock = uint64(last.BlockNumber)
+		txsStartTxHash = last.Hash
+
 	}
 
-	logger.Info("Fetched %d txs", len(fetchedTxs))
+	//////////////////
+	// fetch internal txs
+	internalTxsStartBlock := walletData.InternalTxsLatestBlockNumber
+	internalTxsStartTxHash := walletData.InternalTxsLatestHash
 
-	getTxMetadata := func(
-		hash string,
-	) (*db.EvmTransactionData, bool) {
-		tx, err := client.GetTransactionByHash(network, hash)
-		assert.NoErr(err, "unable to get transaction by hash")
-		receipt, err := client.GetTransactionReceipt(network, hash)
-		assert.NoErr(err, "unable to get transaction receipt")
-
-		fee := feePaid((*big.Int)(receipt.GasUsed), (*big.Int)(tx.GasPrice))
-		value := decimal.NewFromBigInt(
-			(*big.Int)(tx.Value),
-			-int32(nativeDecimals),
-		)
-
-		data := &db.EvmTransactionData{
-			Block: uint64(tx.BlockNumber),
-			TxIdx: int32(tx.TxIdx),
-			Input: db.Uint8Array(tx.Input),
-			Fee:   fee,
-			Value: value,
-			From:  tx.From,
-			To:    tx.To,
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
 		}
 
-		for _, log := range receipt.Logs {
-			var topics [4]db.Uint8Array
-			for i, topic := range log.Topics {
-				topics[i] = db.Uint8Array(topic)
+		logger.Info("fetching internal txs from block: %d", internalTxsStartBlock)
+		txs, err := client.GetInternalTransactionsByAddress(
+			chainId, walletAddress,
+			internalTxsStartBlock, endBlock,
+		)
+		if err != nil {
+			return fmt.Errorf("unable to fetch internal transactions: %w", err)
+		}
+
+		for i, tx := range txs {
+			if tx.Hash == internalTxsStartTxHash {
+				txs = txs[i+1:]
+				break
 			}
-
-			data.Events = append(
-				data.Events,
-				&db.EvmTransactionEvent{
-					Address: log.Address,
-					Topics:  topics,
-					Data:    db.Uint8Array(log.Data),
-				},
-			)
 		}
 
-		internalTxs, err := client.GetInternalTransactionsByHash(
-			chainId,
-			tx.Hash,
-		)
-		assert.NoErr(err, "")
-
-		for _, itx := range internalTxs {
-			value := decimal.NewFromBigInt(
-				(*big.Int)(itx.Value),
-				-int32(nativeDecimals),
-			)
-			data.InternalTxs = append(
-				data.InternalTxs,
-				&db.EvmInternalTx{
-					From:            itx.From,
-					To:              itx.To,
-					Value:           value,
-					ContractAddress: itx.ContractAddress,
-					Input:           db.Uint8Array(itx.Input),
-				},
-			)
+		if len(txs) == 0 {
+			break
 		}
 
-		return data, bool(receipt.Err)
+		for _, tx := range txs {
+			if _, ok := fetchedTxs[tx.Hash]; !ok {
+				fetchedTxs[tx.Hash] = &evmTx{
+					fetchNormalTx: true,
+					timestamp:     time.Time(tx.Timestamp),
+				}
+			}
+		}
+
+		last := txs[len(txs)-1]
+		internalTxsStartBlock = uint64(last.BlockNumber)
+		internalTxsStartTxHash = last.Hash
 	}
 
-	logger.Info("Fetching incoming ERC-20 transfers")
-	// NOTE: fetching only events for incoming ERC-20 transfers
+	//////////////////
+	// fetch incoming token transfers
 	transferTopic, _ := hex.DecodeString("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
 
 	walletBytes, err := hex.DecodeString(walletAddress[2:])
@@ -789,34 +729,38 @@ func fetchEvmWallet(
 	addressTopic := [32]byte{}
 	copy(addressTopic[32-len(walletBytes):], walletBytes)
 	topics := [4][]byte{
-		transferTopic,
-		nil,
-		addressTopic[:],
-		nil,
+		transferTopic, nil,
+		addressTopic[:], nil,
 	}
+
 	topicsOperators := [6]evm.TopicOperator{}
 	topicsOperators[3] = evm.TopicAnd
 
-	startBlock = walletData.EventsLatestBlockNumber
+	eventsStartBlock := walletData.EventsLatestBlockNumber
+	eventsStartTxHash := walletData.EventsLatestHash
 
 	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		logger.Info("fetching incoming transfer from block: %d", eventsStartBlock)
 		events, err := client.GetEventLogsByTopics(
 			chainId,
-			startBlock,
-			endBlock,
-			topics,
-			topicsOperators,
+			eventsStartBlock, endBlock,
+			topics, topicsOperators,
 		)
-		assert.NoErr(err, "")
+		if err != nil {
+			return fmt.Errorf("unable to fetch event logs by topics: %w", err)
+		}
 
-		if startBlock == walletData.EventsLatestBlockNumber && walletData.EventsLatestHash != "" {
-			// NOTE: go from back because multiple events can have same tx hash
-			for i := len(events) - 1; i >= 0; i-- {
-				e := events[i]
-				if e.Hash == walletData.EventsLatestHash {
-					events = events[i+1:]
-					break
-				}
+		for i := len(events) - 1; i >= 0; i -= 1 {
+			e := events[i]
+			if e.Hash == eventsStartTxHash {
+				events = events[i+1:]
+				break
 			}
 		}
 
@@ -824,129 +768,231 @@ func fetchEvmWallet(
 			break
 		}
 
-		for i, event := range events {
-			_, ok := fetchedTxs[event.Hash]
-
-			if !ok {
-				logger.Info("Found incoming ERC-20 transfer: %s", event.Hash)
-				txData, isErr := getTxMetadata(event.Hash)
+		for _, event := range events {
+			if _, ok := fetchedTxs[event.Hash]; !ok {
 				fetchedTxs[event.Hash] = &evmTx{
-					err:       isErr,
-					timestamp: time.Time(event.Timestamp),
-					data:      txData,
+					fetchNormalTx: true,
+					timestamp:     time.Time(event.Timestamp),
 				}
 			}
-
-			if i == len(events)-1 {
-				startBlock = uint64(event.BlockNumber) + 1
-				newWalletData.EventsLatestHash = event.Hash
-				newWalletData.EventsLatestBlockNumber = uint64(event.BlockNumber)
-			}
 		}
+
+		last := events[len(events)-1]
+		eventsStartBlock = uint64(last.BlockNumber)
+		eventsStartTxHash = last.Hash
 	}
 
-	/////////////////
-	// Fetch internal txs which reference walletAddress, if internal tx is found
-	// in a tx which does not reference walletAddress, fetch that tx
-	logger.Info("Fetching internal txs")
-	startBlock = walletData.InternalTxsLatestBlockNumber
-
-	for {
-		internalTxs, err := client.GetInternalTransactionsByAddress(
-			chainId,
-			walletAddress,
-			startBlock,
-			endBlock,
-		)
-		assert.NoErr(err, "")
-
-		if startBlock == walletData.InternalTxsLatestBlockNumber && walletData.InternalTxsLatestHash != "" {
-			// NOTE: go from back because multiple can belong to same hash
-			for i := len(internalTxs) - 1; i >= 0; i -= 1 {
-				t := internalTxs[i]
-				if t.Hash == walletData.InternalTxsLatestHash {
-					internalTxs = internalTxs[i+1:]
-					break
-				}
-			}
-		}
-
-		if len(internalTxs) == 0 {
-			break
-		}
-
-		logger.Info(
-			"Fetched %d internal txs: from %d to %d",
-			len(internalTxs), startBlock, endBlock,
-		)
-
-		for i, internalTx := range internalTxs {
-			_, ok := fetchedTxs[internalTx.Hash]
-
-			if !ok {
-				logger.Info("Found internal tx")
-				data, isErr := getTxMetadata(internalTx.Hash)
-				fetchedTxs[internalTx.Hash] = &evmTx{
-					err:       isErr,
-					timestamp: time.Time(internalTx.Timestamp),
-					data:      data,
-				}
-			}
-
-			if i == len(internalTxs)-1 {
-				startBlock = uint64(internalTx.BlockNumber) + 1
-				newWalletData.InternalTxsLatestHash = internalTx.Hash
-				newWalletData.InternalTxsLatestBlockNumber = uint64(internalTx.BlockNumber)
-			}
-		}
+	if len(fetchedTxs) == 0 {
+		logger.Info("fetching done - no new txs found")
+		return nil
 	}
 
-	logger.Info("Fetched internal txs")
-	batch := pgx.Batch{}
-	hashes := make([]string, 0)
+	type messageInternalTxs struct {
+		hash        string
+		internalTxs []*db.EvmInternalTx
+	}
+	chanInternalTxs := make(chan any)
+
+	var batchTxsByHash []string
+	var batchReceipts []string
+
+	allHashes := slices.Collect(maps.Keys(fetchedTxs))
+
+	go func() {
+		for i, hash := range allHashes {
+			select {
+			case <-ctx.Done():
+				chanInternalTxs <- ctx.Err()
+				close(chanInternalTxs)
+				return
+			default:
+			}
+
+			internalTxs, err := client.GetInternalTransactionsByHash(chainId, hash)
+			if err != nil {
+				chanInternalTxs <- fmt.Errorf("unable to get internal tx by hash: %w", err)
+				close(chanInternalTxs)
+				return
+			}
+
+			m := messageInternalTxs{
+				hash: hash,
+			}
+
+			for _, internalTx := range internalTxs {
+				value := decimal.NewFromBigInt(
+					(*big.Int)(internalTx.Value),
+					-int32(nativeDecimals),
+				)
+				m.internalTxs = append(
+					fetchedTxs[hash].data.InternalTxs,
+					&db.EvmInternalTx{
+						From:            internalTx.From,
+						To:              internalTx.To,
+						Value:           value,
+						ContractAddress: internalTx.ContractAddress,
+						Input:           db.Uint8Array(internalTx.Input),
+					},
+				)
+			}
+
+			chanInternalTxs <- &m
+			if i == len(allHashes)-1 {
+				close(chanInternalTxs)
+			}
+		}
+	}()
 
 	for hash, tx := range fetchedTxs {
-		hashes = append(hashes, hash)
-
-		data, err := json.Marshal(tx.data)
-		assert.NoErr(err, "unable to marshal tx data")
-
-		batch.Queue(
-			insertTransactionQuery,
-			// args
-			hash, network, tx.err, tx.data.From, tx.data.From,
-			tx.timestamp, data,
-		)
+		if tx.fetchNormalTx {
+			batchTxsByHash = append(batchTxsByHash, hash)
+		}
+		batchReceipts = append(batchReceipts, hash)
 	}
 
-	br := pool.SendBatch(ctx, &batch)
-	err = br.Close()
-	assert.NoErr(err, "unable to insert txs")
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
 
-	batch = pgx.Batch{}
-	batch.Queue(
-		setTransactionsForWallet,
-		// args
-		userAccountId, hashes, walletId, pgtype.Text{},
-	)
+	if len(batchTxsByHash) > 0 {
+		logger.Info("fetching %d remaining normal txs", len(batchTxsByHash))
+		txsResponse, err := client.BatchGetTransactionByHash(network, batchTxsByHash)
+		if err != nil {
+			return fmt.Errorf("unable to get transactions by hashes: %w", err)
+		}
 
-	newWalletDataMarshaled, err := json.Marshal(newWalletData)
-	assert.NoErr(err, "")
+		for _, txResponse := range txsResponse {
+			if txResponse.Error != nil {
+				return fmt.Errorf("unable to get transactions by hashes: %s", txResponse.Error.Message)
+			}
+			tx := txResponse.Result
 
-	batch.Queue(
-		setWalletDataQuery,
-		// args
-		pool, newWalletDataMarshaled, walletId,
-	)
-	br = pool.SendBatch(ctx, &batch)
-	err = br.Close()
-	assert.NoErr(err, "")
+			value := decimal.NewFromBigInt((*big.Int)(tx.Value), -int32(nativeDecimals))
+
+			fetchedTxs[tx.Hash].data = &db.EvmTransactionData{
+				Block: uint64(tx.BlockNumber),
+				TxIdx: int32(tx.TxIdx),
+				Input: db.Uint8Array(tx.Input),
+				Value: value,
+				From:  tx.From,
+				To:    tx.To,
+			}
+			fetchedTxs[tx.Hash].gasPrice = (*big.Int)(tx.GasPrice)
+		}
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	if len(batchReceipts) > 0 {
+		logger.Info("fetching %d receipts", len(batchReceipts))
+		receiptsResponse, err := client.BatchGetTransactionReceipt(network, batchReceipts)
+		if err != nil {
+			return fmt.Errorf("unable to get transactios receipts: %w", err)
+		}
+
+		for _, receiptResponse := range receiptsResponse {
+			if receiptResponse.Error != nil {
+				return fmt.Errorf("unable to get transactions receipts: %s", receiptResponse.Error.Message)
+			}
+
+			receipt := receiptResponse.Result
+			tx := fetchedTxs[receipt.Hash]
+
+			tx.err = bool(receipt.Err)
+			if tx.gasPrice != nil {
+				tx.data.Fee = calcFeePaid((*big.Int)(receipt.GasUsed), tx.gasPrice)
+			}
+
+			for _, log := range receipt.Logs {
+				var topics [4]db.Uint8Array
+				for i, topic := range log.Topics {
+					topics[i] = db.Uint8Array(topic)
+				}
+
+				tx.data.Events = append(
+					tx.data.Events,
+					&db.EvmTransactionEvent{
+						Address: log.Address,
+						Topics:  topics,
+						Data:    db.Uint8Array(log.Data),
+					},
+				)
+			}
+		}
+	}
+
+	for i := 1; ; i += 1 {
+		message, ok := <-chanInternalTxs
+		if !ok {
+			break
+		}
+		switch m := message.(type) {
+		case error:
+			return m
+		case *messageInternalTxs:
+			logger.Info("fetched internal transaction %d/%d", i, len(fetchedTxs))
+			tx := fetchedTxs[m.hash]
+			tx.data.InternalTxs = m.internalTxs
+		}
+	}
+
+	err = db.ExecuteTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
+		batch := pgx.Batch{}
+
+		for hash, tx := range fetchedTxs {
+			dataSerialized, err := json.Marshal(tx.data)
+			if err != nil {
+				return fmt.Errorf("unable to marshal evm tx data: %w", err)
+			}
+
+			// TODO: error is not being set ?
+			batch.Queue(
+				insertTransactionQuery,
+				hash, network, tx.err, tx.data.From, tx.data.From, tx.timestamp,
+				dataSerialized,
+			)
+		}
+
+		batch.Queue(
+			setTransactionsForWallet,
+			userAccountId, allHashes, walletId,
+		)
+
+		newWalletDataMarshaled, err := json.Marshal(db.EvmWalletData{
+			TxsLatestHash:                txsStartTxHash,
+			TxsLatestBlockNumber:         txsStartBlock,
+			EventsLatestHash:             eventsStartTxHash,
+			EventsLatestBlockNumber:      eventsStartBlock,
+			InternalTxsLatestHash:        internalTxsStartTxHash,
+			InternalTxsLatestBlockNumber: internalTxsStartBlock,
+		})
+		if err != nil {
+			return fmt.Errorf("unable to marshal evm wallet data: %w", err)
+		}
+
+		batch.Queue(
+			setWalletDataQuery,
+			newWalletDataMarshaled, walletId,
+		)
+
+		if err := tx.SendBatch(ctx, &batch).Close(); err != nil {
+			return fmt.Errorf("unable to execute evm batch: %w", err)
+		}
+
+		return nil
+	})
 
 	// TODO: later can validate balances at the end of the block with
 	// eth_getBalance
 	// eth_getStorageAt or eth_call ??
-
 	logger.Info("Fetching done")
+	return err
 }
 
 func Fetch(
@@ -987,7 +1033,7 @@ func Fetch(
 			latestTxId.String = walletData.LatestTxId
 		}
 
-		err := fetchSolanaWallet(
+		return fetchSolanaWallet(
 			ctx,
 			pool,
 			solanaRpc,
@@ -997,9 +1043,6 @@ func Fetch(
 			latestTxId,
 			fresh,
 		)
-		if err != nil {
-			return err
-		}
 	case network > db.NetworkEvmStart:
 		var walletData db.EvmWalletData
 		if err := json.Unmarshal(walletDataSerialized, &walletData); err != nil {
@@ -1009,7 +1052,11 @@ func Fetch(
 			)
 		}
 
-		fetchEvmWallet(
+		if fresh {
+			walletData = db.EvmWalletData{}
+		}
+
+		return fetchEvmWallet(
 			ctx,
 			pool,
 			etherscanClient,
@@ -1022,6 +1069,4 @@ func Fetch(
 	default:
 		return fmt.Errorf("%w: invalid network", ERROR_INVALID_DATA)
 	}
-
-	return nil
 }

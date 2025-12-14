@@ -45,7 +45,7 @@ func NewClient(alchemyTimer requestTimer) *Client {
 	}
 }
 
-func ChainIdAndNativeDecimals(network db.Network) (chainId, decimals int) {
+func ChainIdAndNativeDecimals(network db.Network) (chainId, decimals int, err error) {
 	switch network {
 	case db.NetworkArbitrum:
 		chainId = 42161
@@ -56,14 +56,16 @@ func ChainIdAndNativeDecimals(network db.Network) (chainId, decimals int) {
 	case db.NetworkBsc:
 		chainId = 56
 	default:
-		assert.True(false, "invalid EVM network: %s", network.String())
+		err = fmt.Errorf("invalid EVM network: %d", network)
+		return
 	}
 
 	switch network {
 	case db.NetworkArbitrum, db.NetworkEthereum, db.NetworkBsc, db.NetworkAvaxC:
 		decimals = 18
 	default:
-		assert.True(false, "invalid EVM network: %s", network.String())
+		err = fmt.Errorf("invalid EVM network: %d", network)
+		return
 	}
 
 	return
@@ -191,7 +193,7 @@ func (client *Client) GetEventLogsByTopics(
 	topicsQuery := strings.Builder{}
 
 	for i, topic := range topics {
-		if topic != nil && len(topic) == 32 {
+		if len(topic) == 32 {
 			topicsQuery.WriteRune('&')
 			topicsQuery.WriteString(topicsQueryParams[i])
 			topicsQuery.WriteRune('=')
@@ -304,7 +306,7 @@ type RpcResponse[T any] struct {
 	Error  *RpcError `json:"error"`
 }
 
-func (client *Client) newAlchemyUrl(network db.Network) string {
+func (client *Client) newAlchemyUrl(network db.Network) (string, error) {
 	var alchemyNetwork string
 	switch network {
 	case db.NetworkArbitrum:
@@ -316,7 +318,7 @@ func (client *Client) newAlchemyUrl(network db.Network) string {
 	case db.NetworkEthereum:
 		alchemyNetwork = "eth-mainnet"
 	default:
-		assert.True(false, "invalid EVM network: %s", network.String())
+		return "", fmt.Errorf("invalid EVM network: %d", network)
 	}
 
 	url := fmt.Sprintf(
@@ -325,7 +327,7 @@ func (client *Client) newAlchemyUrl(network db.Network) string {
 		client.alchemyApiKey,
 	)
 
-	return url
+	return url, nil
 }
 
 type RpcRequest struct {
@@ -362,34 +364,42 @@ type RpcTransaction struct {
 	GasPrice    *HexBigInt `json:"gasPrice"`
 }
 
-func (client *Client) GetTransactionByHash(
+func (client *Client) BatchGetTransactionByHash(
 	network db.Network,
-	hash string,
-) (*RpcTransaction, error) {
-	rpcReq := client.NewRpcRequest(
-		"eth_getTransactionByHash",
-		[]string{hash},
-		1,
-	)
-	body, err := json.Marshal(rpcReq)
-	assert.NoErr(err, "")
+	hashes []string,
+) ([]*RpcResponse[*RpcTransaction], error) {
+	requests := make([]*RpcRequest, len(hashes))
+	for i, hash := range hashes {
+		requests[i] = client.NewRpcRequest(
+			"eth_getTransactionByHash",
+			[]string{hash},
+			i,
+		)
+	}
 
-	req, err := http.NewRequest(
-		"POST",
-		client.newAlchemyUrl(network),
-		bytes.NewBuffer(body),
-	)
-	assert.NoErr(err, "")
+	body, err := json.Marshal(requests)
+	if err != nil {
+		return nil, fmt.Errorf("unable to marshal requests: %w", err)
+	}
 
-	var data RpcResponse[*RpcTransaction]
+	url, err := client.newAlchemyUrl(network)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
+	if err != nil {
+		return nil, fmt.Errorf("unable to create http request: %w", err)
+	}
+
+	var data []*RpcResponse[*RpcTransaction]
 	err = client.sendRequest(req, &data, client.alchemyTimer)
-	return data.Result, err
+	return data, err
 }
 
 type ReceiptErr bool
 
 func (dst *ReceiptErr) UnmarshalJSON(src []byte) error {
-	s := string(src[1 : len(src)-1])
+	s := string(src[3 : len(src)-1])
 	// 0 => err
 	// 1 => ok
 	*dst = s == "0"
@@ -411,38 +421,37 @@ type RpcTransactionReceipt struct {
 	Logs        []*RpcTransactionEventLog `json:"logs"`
 }
 
-func (client *Client) GetTransactionReceipt(
+func (client *Client) BatchGetTransactionReceipt(
 	network db.Network,
-	hash string,
-) (*RpcTransactionReceipt, error) {
-	// url := fmt.Sprintf(
-	// 	"%s?chainid=%d&module=proxy&action=eth_getTransactionReceipt&txhash=%s&apiKey=%s",
-	// 	etherscanApiUrl,
-	// 	chainId,
-	// 	hash,
-	// 	client.etherscanApiKey,
-	// )
-	// req, err := http.NewRequest("GET", url, nil)
-	// assert.NoErr(err, "")
+	hashes []string,
+) ([]*RpcResponse[*RpcTransactionReceipt], error) {
+	requests := make([]*RpcRequest, len(hashes))
+	for i, hash := range hashes {
+		requests[i] = client.NewRpcRequest(
+			"eth_getTransactionReceipt",
+			[]string{hash},
+			i,
+		)
+	}
 
-	rpcReq := client.NewRpcRequest(
-		"eth_getTransactionReceipt",
-		[]string{hash},
-		1,
-	)
-	body, err := json.Marshal(rpcReq)
-	assert.NoErr(err, "")
+	body, err := json.Marshal(requests)
+	if err != nil {
+		return nil, fmt.Errorf("unable to marshal requests: %w", err)
+	}
 
-	req, err := http.NewRequest(
-		"POST",
-		client.newAlchemyUrl(network),
-		bytes.NewBuffer(body),
-	)
-	assert.NoErr(err, "")
+	url, err := client.newAlchemyUrl(network)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
+	if err != nil {
+		return nil, fmt.Errorf("unable to create http request: %w", err)
+	}
 
-	var data RpcResponse[*RpcTransactionReceipt]
+	var data []*RpcResponse[*RpcTransactionReceipt]
 	err = client.sendRequest(req, &data, client.alchemyTimer)
-	return data.Result, err
+	return data, err
+
 }
 
 func (client *Client) GetCode(network db.Network, address string) (string, error) {
@@ -454,11 +463,18 @@ func (client *Client) GetCode(network db.Network, address string) (string, error
 	body, err := json.Marshal(rpcReq)
 	assert.NoErr(err, "")
 
+	url, err := client.newAlchemyUrl(network)
+	if err != nil {
+		return "", err
+	}
 	req, err := http.NewRequest(
 		"POST",
-		client.newAlchemyUrl(network),
+		url,
 		bytes.NewBuffer(body),
 	)
+	if err != nil {
+		return "", fmt.Errorf("unable to create http request: %w", err)
+	}
 	var data RpcResponse[string]
 	err = client.sendRequest(req, &data, client.alchemyTimer)
 	return data.Result, err
@@ -474,14 +490,21 @@ func (client *Client) Batch(
 	requests []*RpcRequest,
 ) ([]*BatchResult[any], error) {
 	body, err := json.Marshal(requests)
-	assert.NoErr(err, "")
+	if err != nil {
+		return nil, fmt.Errorf("unable to marshal requests: %w", err)
+	}
 
+	url, err := client.newAlchemyUrl(network)
+	if err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequest(
-		"POST",
-		client.newAlchemyUrl(network),
+		"POST", url,
 		bytes.NewBuffer(body),
 	)
-	assert.NoErr(err, "")
+	if err != nil {
+		return nil, fmt.Errorf("unable to create http request: %w", err)
+	}
 
 	var data []RpcResponse[any]
 	err = client.sendRequest(req, &data, client.alchemyTimer)
