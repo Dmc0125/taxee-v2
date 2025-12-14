@@ -17,6 +17,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mr-tron/base58"
 )
@@ -70,30 +71,62 @@ func parseUintParam[T any](
 }
 
 type walletComponent struct {
-	Address       string
+	Label   string
+	Address string
+	TxCount int32
+
 	NetworkImgUrl string
+	AccountUrl    string
 	Id            int32
-	Status        uint8
+	Status        string
 	Insert        bool
 
 	ShowFetch  bool
 	ShowSseUrl bool
+
+	LastSyncAt string
+	ImportedAt string
+}
+
+func timeToRelativeStr(t time.Time) string {
+	n := time.Now()
+	if n.Day() != t.Day() {
+		return t.Format("02/01/2006")
+	}
+	return t.Format("15:04:05")
 }
 
 func newWalletComponent(
 	address string,
+	txCount,
 	id int32,
 	network db.Network,
 	status db.Status,
+	lastSyncAt pgtype.Timestamp,
+	importedAt time.Time,
 ) walletComponent {
 	networkGlobals, ok := networksGlobals[network]
 	assert.True(ok, "missing globals for %s network", network.String())
 
+	s, ok := status.String()
+	assert.True(ok, "invalid status %d", status)
+
 	walletData := walletComponent{
+		// TODO: real label
+		Label:         fmt.Sprintf("Wallet %s", address[len(address)-4:]),
 		Address:       address,
+		TxCount:       txCount,
 		Id:            id,
-		Status:        uint8(status),
+		Status:        s,
 		NetworkImgUrl: networkGlobals.imgUrl,
+		AccountUrl:    fmt.Sprintf("%s/%s", networkGlobals.explorerAccountUrl, address),
+		ImportedAt:    timeToRelativeStr(importedAt),
+	}
+
+	if lastSyncAt.Valid {
+		walletData.LastSyncAt = timeToRelativeStr(lastSyncAt.Time)
+	} else {
+		walletData.LastSyncAt = "-"
 	}
 
 	switch status {
@@ -154,19 +187,32 @@ func walletsSseHandler(pool *pgxpool.Pool, templates *template.Template) http.Ha
 			}
 
 			const selectWalletStatus = `
-				select status, address, network from wallet where
+				select 
+					status,
+					address,
+					network,
+					tx_count,
+					created_at,
+					finished_at
+				from
+					wallet
+				where
 					user_account_id = $1 and
 					id = $2 and
 					delete_scheduled = false
 			`
-			var status db.Status
-			var address string
-			var network db.Network
 			row := pool.QueryRow(
 				r.Context(), selectWalletStatus,
 				userAccountId, walletId,
 			)
-			if err := row.Scan(&status, &address, &network); err != nil {
+
+			var status db.Status
+			var address string
+			var network db.Network
+			var createdAt time.Time
+			var finishedAt pgtype.Timestamp
+			var txCount int32
+			if err := row.Scan(&status, &address, &network, &txCount, &createdAt, &finishedAt); err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					sendSSEClose(w, flusher)
 					return
@@ -182,9 +228,12 @@ func walletsSseHandler(pool *pgxpool.Pool, templates *template.Template) http.Ha
 
 			html := executeTemplateMust(templates, "wallet", newWalletComponent(
 				address,
+				txCount,
 				walletId,
 				network,
 				status,
+				finishedAt,
+				createdAt,
 			))
 			sendSSEUpdate(w, flusher, string(html))
 
@@ -271,6 +320,7 @@ func walletsHandler(
 			// insert
 			var status int
 			var walletId, walletsCount int32
+			var walletCreatedAt time.Time
 
 			err = db.ExecuteTx(
 				r.Context(), pool,
@@ -303,13 +353,13 @@ func walletsHandler(
 						) values (
 							$1, $2, $3, '{}'::jsonb, now()
 						) returning
-							id
+							id, created_at
 					`
 					batch.Queue(
 						insertWalletQuery,
 						userAccountId, walletAddress, network,
 					).QueryRow(func(row pgx.Row) error {
-						if err := row.Scan(&walletId); err != nil {
+						if err := row.Scan(&walletId, &walletCreatedAt); err != nil {
 							logger.Error("unable to insert wallet: %s", err)
 							return err
 						}
@@ -343,9 +393,12 @@ func walletsHandler(
 
 			walletData := newWalletComponent(
 				walletAddress,
+				0,
 				walletId,
 				network,
 				db.StatusQueued,
+				pgtype.Timestamp{},
+				walletCreatedAt,
 			)
 			var html []byte
 
@@ -366,14 +419,13 @@ func walletsHandler(
 		case http.MethodGet:
 			const selectWalletsQuery = `
 				select 
-					id, address, network, status
+					id, address, network, status, tx_count, created_at, finished_at
 				from 
 					wallet
 				where
 					user_account_id = $1 and 
 					delete_scheduled = false
 				order by
-					network asc,
 					created_at desc
 			`
 			rows, err := pool.Query(r.Context(), selectWalletsQuery, userAccountId)
@@ -390,8 +442,11 @@ func walletsHandler(
 				var walletAddress string
 				var network db.Network
 				var status db.Status
+				var txCount int32
+				var finishedAt pgtype.Timestamp
+				var createdAt time.Time
 				if err := rows.Scan(
-					&walletId, &walletAddress, &network, &status,
+					&walletId, &walletAddress, &network, &status, &txCount, &createdAt, &finishedAt,
 				); err != nil {
 					w.WriteHeader(500)
 					w.Write(fmt.Appendf(nil, "unable to scan wallets: %s", err))
@@ -400,9 +455,12 @@ func walletsHandler(
 
 				walletData := newWalletComponent(
 					walletAddress,
+					txCount,
 					walletId,
 					network,
 					status,
+					finishedAt,
+					createdAt,
 				)
 				walletsRows = append(walletsRows, &walletData)
 			}
@@ -532,7 +590,7 @@ func walletsHandler(
 							status = 'canceled'
 						)
 					returning
-						address, network
+						address, network, created_at
 				`
 				row := pool.QueryRow(
 					r.Context(), setWalletAsQueuedQuery,
@@ -541,7 +599,8 @@ func walletsHandler(
 
 				var address string
 				var network db.Network
-				if err := row.Scan(&address, &network); err != nil {
+				var createdAt time.Time
+				if err := row.Scan(&address, &network, &createdAt); err != nil {
 					if errors.Is(err, pgx.ErrNoRows) {
 						w.WriteHeader(404)
 						return
@@ -556,9 +615,12 @@ func walletsHandler(
 
 				html := executeTemplateMust(templates, "wallet", newWalletComponent(
 					address,
+					0,
 					walletId,
 					network,
 					db.StatusQueued,
+					pgtype.Timestamp{},
+					createdAt,
 				))
 				w.Write(html)
 			case db.StatusCanceled:
@@ -576,7 +638,7 @@ func walletsHandler(
 						delete_scheduled = false and
 						(status = 'queued' or status = 'in_progress')
 					returning
-						status, address, network
+						status, address, network, created_at
 				`
 				row := pool.QueryRow(
 					r.Context(), setWalletAsCanceledQuery,
@@ -586,7 +648,8 @@ func walletsHandler(
 				var status db.Status
 				var address string
 				var network db.Network
-				if err := row.Scan(&status, &address, &network); err != nil {
+				var createdAt time.Time
+				if err := row.Scan(&status, &address, &network, &createdAt); err != nil {
 					if errors.Is(err, pgx.ErrNoRows) {
 						w.WriteHeader(404)
 						return
@@ -605,11 +668,17 @@ func walletsHandler(
 
 				html := executeTemplateMust(templates, "wallet", newWalletComponent(
 					address,
+					0,
 					walletId,
 					network,
 					status,
+					pgtype.Timestamp{},
+					createdAt,
 				))
 				w.Write(html)
+			default:
+				w.WriteHeader(400)
+				w.Write([]byte("status: invalid"))
 			}
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)

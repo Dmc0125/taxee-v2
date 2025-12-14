@@ -168,8 +168,6 @@ async function registerFormSubmit(e) {
     const method = t.getAttribute("method")
     assert.notNull(method)
 
-    // await new Promise((res) => setTimeout(() => res(null), 5000))
-
     const res = await fetch(action, {
         method: method,
         body: data,
@@ -237,4 +235,23 @@ function registerSseSubscriptions() {
 
 document.addEventListener("submit", registerFormSubmit)
 document.addEventListener("DOMContentLoaded", registerSseSubscriptions)
+
+document.addEventListener("click", function(e) {
+    if (!(e.target instanceof Element)) {
+        return
+    }
+
+    const btn = e.target.closest("[data-wallet-table-expand]")
+    if (!btn) {
+        return
+    }
+
+    const walletId = btn.getAttribute("data-wallet-table-expand")
+    assert.notNull(walletId)
+    const table = document.querySelector(`[data-wallet-table="${walletId}"]`)
+    assert.notNull(table)
+
+    table.classList.toggle("hidden")
+    btn.classList.toggle("rotate-180")
+})
 

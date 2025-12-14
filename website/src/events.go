@@ -22,18 +22,21 @@ import (
 )
 
 type networkGlobals struct {
-	explorerUrl string
-	imgUrl      string
+	explorerUrl        string
+	explorerAccountUrl string
+	imgUrl             string
 }
 
 var networksGlobals = map[db.Network]networkGlobals{
 	db.NetworkSolana: {
-		explorerUrl: "https://solscan.io",
-		imgUrl:      "/static/logo_solana.svg",
+		explorerUrl:        "https://solscan.io",
+		explorerAccountUrl: "https://solscan.io/account",
+		imgUrl:             "/static/logo_solana.svg",
 	},
 	db.NetworkArbitrum: {
-		explorerUrl: "https://arbiscan.io",
-		imgUrl:      "/static/logo_arbitrum.svg",
+		explorerUrl:        "https://arbiscan.io",
+		explorerAccountUrl: "https://arbiscan.io/address",
+		imgUrl:             "/static/logo_arbitrum.svg",
 	},
 }
 
