@@ -7,14 +7,14 @@
     </div>
 </div>
 
-<div class="w-full pt-10 pb-20 text-gray-800">
+<div class="w-full pt-5 pb-20 text-gray-800">
     <div class="max-w-[800px] w-full mx-auto px-4">
         <header class="w-full">
             <h1 class="font-semibold text-2xl">Add wallet</h1>
         </header>
 
         <form method="POST" action="/wallets"
-              class="w-full mt-8 flex flex-col gap-4">
+              class="w-full mt-8 flex flex-col items-end gap-4">
             <input type="text" required id="wallet_address"
                    name="wallet_address" placeholder="Wallet address"
                    class="w-full h-10 px-4 border border-gray-200 rounded-lg" />
@@ -25,7 +25,7 @@
                 <option value="3">Arbitrum</option>
             </select>
             <button type="submit" data-spinner
-                    class="w-full bg-gray-200 rounded-lg h-10 hover:cursor-pointer hover:bg-gray-300 disabled:text-gray-400 disabled:bg-gray-200 disabled:pointer-events-none">
+                    class="h-10 w-fit aspect-[5/2] bg-gray-200 rounded-lg hover:bg-gray-300 disabled:text-gray-400 disabled:bg-gray-200">
                 Add
             </button>
         </form>
@@ -73,8 +73,8 @@
         <div class="flex items-start justify-between p-2">
             <div>
                 <div class="flex items-center gap-2">
-                    {{ template "wallet_status" . }}
                     <span class="font-semibold">{{ .Label }}</span>
+                    {{ template "wallet_status" . }}
                 </div>
                 <a href="{{ .AccountUrl }}" target="_blank"
                    class="link text-sm text-gray-700">{{ shorten .Address 6 4 }}</a>
@@ -101,8 +101,10 @@
                     <input class="hidden" type="text" value="{{ .Id }}"
                            name="id" />
                     <input class="hidden" type="text" value="0" name="status" />
-                    <button class="size-8 rounded-lg hover:bg-gray-200"
-                            data-spinner="w-4">
+                    <button class="size-8 rounded-lg hover:bg-gray-200 disabled:text-gray-400 disabled:hover:bg-inherit"
+                            data-spinner="w-4"
+                            {{ if eq .Status "cancel_scheduled" }} disabled
+                            {{ end }}>
                         <svg class="p-1.5" xmlns="http://www.w3.org/2000/svg"
                              fill="none" viewBox="0 0 24 24" stroke-width="1.5"
                              stroke="currentColor">
@@ -112,6 +114,7 @@
                     </button>
                 </form>
                 {{ end }}
+
                 <form class="size-8" method="delete"
                       action="/wallets?id={{ .Id }}"
                       data-sse-unsubscribe="/wallets/sse?id={{ .Id }}"
@@ -128,7 +131,7 @@
                 </form>
                 <button class="size-8 rounded-lg hover:bg-gray-200 min-[470px]:hidden"
                         data-wallet-table-expand="{{ .Id }}">
-                    <svg class="p-1.5" xmlns="http://www.w3.org/2000/svg"
+                    <svg class="p-1.5 transition-all" xmlns="http://www.w3.org/2000/svg"
                          fill="none" viewBox="0 0 24 24" stroke-width="1.5"
                          stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round"
@@ -180,29 +183,38 @@
 {{ end }}
 
 {{ define "wallet_status" }}
-<div class="size-4 flex items-center justify-center text-gray-600">
-    {{ if or (eq .Status "queued") (eq .Status "in_progress") }}
+<div class="flex items-center justify-center gap-1 text-gray-600">
+    {{ if eq .Status "queued" }}
     <div
          class="size-3 border-2 border-gray-400 border-b-transparent rounded-full animate-spin">
     </div>
+    <span class="text-sm leading-none hidden min-[470px]:inline">Queued</span>
+    {{ else if eq .Status "in_progress" }}
+    <div
+         class="size-3 border-2 border-gray-400 border-b-transparent rounded-full animate-spin">
+    </div>
+    <span class="text-sm leading-none hidden min-[470px]:inline">Syncing</span>
     {{ else if eq .Status "success" }}
     <svg class="size-4" xmlns="http://www.w3.org/2000/svg" fill="none"
          viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
         <path stroke-linecap="round" stroke-linejoin="round"
               d="M9 12.75 11.25 15 15 9.75M21 12c0 1.268-.63 2.39-1.593 3.068a3.745 3.745 0 0 1-1.043 3.296 3.745 3.745 0 0 1-3.296 1.043A3.745 3.745 0 0 1 12 21c-1.268 0-2.39-.63-3.068-1.593a3.746 3.746 0 0 1-3.296-1.043 3.745 3.745 0 0 1-1.043-3.296A3.745 3.745 0 0 1 3 12c0-1.268.63-2.39 1.593-3.068a3.745 3.745 0 0 1 1.043-3.296 3.746 3.746 0 0 1 3.296-1.043A3.746 3.746 0 0 1 12 3c1.268 0 2.39.63 3.068 1.593a3.746 3.746 0 0 1 3.296 1.043 3.746 3.746 0 0 1 1.043 3.296A3.745 3.745 0 0 1 21 12Z" />
     </svg>
+    <span class="text-sm leading-none hidden min-[470px]:inline">Synced</span>
     {{ else if eq .Status "error" }}
     <svg class="size-4" xmlns="http://www.w3.org/2000/svg" fill="none"
          viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
         <path stroke-linecap="round" stroke-linejoin="round"
               d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
     </svg>
+    <span class="text-sm leading-none hidden min-[470px]:inline">Error</span>
     {{ else if or (eq .Status "cancel_scheduled") (eq .Status "canceled") }}
     <svg class="size-4" xmlns="http://www.w3.org/2000/svg" fill="none"
          viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
         <path stroke-linecap="round" stroke-linejoin="round"
               d="m9.75 9.75 4.5 4.5m0-4.5-4.5 4.5M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
     </svg>
+    <span class="text-sm leading-none hidden min-[470px]:inline">Canceled</span>
     {{ end }}
 </div>
 {{ end }}

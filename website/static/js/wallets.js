@@ -252,6 +252,7 @@ document.addEventListener("click", function(e) {
     assert.notNull(table)
 
     table.classList.toggle("hidden")
-    btn.classList.toggle("rotate-180")
+    assert.notNull(btn.firstElementChild)
+    btn.firstElementChild.classList.toggle("rotate-180")
 })
 
