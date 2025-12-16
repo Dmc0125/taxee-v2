@@ -2,7 +2,8 @@ begin;
 
 create type worker_type as enum (
     'fetch_wallet',
-    'parse_transactions'
+    'parse_transactions',
+    'parse_events'
 );
 
 create table worker_job (

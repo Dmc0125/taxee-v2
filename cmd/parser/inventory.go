@@ -48,11 +48,11 @@ func invSubBalance(
 
 func invSubFromAccount(
 	inv *inventory,
-	event *db.Event,
+	network db.Network,
 	transfer *db.EventTransfer,
 	increaseProfits bool,
 ) decimal.Decimal {
-	accountId := inventoryAccountId{event.Network, transfer.FromAccount, transfer.Token}
+	accountId := inventoryAccountId{network, transfer.FromAccount, transfer.Token}
 	records := inv.accounts[accountId]
 
 	remainingAmount := transfer.Amount
@@ -105,20 +105,24 @@ func invSubFromAccount(
 	return value
 }
 
-func (inv *inventory) processEvent(event *db.Event) {
+func (inv *inventory) processEvent(
+	eventType db.EventType,
+	network db.Network,
+	transfers []*db.EventTransfer,
+) {
 	switch {
-	case event.Type < db.EventTypeSwapBr:
-		transfer := event.Transfers[0]
+	case eventType < db.EventTypeSwapBr:
+		transfer := transfers[0]
 
 		switch transfer.Direction {
 		case db.EventTransferInternal:
-			fromAccountId := inventoryAccountId{event.Network, transfer.FromAccount, transfer.Token}
+			fromAccountId := inventoryAccountId{network, transfer.FromAccount, transfer.Token}
 			fromRecords := inv.accounts[fromAccountId]
-			toAccountId := inventoryAccountId{event.Network, transfer.ToAccount, transfer.Token}
+			toAccountId := inventoryAccountId{network, transfer.ToAccount, transfer.Token}
 			toRecords := inv.accounts[toAccountId]
 
 			remainingAmount := transfer.Amount
-			if event.Type == db.EventTypeCloseAccount {
+			if eventType == db.EventTypeCloseAccount {
 				for _, b := range fromRecords {
 					remainingAmount = remainingAmount.Add(b.amount)
 				}
@@ -168,12 +172,12 @@ func (inv *inventory) processEvent(event *db.Event) {
 			inv.accounts[fromAccountId] = fromRecords
 			inv.accounts[toAccountId] = toRecords
 		case db.EventTransferIncoming:
-			if event.Type == db.EventTypeTransfer {
+			if eventType == db.EventTypeTransfer {
 				inv.income = inv.income.Add(transfer.Value)
 				transfer.Profit = transfer.Value
 			}
 
-			accountId := inventoryAccountId{event.Network, transfer.ToAccount, transfer.Token}
+			accountId := inventoryAccountId{network, transfer.ToAccount, transfer.Token}
 			inv.accounts[accountId] = append(
 				inv.accounts[accountId],
 				&inventoryRecord{
@@ -184,13 +188,13 @@ func (inv *inventory) processEvent(event *db.Event) {
 			)
 		case db.EventTransferOutgoing:
 			increaseProfits := false
-			switch event.Type {
+			switch eventType {
 			case db.EventTypeTransfer, db.EventTypeCloseAccount:
 				increaseProfits = true
 			}
 			invSubFromAccount(
 				inv,
-				event,
+				network,
 				transfer,
 				increaseProfits,
 			)
@@ -199,7 +203,7 @@ func (inv *inventory) processEvent(event *db.Event) {
 		}
 	default:
 		var incomingIdx int
-		for i, t := range event.Transfers {
+		for i, t := range transfers {
 			if t.Direction == db.EventTransferOutgoing {
 				incomingIdx = i + 1
 				break
@@ -207,20 +211,20 @@ func (inv *inventory) processEvent(event *db.Event) {
 		}
 
 		var first, second []*db.EventTransfer
-		switch event.Type {
+		switch eventType {
 		case db.EventTypeRemoveLiquidity:
 			// incoming
-			first = event.Transfers[incomingIdx:]
+			first = transfers[incomingIdx:]
 			// outgoing - LP TOKEN
-			second = event.Transfers[:incomingIdx]
+			second = transfers[:incomingIdx]
 			assert.True(len(second) == 1, "multiple LP tokens in remove_liquidity")
 		default:
 			// outgoing - TOKENS
-			first = event.Transfers[:incomingIdx]
+			first = transfers[:incomingIdx]
 			// incoming - LP TOKEN
-			second = event.Transfers[incomingIdx:]
+			second = transfers[incomingIdx:]
 
-			if event.Type == db.EventTypeAddLiquidity {
+			if eventType == db.EventTypeAddLiquidity {
 				assert.True(len(second) == 1, "multiple LP tokens in add_liquidity")
 			}
 		}
@@ -231,27 +235,27 @@ func (inv *inventory) processEvent(event *db.Event) {
 			for _, t := range transfers {
 				switch t.Direction {
 				case db.EventTransferIncoming:
-					if event.Type == db.EventTypeAddLiquidity && t.Value.IsZero() {
+					if eventType == db.EventTypeAddLiquidity && t.Value.IsZero() {
 						t.Value = tokensValue
 						t.Price = tokensValue.Div(t.Amount)
-					} else if event.Type == db.EventTypeRemoveLiquidity {
+					} else if eventType == db.EventTypeRemoveLiquidity {
 						tokensValue = tokensValue.Add(t.Value)
 					}
 
-					accountId := inventoryAccountId{event.Network, t.ToAccount, t.Token}
+					accountId := inventoryAccountId{network, t.ToAccount, t.Token}
 					inv.accounts[accountId] = append(inv.accounts[accountId], &inventoryRecord{
 						transferId: t.Id,
 						amount:     t.Amount,
 						acqPrice:   t.Price,
 					})
 				case db.EventTransferOutgoing:
-					if event.Type == db.EventTypeRemoveLiquidity && t.Value.IsZero() {
+					if eventType == db.EventTypeRemoveLiquidity && t.Value.IsZero() {
 						t.Value = tokensValue
 						t.Price = tokensValue.Div(t.Amount)
 					}
 
-					value := invSubFromAccount(inv, event, t, true)
-					if event.Type == db.EventTypeAddLiquidity {
+					value := invSubFromAccount(inv, network, t, true)
+					if eventType == db.EventTypeAddLiquidity {
 						tokensValue = tokensValue.Add(value)
 					}
 				}

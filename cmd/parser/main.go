@@ -736,7 +736,7 @@ func Parse(
 					}
 				}
 
-				inv.processEvent(event)
+				inv.processEvent(event.Type, event.Network, event.Transfers)
 
 				const insertEventQuery = `
 					insert into event (
@@ -1287,9 +1287,9 @@ func ParseTransactions(
 
 		const insertInternalTxsQuery = `
 			insert into internal_tx (
-				position, user_account_id, tx_id
+				position, user_account_id, tx_id, network, timestamp
 			) values (
-				$1, $2, $3
+				$1, $2, $3, $4, $5
 			) returning
 				id
 		`
@@ -1297,7 +1297,7 @@ func ParseTransactions(
 		for i, tx := range transactions {
 			batch.Queue(
 				insertInternalTxsQuery,
-				float32(i), userAccountId, tx.id,
+				float32(i), userAccountId, tx.id, tx.network, tx.timestamp,
 			).QueryRow(func(row pgx.Row) error {
 				var id int32
 				err := row.Scan(&id)
@@ -1377,4 +1377,485 @@ func ParseTransactions(
 	})
 
 	return err
+}
+
+const selectEventsQuery = `
+	select 
+		itx.id,
+		itx.tx_id,
+		itx.network,
+		itx.timestamp,
+		coalesce(
+			(
+				select
+					json_agg(json_build_object(
+						'type', e.type,
+						'transfers', (
+							select
+								json_agg(json_build_object(
+									'id', et.id,
+									'direction', et.direction,
+									'fromWallet', et.from_wallet,
+									'fromAccount', et.from_account,
+									'toWallet', et.to_wallet,
+									'toAccount', et.to_account,
+									'token', et.token,
+									'amount', et.amount,
+									'tokenSource', et.token_source
+								) order by et.position asc)
+							from
+								event_transfer et
+							where
+								et.event_id = e.id
+						)
+					) order by e.position asc)
+				from
+					event e
+				where
+					e.internal_tx_id = itx.id
+			),
+			'[]'::json
+		) as events,
+		(
+			case
+				when itx.network = 'solana' and tx.id is not null then (tx.data->>'nativeBalances')::json
+				else '{}'::json
+			end
+		),
+		(
+			case
+				when itx.network = 'solana' and tx.id is not null then (tx.data->>'tokenBalances')::json
+				else '{}'::json
+			end
+		),
+		(
+			case
+				when itx.network = 'solana' and tx.id is not null then (tx.data->>'tokenDecimals')::json
+				else '{}'::json
+			end
+		)
+	from
+		internal_tx itx
+	left join
+		tx on tx.id = itx.tx_id
+	where
+		itx.user_account_id = $1
+	order by
+		itx.position asc
+`
+
+type coingeckoPricesCache struct {
+	found   map[string][]*coingecko.OhlcCoinData
+	missing map[string][]*coingecko.MissingPricepointsRange
+}
+
+func (cache *coingeckoPricesCache) get(
+	coingeckoId string,
+	ts time.Time,
+) (price decimal.Decimal, found, ok bool) {
+	prices, okPrices := cache.found[coingeckoId]
+	if okPrices {
+		for _, p := range prices {
+			if p.Timestamp.Equal(ts) {
+				price, found, ok = p.Close, true, true
+				return
+			}
+		}
+	}
+
+	tsUnix := ts.Unix()
+	ranges, okRanges := cache.missing[coingeckoId]
+	if okRanges {
+		for _, r := range ranges {
+			if r.TimestampFrom.Unix() <= tsUnix && tsUnix <= r.TimestampTo.Unix() {
+				found, ok = false, true
+			}
+		}
+	}
+
+	return
+}
+
+func ParseEvents(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	userAccountId int32,
+) error {
+	rows, err := pool.Query(ctx, selectEventsQuery, userAccountId)
+	if err != nil {
+		return fmt.Errorf("unable to query internal txs: %w", err)
+	}
+
+	type event struct {
+		Type      db.EventType        `json:"type"`
+		Transfers []*db.EventTransfer `json:"transfers"`
+	}
+
+	type internalTx struct {
+		id                   int32
+		txId                 string
+		network              db.Network
+		timestamp            time.Time
+		events               []*event
+		solanaNativeBalances map[string]*db.SolanaNativeBalance
+		solanaTokenBalances  map[string]*db.SolanaTokenBalances
+		solanaTokenDecimals  map[string]uint8
+	}
+
+	var internalTxs []*internalTx
+
+	type queuedCoingeckoToken struct {
+		coingeckoId string
+		timestamp   time.Time
+		transfer    *db.EventTransfer
+	}
+
+	var batch pgx.Batch
+	var coingeckoTokensQueue []*queuedCoingeckoToken
+
+	handleQueriedToken := func(
+		row pgx.Row,
+		roundedTimestamp time.Time,
+		transfer *db.EventTransfer,
+	) error {
+		var coingeckoId string
+		var price decimal.Decimal
+		var missing bool
+		if err := row.Scan(&coingeckoId, &price, &missing); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				// NOTE: coingecko does not have this token, need to use backup
+				// like birdeye or something
+				return nil
+			}
+			return fmt.Errorf("unable to scan pricepoint: %w", err)
+		}
+		if missing {
+			transfer.Price = price
+			transfer.Value = price.Mul(transfer.Amount)
+			return nil
+		}
+		coingeckoTokensQueue = append(
+			coingeckoTokensQueue,
+			&queuedCoingeckoToken{
+				coingeckoId,
+				roundedTimestamp,
+				transfer,
+			},
+		)
+		return nil
+	}
+
+	for rows.Next() {
+		itx := internalTx{
+			solanaNativeBalances: make(map[string]*db.SolanaNativeBalance),
+			solanaTokenBalances:  make(map[string]*db.SolanaTokenBalances),
+			solanaTokenDecimals:  make(map[string]uint8),
+		}
+		var eventsSer, solanaNativeBalancesSer, solanaTokenBalancesSer, solanaTokenDecimalsSer json.RawMessage
+		if err := rows.Scan(
+			&itx.id, &itx.txId, &itx.network, &itx.timestamp,
+			&eventsSer, &solanaNativeBalancesSer,
+			&solanaTokenBalancesSer, &solanaTokenDecimalsSer,
+		); err != nil {
+			return fmt.Errorf("unable to scan internal tx: %w", err)
+		}
+
+		if err := json.Unmarshal(eventsSer, &itx.events); err != nil {
+			return fmt.Errorf("unable to unmarshal events: %w", err)
+		}
+		if err := json.Unmarshal(solanaNativeBalancesSer, &itx.solanaNativeBalances); err != nil {
+			return fmt.Errorf(
+				"unable to unmarshal solana native balances: %s: %w",
+				string(solanaNativeBalancesSer), err,
+			)
+		}
+		if err := json.Unmarshal(solanaTokenBalancesSer, &itx.solanaTokenBalances); err != nil {
+			return fmt.Errorf(
+				"unable to unmarshal solana token balances: %s: %w",
+				string(solanaTokenBalancesSer), err,
+			)
+		}
+		if err := json.Unmarshal(solanaTokenDecimalsSer, &itx.solanaTokenDecimals); err != nil {
+			return fmt.Errorf(
+				"unable to unmarshal solana token decimals: %s: %w",
+				string(solanaTokenDecimalsSer), err,
+			)
+		}
+
+		internalTxs = append(internalTxs, &itx)
+
+		// query prices from db or append to coingecko queue
+		const hour, halfHour int64 = 60 * 60, 60 * 30
+		roundedTimestamp := time.Unix(itx.timestamp.Unix()+halfHour/hour*hour, 0)
+
+		for _, event := range itx.events {
+			for _, transfer := range event.Transfers {
+				if transfer.TokenSource == tokenSourceCoingecko {
+					batch.Queue(
+						db.GetPricepointByCoingeckoId,
+						transfer.Token, roundedTimestamp,
+					).QueryRow(func(row pgx.Row) error {
+						return handleQueriedToken(row, roundedTimestamp, transfer)
+					})
+				} else {
+					batch.Queue(
+						db.GetPricepointByNetworkAndTokenAddress,
+						roundedTimestamp, itx.network, transfer.Token,
+					).QueryRow(func(row pgx.Row) error {
+						return handleQueriedToken(row, roundedTimestamp, transfer)
+					})
+				}
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("unable to read internal txs: %w", err)
+	}
+
+	if err := pool.SendBatch(ctx, &batch).Close(); err != nil {
+		return err
+	}
+
+	batch = pgx.Batch{}
+	// TODO: this probably should be global
+	var coingeckoCache coingeckoPricesCache
+
+	for _, token := range coingeckoTokensQueue {
+		if price, found, ok := coingeckoCache.get(token.coingeckoId, token.timestamp); ok {
+			if found {
+				token.transfer.Price = price
+				token.transfer.Value = price.Mul(token.transfer.Amount)
+			}
+			continue
+		}
+
+		prices, missingPrices, err := coingecko.GetCoinOhlc(
+			token.coingeckoId,
+			"eur",
+			token.timestamp,
+		)
+		if err != nil {
+			return fmt.Errorf("unable to get prices from coingecko: %w", err)
+		}
+
+		for _, price := range prices {
+			if price.Timestamp.Equal(token.timestamp) {
+				token.transfer.Price = price.Close
+				token.transfer.Value = price.Close.Mul(token.transfer.Amount)
+			}
+
+			batch.Queue(
+				db.InsertPricepoint,
+				price, price.Timestamp, token.coingeckoId,
+			)
+
+			coingeckoCache.found[token.coingeckoId] = append(
+				coingeckoCache.found[token.coingeckoId],
+				price,
+			)
+		}
+
+		for _, mp := range missingPrices {
+			const setMissingPricepointQuery = "call set_missing_pricepoint($1, $2, $3)"
+			batch.Queue(
+				setMissingPricepointQuery,
+				token.coingeckoId, mp.TimestampFrom, mp.TimestampTo,
+			)
+
+			coingeckoCache.missing[token.coingeckoId] = append(
+				coingeckoCache.missing[token.coingeckoId],
+				mp,
+			)
+		}
+	}
+
+	if err := pool.SendBatch(ctx, &batch).Close(); err != nil {
+		return fmt.Errorf("unable to insert prices: %w", err)
+	}
+
+	// process events
+	solanaWallets := make([]string, 0)
+	// NOTE: because of this query, wallet must NOT change state when parsing
+	// events is in progress
+	//
+	// if a wallet changes state in between parse_transactions and parse_events
+	// parse_transactions needs to be done again
+	const selectSolanaWalletsQuery = `
+		select address from wallet where	
+			user_account_id = $1 and
+			network = 'solana' and
+			delete_scheduled = false and
+			status = 'success'
+	`
+	rows, err = pool.Query(ctx, selectSolanaWalletsQuery, userAccountId)
+	if err != nil {
+		return fmt.Errorf("unable to query wallets: %w", err)
+	}
+	for rows.Next() {
+		var address string
+		if err := rows.Scan(&address); err != nil {
+			return fmt.Errorf("unable to scan wallets: %w", err)
+		}
+		solanaWallets = append(solanaWallets, address)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("unable to read wallets: %w", err)
+	}
+
+	batch = pgx.Batch{}
+	batch.Queue(
+		`
+			delete from event_transfer_source s where
+				s.transfer_id in (
+					select et.id from event_transfer et
+					join
+						event e on e.id = et.event_id
+					join
+						internal_tx itx on itx.id = e.internal_tx_id
+					where
+						itx.user_account_id = $1
+				)
+		`,
+		userAccountId,
+	)
+
+	inv := inventory{
+		accounts: make(map[inventoryAccountId][]*inventoryRecord),
+	}
+
+	for _, itx := range internalTxs {
+		for _, event := range itx.events {
+			inv.processEvent(event.Type, itx.network, event.Transfers)
+
+			const updateTransferQuery = `
+				update event_transfer set
+					price = $2,
+					value = $3,
+					profit = $4,
+					missing_amount = $5
+				where
+					id = $1
+			`
+
+			const insertTransferSourceQuery = `
+				insert into event_transfer_source (
+					transfer_id, source_transfer_id, used_amount
+				) values (
+					$1, $2, $3
+				)
+			`
+
+			for _, t := range event.Transfers {
+				batch.Queue(
+					updateTransferQuery,
+					t.Id, t.Price, t.Value, t.Profit, t.MissingAmount,
+				)
+
+				for _, s := range t.Sources {
+					batch.Queue(
+						insertTransferSourceQuery,
+						t.Id, s.TransferId, s.UsedAmount,
+					)
+				}
+			}
+		}
+
+		const insertErrorQuery = `
+			insert into parser_error (
+				internal_tx_id, ix_idx, origin, type, data
+			) values (
+				$1, $2, $3, $4, $5
+			)
+		`
+
+		// validate balances
+		switch itx.network {
+		case db.NetworkSolana:
+			for account, balance := range itx.solanaNativeBalances {
+				invAccountId := inventoryAccountId{db.NetworkSolana, account, SOL_MINT_ADDRESS}
+				accountBalances, ok := inv.accounts[invAccountId]
+
+				local, expected := decimal.Zero, decimal.Zero
+
+				// validate the balance if the account exists in the inventory
+				// and if the wallet is owned even if the account does not exist
+				// this allows validation if program accounts too
+				if ok {
+					for _, b := range accountBalances {
+						local = local.Add(b.amount)
+					}
+					expected = newDecimalFromRawAmount(balance.Post, 9)
+				} else if !ok && slices.Contains(solanaWallets, account) {
+					expected = newDecimalFromRawAmount(balance.Post, 9)
+				}
+
+				if !expected.Equal(local) {
+					errData, err := json.Marshal(db.ParserErrorAccountBalanceMismatch{
+						Wallet:         account,
+						AccountAddress: account,
+						Token:          SOL_MINT_ADDRESS,
+						External:       expected,
+						Local:          local,
+					})
+					if err != nil {
+						return fmt.Errorf("unable to marshal native balance error data: %w", err)
+					}
+					batch.Queue(
+						insertErrorQuery,
+						itx.id, -1, db.ErrOriginProcess, db.ParserErrorTypeAccountBalanceMismatch,
+						errData,
+					)
+				}
+			}
+
+			for account, balance := range itx.solanaTokenBalances {
+				for _, token := range balance.Tokens {
+					if token.Token == SOL_MINT_ADDRESS {
+						continue
+					}
+
+					invAccountId := inventoryAccountId{db.NetworkSolana, account, token.Token}
+					accountBalances, ok := inv.accounts[invAccountId]
+
+					local, expected := decimal.Zero, decimal.Zero
+					decimals := itx.solanaTokenDecimals[token.Token]
+
+					// TODO: validatin this way means that staked, lending
+					// accounts need to have a prefix so the accounts do not match
+					if ok {
+						for _, b := range accountBalances {
+							local = local.Add(b.amount)
+						}
+						expected = newDecimalFromRawAmount(token.Post, decimals)
+					} else if !ok && slices.Contains(solanaWallets, balance.Owner) {
+						expected = newDecimalFromRawAmount(token.Post, decimals)
+					}
+
+					if !expected.Equal(local) {
+						errData, err := json.Marshal(db.ParserErrorAccountBalanceMismatch{
+							Wallet:         balance.Owner,
+							AccountAddress: account,
+							Token:          token.Token,
+							External:       expected,
+							Local:          local,
+						})
+						if err != nil {
+							return fmt.Errorf("unable to marshal token balance error data: %w", err)
+						}
+						batch.Queue(
+							insertErrorQuery,
+							itx.id, -1, db.ErrOriginProcess, db.ParserErrorTypeAccountBalanceMismatch,
+							errData,
+						)
+					}
+				}
+			}
+		}
+	}
+
+	if err := pool.SendBatch(ctx, &batch).Close(); err != nil {
+		return fmt.Errorf("unable to update events: %w", err)
+	}
+
+	return nil
 }

@@ -277,6 +277,8 @@ func consumeQueuedWorkerJob(
 		switch jobType {
 		case "parse_transactions":
 			return parser.ParseTransactions(groupCtx, pool, userAccountId, evmClient)
+		case "parse_events":
+			return parser.ParseEvents(groupCtx, pool, userAccountId)
 		default:
 			return fmt.Errorf("invalid type: %s", jobType)
 		}

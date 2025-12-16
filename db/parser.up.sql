@@ -93,7 +93,10 @@ create table internal_tx (
     foreign key (user_account_id) references user_account (id) on delete cascade,
 
     tx_id varchar,
-    foreign key (tx_id) references tx (id) on delete cascade
+    foreign key (tx_id) references tx (id) on delete cascade,
+
+    network network not null,
+    timestamp timestamptz not null
 );
 
 create index on internal_tx (position);

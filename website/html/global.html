@@ -118,8 +118,14 @@
                 </form>
             </li>
             <li>
-                <button class="w-full text-left button-sm">Parse
-                    events</button>
+                <form method="PUT" action="/jobs">
+                    <input type="text" name="type" value="parse_events"
+                           class="hidden" />
+                    <input type="text" name="status" value="queued"
+                           class="hidden" />
+                    <button class="w-full text-left button-sm">Parse
+                        events</button>
+                </form>
             </li>
         </ul>
     </nav>
@@ -128,6 +134,10 @@
         const navBtn = document.querySelector("#nav-btn");
         const nav = document.querySelector("#nav");
         navBtn.addEventListener("click", function () {
+            if (nav.className.includes("2xl:block")) {
+                nav.classList.remove("2xl:block");
+                return
+            }
             nav.classList.toggle("hidden");
         })
     </script>

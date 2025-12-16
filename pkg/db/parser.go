@@ -17,12 +17,23 @@ import (
 //				when pp.coingecko_id is not null then pp.price
 //				else ''
 //			end
-//		) as price
+//		) as price,
+//		(
+//			case
+//				when mp.coingecko_id is not null then true
+//				else false
+//			end
+//		) as missing
 //	from
 //		coingecko_token ct
 //	left join
 //		pricepoint pp on
 //			pp.coingecko_id = ct.coingecko_id and pp.timestamp = $1
+//	left join
+//		missing_pricepoint mp on
+//			mp.coingecko_id = ct.coingecko_id and
+//			mp.timestamp_from <= $1 and
+//			mp.timestamp_to >= $1
 //	where
 //		ct.network = $2 and ct.address = $3
 const GetPricepointByNetworkAndTokenAddress string = `
@@ -63,12 +74,23 @@ const GetPricepointByNetworkAndTokenAddress string = `
 //				when pp.coingecko_id is not null then pp.price
 //				else ''
 //			end
-//		) as price
+//		) as price,
+//		(
+//			case
+//				when mp.coingecko_id is not null then true
+//				else false
+//			end
+//		) as missing
 //	from
 //		coingecko_token_data ct
 //	left join
 //		pricepoint pp on
 //			pp.coingecko_id = $1 and pp.timestamp = $2
+//	left join
+//		missing_pricepoint mp on
+//			mp.coingecko_id = $1 and
+//			mp.timestamp_from <= $2 and
+//			mp.timestamp_to >= $2
 //	where
 //		ct.coingecko_id = $1
 const GetPricepointByCoingeckoId string = `

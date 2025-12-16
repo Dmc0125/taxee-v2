@@ -31,7 +31,7 @@ func jobsHandler(pool *pgxpool.Pool, templates *template.Template) http.HandlerF
 				return
 			}
 			switch jobType {
-			case "parse_transactions":
+			case "parse_transactions", "parse_events":
 			default:
 				w.WriteHeader(400)
 				w.Write(fmt.Appendf(nil, "type: %s is invalid", jobType))
@@ -60,6 +60,64 @@ func jobsHandler(pool *pgxpool.Pool, templates *template.Template) http.HandlerF
 					returning
 						id
 				`
+
+				// var batch pgx.Batch
+				// var status int
+				// var errMessage string
+				//
+				// switch jobType {
+				// case "parse_transactions":
+				// 	// all wallets need be in terminal state (success, error, canceled, cancel_scheduled)
+				// 	const selectNonTerminalWalletsQuery = `
+				// 		select 1 from wallet where
+				// 			user_account_id = $1 and
+				// 			status in ('queued', 'in_progress')
+				// 	`
+				// 	batch.Queue(
+				// 		selectNonTerminalWalletsQuery,
+				// 		userAccountId,
+				// 	).Query(func(rows pgx.Rows) error {
+				// 		if rows.Next() {
+				// 			status = 409
+				// 			errMessage = "some wallets are still in queued / in_progress state"
+				// 			return errors.New("")
+				// 		}
+				// 		return nil
+				// 	})
+				//
+				// 	batch.Queue(
+				// 		updateJobQuery,
+				// 		userAccountId, jobType,
+				// 	).QueryRow(func(row pgx.Row) error {
+				// 		var jobId int32
+				// 		if err := row.Scan(&jobId); err != nil {
+				// 			status = 409
+				// 			errMessage = "parse transactions in progress"
+				// 			return fmt.Errorf("")
+				// 		}
+				// 		return nil
+				// 	})
+				// case "parse_events":
+				// 	// parse transactions needs to be finished successfuly
+				// 	const selectSuccessfulParseTxsJobQuery = `
+				// 		select 1 from worker_job where
+				// 			user_account_id = $1 and
+				// 			type = 'parse_transactions' and
+				// 			status = 'success'
+				// 	`
+				// 	batch.Queue(
+				// 		selectSuccessfulParseTxsJobQuery,
+				// 		userAccountId,
+				// 	).Query(func(rows pgx.Rows) error {
+				// 		if !rows.Next() {
+				// 			// TODO: this sould be handled automatically
+				// 			status = 409
+				// 			errMessage = "parse_transactions needs to be done before parse_events"
+				//
+				// 		}
+				// 	})
+				// }
+
 				row := pool.QueryRow(r.Context(), updateJobQuery, userAccountId, jobType)
 				var jobId int32
 				if err := row.Scan(&jobId); err != nil {
