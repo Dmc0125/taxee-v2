@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"math/big"
 	_ "net/http/pprof"
@@ -902,4 +903,478 @@ func Parse(
 	br := pool.SendBatch(ctx, &batch)
 	err = br.Close()
 	assert.NoErr(err, "unable to insert events")
+}
+
+func ParseTransactions(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	userAccountId int32,
+	evmClient *evm.Client,
+) error {
+	var solanaContext solContext
+	evmContexts := make(map[db.Network]*evmContext)
+	for i := db.NetworkEvmStart + 1; i < db.NetworksCount; i += 1 {
+		evmContexts[db.Network(i)] = &evmContext{
+			contracts: make(map[string][]evmContractImplementation),
+			network:   db.Network(i),
+		}
+	}
+
+	type transaction struct {
+		id        string
+		err       bool
+		data      any
+		network   db.Network
+		timestamp time.Time
+	}
+	transactions := make([]*transaction, 0)
+
+	err := db.ExecuteTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
+		const selectWalletsQuery = `
+			select address, network from wallet where
+				user_account_id = $1 and
+				delete_scheduled = false and
+				status = 'success'
+		`
+		rows, err := tx.Query(ctx, selectWalletsQuery, userAccountId)
+		if err != nil {
+			return fmt.Errorf("unable to select wallets: %w", err)
+		}
+		walletsCount := 0
+		for rows.Next() {
+			walletsCount += 1
+			var address string
+			var network db.Network
+			if err := rows.Scan(&address, &network); err != nil {
+				return fmt.Errorf("unable to scan wallets: %w", err)
+			}
+
+			switch {
+			case network == db.NetworkSolana:
+				solanaContext.wallets = append(solanaContext.wallets, address)
+			case db.NetworkEvmStart < network && network < db.NetworksCount:
+				evmContexts[network].wallets = append(evmContexts[network].wallets, address)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("unable to read wallets: %w", err)
+		}
+		logger.Info("wallets: %d", walletsCount)
+
+		// select all user transactions that have at least one existing and
+		// fetch wallet related to them
+		const selectTransactionsQuery = `
+			select
+				tx.id, tx.err, tx.data, tx.network, tx.timestamp
+			from
+				tx
+			where
+				tx.id in (
+					select distinct tr.tx_id from tx_ref tr where
+						tr.user_account_id = $1 and ((
+							tr.wallet_id is not null and exists (
+								select 1 from wallet w where
+									w.id = tr.wallet_id and
+									w.delete_scheduled = false and
+									w.status = 'success'
+						)) or (
+							tr.related_account_id is not null and exists (
+								select 1 from solana_related_account ra 
+								join
+									wallet w on
+										w.id = ra.wallet_id and
+										w.delete_scheduled = false and
+										w.status = 'success'
+								where
+									ra.id = tr.related_account_id
+							)
+						))
+				)
+			order by 
+				-- global ordering
+				tx.timestamp asc,
+				-- network specific ordering in case of timestamps conflicts
+				-- solana 
+				(tx.data->>'slot')::bigint asc,
+				(tx.data->>'blockIndex')::integer asc,
+				-- evm
+				(tx.data->>'block')::bigint asc,
+				(tx.data->>'txIdx')::integer asc,
+				tx.id
+		`
+		rows, err = tx.Query(ctx, selectTransactionsQuery, userAccountId)
+		if err != nil {
+			return fmt.Errorf("unabel to select transactions: %w", err)
+		}
+		txCount := 0
+		for rows.Next() {
+			txCount += 1
+
+			var transaction transaction
+			var dataSerialized json.RawMessage
+			if err := rows.Scan(
+				&transaction.id,
+				&transaction.err,
+				&dataSerialized,
+				&transaction.network,
+				&transaction.timestamp,
+			); err != nil {
+				return fmt.Errorf("unable to scan transactions: %w", err)
+			}
+
+			switch {
+			case transaction.network == db.NetworkSolana:
+				var data db.SolanaTransactionData
+				if err := json.Unmarshal(dataSerialized, &data); err != nil {
+					return fmt.Errorf("unable to unmarshal solana tx data: %w", err)
+				}
+				transaction.data = &data
+			case db.NetworkEvmStart < transaction.network && transaction.network < db.NetworksCount:
+				var data db.EvmTransactionData
+				if err := json.Unmarshal(dataSerialized, &data); err != nil {
+					return fmt.Errorf("unable to unmarshal evm tx data: %w", err)
+				}
+				transaction.data = &data
+			default:
+				return fmt.Errorf("invalid network: %d", transaction.network)
+			}
+
+			transactions = append(transactions, &transaction)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("unable to read transactions: %w", err)
+		}
+		logger.Info("tx count: %d", txCount)
+
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	errors := make([]*db.ParserError, 0)
+
+	solanaContext.accounts = make(map[string][]accountLifetime)
+	solanaContext.errors = &errors
+	solanaContext.errOrigin = db.ErrOriginPreprocess
+
+	evmAddresses := make(map[db.Network]map[string][]uint64)
+	appendEvmAddress := func(network db.Network, address string, block uint64, internalTxs []*db.EvmInternalTx) {
+		addresses, ok := evmAddresses[network]
+		if !ok {
+			addresses = make(map[string][]uint64)
+		}
+
+		if !slices.Contains(addresses[address], block) {
+			addresses[address] = append(addresses[address], block)
+		}
+
+		for _, itx := range internalTxs {
+			if !slices.Contains(addresses[itx.To], block) {
+				addresses[itx.To] = append(addresses[itx.To], block)
+			}
+		}
+
+		evmAddresses[network] = addresses
+	}
+
+	// preprocess transactions
+	for _, tx := range transactions {
+		if tx.err {
+			continue
+		}
+
+		switch data := tx.data.(type) {
+		case *db.SolanaTransactionData:
+			solanaContext.txId = tx.id
+			solanaContext.timestamp = tx.timestamp
+			solanaContext.slot = data.Slot
+			solanaContext.nativeBalances = data.NativeBalances
+			solanaContext.tokenBalances = data.TokenBalances
+
+			solPreprocessTx(&solanaContext, data.Instructions)
+		case *db.EvmTransactionData:
+			appendEvmAddress(
+				tx.network,
+				data.To,
+				data.Block,
+				data.InternalTxs,
+			)
+		default:
+			return fmt.Errorf("invalid tx data: %T", tx.data)
+		}
+	}
+
+	for network, addresses := range evmAddresses {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		evmContext := evmContexts[network]
+		evmIdentifyContracts(
+			evmClient,
+			network,
+			addresses,
+			evmContext,
+		)
+	}
+
+	// process transactions
+	newFeeEvent := func(
+		events *[]*db.Event,
+		timestamp time.Time,
+		network db.Network,
+		fee decimal.Decimal,
+		from, token string,
+		tokenSource uint16,
+	) error {
+		id, err := uuid.NewRandom()
+		if err != nil {
+			return fmt.Errorf("unable to generate event id: %w", err)
+		}
+		*events = append(*events, &db.Event{
+			Id:        id,
+			Timestamp: timestamp,
+			Network:   network,
+			App:       "native",
+			Method:    "fee",
+			Type:      db.EventTypeTransfer,
+			Transfers: []*db.EventTransfer{{
+				Direction:   db.EventTransferOutgoing,
+				FromWallet:  from,
+				FromAccount: from,
+				Token:       token,
+				Amount:      fee,
+				TokenSource: tokenSource,
+			}},
+		})
+		return nil
+	}
+
+	eventsByTx := make(map[string][]*db.Event)
+
+	for _, tx := range transactions {
+		transactionEvents := make([]*db.Event, 0)
+
+		switch data := tx.data.(type) {
+		case *db.SolanaTransactionData:
+			if slices.Contains(solanaContext.wallets, data.Signer) {
+				err := newFeeEvent(
+					&transactionEvents,
+					tx.timestamp, tx.network,
+					data.Fee, data.Signer,
+					SOL_MINT_ADDRESS, uint16(db.NetworkSolana),
+				)
+				if err != nil {
+					return err
+				}
+			}
+
+			if tx.err {
+				continue
+			}
+
+			solanaContext.events = &transactionEvents
+			solanaContext.txId = tx.id
+			solanaContext.timestamp = tx.timestamp
+			solanaContext.slot = data.Slot
+			solanaContext.tokensDecimals = data.TokenDecimals
+
+			for ixIdx, ix := range data.Instructions {
+				solanaContext.ixIdx = uint32(ixIdx)
+				solProcessIx(&solanaContext, ix)
+			}
+		case *db.EvmTransactionData:
+			evmContext := evmContexts[tx.network]
+
+			if slices.Contains(evmContext.wallets, data.From) {
+				err := newFeeEvent(
+					&transactionEvents,
+					tx.timestamp, tx.network,
+					data.Fee, data.From,
+					"ethereum", tokenSourceCoingecko,
+				)
+				if err != nil {
+					return err
+				}
+			}
+
+			if tx.err {
+				continue
+			}
+
+			evmContext.timestamp = tx.timestamp
+			evmContext.txId = tx.id
+			evmProcessTx(evmContext, &transactionEvents, data)
+		default:
+			return fmt.Errorf("invalid tx data: %T", tx.data)
+		}
+
+		if len(transactionEvents) != 0 {
+			eventsByTx[tx.id] = transactionEvents
+		}
+	}
+
+	// fetch evm tokens decimals
+	logger.Info("fetching evm tokens decimals")
+	evmTokenAmounts := make(map[db.Network]map[string][]*decimal.Decimal)
+	for _, events := range eventsByTx {
+		for _, event := range events {
+			if db.NetworkEvmStart < event.Network && event.Network < db.NetworksCount {
+				networkTokens, ok := evmTokenAmounts[event.Network]
+				if !ok {
+					networkTokens = make(map[string][]*decimal.Decimal)
+				}
+
+				for _, t := range event.Transfers {
+					if t.TokenSource != tokenSourceCoingecko {
+						networkTokens[t.Token] = append(networkTokens[t.Token], &t.Amount)
+					}
+				}
+
+				evmTokenAmounts[event.Network] = networkTokens
+			}
+		}
+	}
+
+	for network, tokens := range evmTokenAmounts {
+		tokensAddresses := slices.Collect(maps.Keys(tokens))
+		tokensDecimals, err := evmClient.BatchGetTokenDecimals(
+			network,
+			tokensAddresses,
+		)
+		if err != nil {
+			return fmt.Errorf("unable to get tokens decimals: %w", err)
+		}
+
+		for i, token := range tokensAddresses {
+			decimalsResult := tokensDecimals[i]
+			if decimalsResult.Error != nil {
+				return fmt.Errorf("unable to get tokens decimals: %s", decimalsResult.Error.Message)
+			}
+
+			decimals := int64(0)
+			if decimalsResult.Result != "0x" {
+				var err error
+				// NOTE: last byte of the result
+				hexDecimals := decimalsResult.Result[len(decimalsResult.Result)-2:]
+				decimals, err = strconv.ParseInt(hexDecimals, 16, 8)
+				if err != nil {
+					return fmt.Errorf(
+						"unable to parse evm token decimals: %s: %w",
+						decimalsResult.Result,
+						err,
+					)
+				}
+			}
+
+			for _, a := range tokens[token] {
+				*a = decimal.NewFromBigInt(a.BigInt(), -int32(decimals))
+			}
+		}
+	}
+
+	// insert events
+
+	err = db.ExecuteTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
+		batch := pgx.Batch{}
+
+		const deleteInternalTxsQuery = `
+			delete from internal_tx where user_account_id = $1
+		`
+		batch.Queue(deleteInternalTxsQuery, userAccountId)
+
+		const insertInternalTxsQuery = `
+			insert into internal_tx (
+				position, user_account_id, tx_id
+			) values (
+				$1, $2, $3
+			) returning
+				id
+		`
+		internalTxsByHash := make(map[string]int32)
+		for i, tx := range transactions {
+			batch.Queue(
+				insertInternalTxsQuery,
+				float32(i), userAccountId, tx.id,
+			).QueryRow(func(row pgx.Row) error {
+				var id int32
+				err := row.Scan(&id)
+				if err != nil {
+					return fmt.Errorf("unable to scan internal tx: %w", err)
+				}
+				internalTxsByHash[tx.id] = id
+				return nil
+			})
+		}
+
+		if err := tx.SendBatch(ctx, &batch).Close(); err != nil {
+			return fmt.Errorf("unable to insert internal txs: %w", err)
+		}
+
+		batch = pgx.Batch{}
+
+		const insertEventQuery = `
+			insert into event (
+				id, position, internal_tx_id, app, method, type
+			) values (
+				$1, $2, $3, $4, $5, $6
+			)
+		`
+		const insertTransferQuery = `
+			insert into event_transfer (
+				id, event_id, position,
+				direction, from_wallet, from_account, to_wallet, to_account,
+				token, amount, token_source,
+				price, value, profit, missing_amount
+			) values (
+				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+			)
+		`
+
+		for txId, transactionEvents := range eventsByTx {
+			internalTxId, ok := internalTxsByHash[txId]
+			if !ok {
+				return fmt.Errorf("missing internal tx id for %s", txId)
+			}
+
+			for eventPosition, event := range transactionEvents {
+				eventId, err := uuid.NewRandom()
+				if err != nil {
+					return fmt.Errorf("unable to generate event id: %w", err)
+				}
+				batch.Queue(
+					insertEventQuery,
+					eventId, eventPosition, internalTxId,
+					event.App, event.Method, event.Type,
+				)
+
+				for transferPosition, transfer := range event.Transfers {
+					transferId, err := uuid.NewRandom()
+					if err != nil {
+						return fmt.Errorf("unable to generate transfer id: %w", err)
+					}
+					batch.Queue(
+						insertTransferQuery,
+						// args
+						transferId, eventId, transferPosition,
+						transfer.Direction,
+						transfer.FromWallet, transfer.FromAccount,
+						transfer.ToWallet, transfer.ToAccount,
+						transfer.Token, transfer.Amount, transfer.TokenSource,
+						transfer.Price, transfer.Value,
+						transfer.Profit, transfer.MissingAmount,
+					)
+				}
+			}
+		}
+
+		if err := tx.SendBatch(ctx, &batch).Close(); err != nil {
+			return fmt.Errorf("unable to insert events: %w", err)
+		}
+		return nil
+	})
+
+	return err
 }

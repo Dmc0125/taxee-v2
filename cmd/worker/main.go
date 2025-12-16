@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"sync/atomic"
 	"taxee/cmd/fetcher"
 	"taxee/cmd/fetcher/evm"
 	"taxee/cmd/fetcher/solana"
+	"taxee/cmd/parser"
 	"taxee/pkg/assert"
 	"taxee/pkg/coingecko"
 	"taxee/pkg/db"
@@ -23,11 +25,27 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// insertWorkerResultQuery
+//
+//	insert into worker_result (
+//		type, canceled, error_message, started_at, finished_at, data
+//	) values (
+//		$1, $2, $3, $4, now(), $5
+//	)
+const insertWorkerResultQuery string = `
+	insert into worker_result (
+		type, canceled, error_message, started_at, finished_at, data
+	) values (
+		$1, $2, $3, $4, now(), $5
+	)
+`
+
 type workerState struct {
-	runningFetchWallets atomic.Uint32
+	runningFetchWallets      atomic.Uint32
+	runningFetchTransactions atomic.Uint32
 }
 
-func tryWalletFetch(
+func consumeQueuedWallets(
 	pool *pgxpool.Pool,
 	solanaRpc *solana.Rpc,
 	evmClient *evm.Client,
@@ -136,13 +154,6 @@ func tryWalletFetch(
 				returning
 					tx_count
 			`
-			const insertWorkerResultQuery = `
-				insert into worker_result (
-					type, canceled, error_message, started_at, finished_at, data
-				) values (
-					'fetch_wallet', $1, $2, $3, now(), $4
-				)
-			`
 			var status db.Status
 			var canceled bool
 			var errorMessage pgtype.Text
@@ -184,7 +195,7 @@ func tryWalletFetch(
 
 			_, err = tx.Exec(
 				ctx, insertWorkerResultQuery,
-				canceled, errorMessage, startedAt, workerDataSerialized,
+				"fetch_wallet", canceled, errorMessage, startedAt, workerDataSerialized,
 			)
 			if err != nil {
 				logger.Error("unable to insert worker data: %s", err.Error())
@@ -194,6 +205,174 @@ func tryWalletFetch(
 			return nil
 		},
 	)
+}
+
+func deleteWallets(pool *pgxpool.Pool) {
+	const selectWalletsScheduledForDelete = `
+		delete from wallet where
+			status != 'cancel_scheduled' and
+			delete_scheduled = true
+		returning
+			user_account_id, id
+	`
+	rows, err := pool.Query(context.Background(), selectWalletsScheduledForDelete)
+	if err != nil {
+		logger.Error("unable to delete wallets: %s", err)
+		return
+	}
+
+	for rows.Next() {
+		var userAccountId, walletId int32
+		if err := rows.Scan(&userAccountId, &walletId); err != nil {
+			logger.Error("unable to scan wallet id: %s", err)
+			return
+		}
+		logger.Info("deleted wallet %d for user %d", walletId, userAccountId)
+	}
+}
+
+func consumeQueuedWorkerJob(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	evmClient *evm.Client,
+	state *workerState,
+) {
+	state.runningFetchTransactions.Add(1)
+	defer state.runningFetchTransactions.Store(state.runningFetchTransactions.Load() - 1)
+
+	const consumeQueuedJobQuery = `
+		update worker_job set
+			status = 'in_progress'
+		where
+			id = (
+				select id from worker_job where
+					status = 'queued'
+				order by
+					queued_at asc
+				limit
+					1
+			)
+		returning
+			id, type, user_account_id
+	`
+	row := pool.QueryRow(context.Background(), consumeQueuedJobQuery)
+	var jobId, userAccountId int32
+	var jobType string
+	if err := row.Scan(&jobId, &jobType, &userAccountId); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return
+		}
+		logger.Error("unable to consume queued job: %s", err.Error())
+		return
+	}
+
+	logger.Info("consumed %s job %d", jobType, jobId)
+	startedAt := time.Now()
+	groupCtx, groupCtxCancel := context.WithCancel(ctx)
+
+	var eg errgroup.Group
+
+	eg.Go(func() error {
+		defer groupCtxCancel()
+		switch jobType {
+		case "parse_transactions":
+			return parser.ParseTransactions(groupCtx, pool, userAccountId, evmClient)
+		default:
+			return fmt.Errorf("invalid type: %s", jobType)
+		}
+	})
+
+	eg.Go(func() error {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+
+		for {
+			const selectJobScheduledForCancelQuery = `
+				select 1 from worker_job where
+					id = $1 and status = 'cancel_scheduled'
+			`
+			tag, err := pool.Exec(
+				groupCtx, selectJobScheduledForCancelQuery,
+				jobId,
+			)
+			if err != nil {
+				// job is done
+				if errors.Is(err, context.Canceled) {
+					return nil
+				}
+
+				// NOTE: should this return an error and cancel the process ?
+				logger.Error("unable to query cancel message: %s", err)
+				continue
+			}
+
+			if tag.RowsAffected() > 0 {
+				logger.Info("canceled job: %d", jobId)
+				groupCtxCancel()
+				return groupCtx.Err()
+			}
+		}
+	})
+
+	err := eg.Wait()
+	logger.Info("job %d done", jobId)
+
+	var status db.Status
+	var canceled bool
+	var errorMessage pgtype.Text
+
+	switch {
+	case err == nil:
+		status = db.StatusSuccess
+	case errors.Is(err, context.Canceled):
+		status = db.StatusCanceled
+		canceled = true
+	default:
+		logger.Info("job error: %s", err.Error())
+		status = db.StatusError
+		errorMessage = pgtype.Text{
+			Valid:  true,
+			String: err.Error(),
+		}
+	}
+
+	const updateJobQuery = `
+		update worker_job set
+			status = $1,
+			finished_at = now()
+		where
+			id = $2
+	`
+
+	err = db.ExecuteTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
+		batch := pgx.Batch{}
+
+		batch.Queue(updateJobQuery, status, jobId)
+
+		type workerData struct {
+			UserAccountId int32 `json:"userAccountId"`
+		}
+		workerDataSerialized, err := json.Marshal(workerData{
+			UserAccountId: userAccountId,
+		})
+		if err != nil {
+			return fmt.Errorf("unable to serialize worker data: %w", err)
+		}
+
+		batch.Queue(
+			insertWorkerResultQuery,
+			"parse_transactions", canceled, errorMessage, startedAt,
+			workerDataSerialized,
+		)
+
+		return tx.SendBatch(ctx, &batch).Close()
+	})
+
+	if err != nil {
+		logger.Error("unable to update job: %s", err)
+	}
+
+	logger.Info("updated db")
 }
 
 func main() {
@@ -221,34 +400,13 @@ func main() {
 		<-ticker.C
 
 		if state.runningFetchWallets.Load() == 0 {
-			go tryWalletFetch(pool, solanaRpc, evmClient, &state)
+			go consumeQueuedWallets(pool, solanaRpc, evmClient, &state)
 		}
 
-		///////////////////
-		// try delete wallet
-		func() {
-			const selectWalletsScheduledForDelete = `
-				delete from wallet where
-					status != 'cancel_scheduled' and
-					delete_scheduled = true
-				returning
-					user_account_id, id
-			`
-			rows, err := pool.Query(context.Background(), selectWalletsScheduledForDelete)
-			if err != nil {
-				logger.Error("unable to delete wallets: %s", err)
-				return
-			}
+		if state.runningFetchTransactions.Load() == 0 {
+			go consumeQueuedWorkerJob(context.TODO(), pool, evmClient, &state)
+		}
 
-			for rows.Next() {
-				var userAccountId, walletId int32
-				if err := rows.Scan(&userAccountId, &walletId); err != nil {
-					logger.Error("unable to scan wallet id: %s", err)
-					return
-				}
-				logger.Info("deleted wallet %d for user %d", walletId, userAccountId)
-			}
-		}()
-
+		go deleteWallets(pool)
 	}
 }

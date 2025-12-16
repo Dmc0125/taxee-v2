@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	rpcsolana "taxee/cmd/fetcher/solana"
@@ -53,17 +54,12 @@ const (
 	StatusCanceled
 )
 
-func (dst *Status) Scan(src any) error {
-	if src == nil {
-		return nil
+func (dst *Status) ParseString(src string) error {
+	if len(src) == 0 {
+		return errors.New("empty")
 	}
 
-	n, ok := src.(string)
-	if !ok {
-		return fmt.Errorf("invalid status type: %T", src)
-	}
-
-	switch n {
+	switch src {
 	case "queued":
 		*dst = StatusQueued
 	case "in_progress":
@@ -77,10 +73,23 @@ func (dst *Status) Scan(src any) error {
 	case "canceled":
 		*dst = StatusCanceled
 	default:
-		return fmt.Errorf("invalid status: %s", n)
+		return fmt.Errorf("%s is not a valid status", src)
 	}
 
 	return nil
+}
+
+func (dst *Status) Scan(src any) error {
+	if src == nil {
+		return nil
+	}
+
+	n, ok := src.(string)
+	if !ok {
+		return fmt.Errorf("invalid status type: %T", src)
+	}
+
+	return dst.ParseString(n)
 }
 
 func (src *Status) String() (string, bool) {

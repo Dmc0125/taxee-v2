@@ -98,20 +98,28 @@
     </header>
 
     <nav id="nav"
-         class="hidden w-[300px] fixed top-12 bottom-0 left-0 bg-inherit border-r border-gray-200 z-10">
+         class="hidden 2xl:block w-[300px] fixed top-12 bottom-0 left-0 bg-inherit border-r border-gray-200 z-10">
         <ul class="px-4 py-4 flex flex-col gap-2">
             <li>
-                <a href="/wallets">Wallets</a>
+                <a href="/wallets" class="button-sm block leading-8">Wallets</a>
             </li>
             <li>
-                <a href="/events">Events</a>
+                <a href="/events" class="button-sm block leading-8">Events</a>
             </li>
             <li class="w-full border-b border-gray-200"></li>
             <li>
-                <button>Parse transactions</button>
+                <form method="PUT" action="/jobs">
+                    <input type="text" name="type" value="parse_transactions"
+                           class="hidden" />
+                    <input type="text" name="status" value="queued"
+                           class="hidden" />
+                    <button class="w-full text-left button-sm">Parse
+                        transactions</button>
+                </form>
             </li>
             <li>
-                <button>Parse events</button>
+                <button class="w-full text-left button-sm">Parse
+                    events</button>
             </li>
         </ul>
     </nav>

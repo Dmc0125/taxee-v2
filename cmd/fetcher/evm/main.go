@@ -451,7 +451,6 @@ func (client *Client) BatchGetTransactionReceipt(
 	var data []*RpcResponse[*RpcTransactionReceipt]
 	err = client.sendRequest(req, &data, client.alchemyTimer)
 	return data, err
-
 }
 
 func (client *Client) GetCode(network db.Network, address string) (string, error) {
@@ -526,5 +525,44 @@ func (client *Client) Batch(
 	}
 
 	return res, nil
+}
 
+func (client *Client) BatchGetTokenDecimals(
+	network db.Network,
+	tokens []string,
+) ([]*RpcResponse[string], error) {
+	requests := make([]*RpcRequest, len(tokens))
+	for i, token := range tokens {
+		params := struct {
+			To    string `json:"to"`
+			Input string `json:"input"`
+		}{
+			To: token,
+			// decimals() selector
+			Input: "0x313ce567",
+		}
+		requests[i] = client.NewRpcRequest(
+			"eth_call",
+			[]any{params, "latest"},
+			i,
+		)
+	}
+
+	body, err := json.Marshal(requests)
+	if err != nil {
+		return nil, fmt.Errorf("unable to marshal requests: %w", err)
+	}
+
+	url, err := client.newAlchemyUrl(network)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
+	if err != nil {
+		return nil, fmt.Errorf("unable to create http request: %w", err)
+	}
+
+	var data []*RpcResponse[string]
+	err = client.sendRequest(req, &data, client.alchemyTimer)
+	return data, err
 }

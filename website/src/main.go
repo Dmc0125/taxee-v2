@@ -231,6 +231,10 @@ func main() {
 		walletsSseHandler(pool, templates),
 	)
 	http.HandleFunc(
+		"/jobs",
+		jobsHandler(pool, templates),
+	)
+	http.HandleFunc(
 		"/events",
 		eventsHandler(context.Background(), pool, templates),
 	)
