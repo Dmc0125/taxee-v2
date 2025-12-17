@@ -1152,6 +1152,7 @@ func ParseTransactions(
 		return nil
 	}
 
+	solanaContext.errOrigin = db.ErrOriginProcess
 	eventsByTx := make(map[string][]*db.Event)
 
 	for _, tx := range transactions {
@@ -1314,6 +1315,25 @@ func ParseTransactions(
 		}
 
 		batch = pgx.Batch{}
+
+		const insertParserErrorQuery = `
+			insert into parser_error (
+				internal_tx_id, ix_idx, origin, type, data
+			) values (
+				$1, $2, $3, $4, $5
+			)
+		`
+		for _, err := range errors {
+			internalTxId, ok := internalTxsByHash[err.TxId]
+			if !ok {
+				return fmt.Errorf("missing internal tx id for %s", err.TxId)
+			}
+
+			batch.Queue(
+				insertParserErrorQuery,
+				internalTxId, err.IxIdx, err.Origin, err.Type, err.Data,
+			)
+		}
 
 		const insertEventQuery = `
 			insert into event (
