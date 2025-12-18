@@ -109,7 +109,7 @@ func newWalletComponent(
 	assert.True(ok, "missing globals for %s network", network.String())
 
 	s, ok := status.String()
-	assert.True(ok, "invalid status %d", status)
+	assert.True(ok, "invalid status %s", status)
 
 	walletData := walletComponent{
 		// TODO: real label
@@ -177,7 +177,7 @@ func walletsSseHandler(pool *pgxpool.Pool, templates *template.Template) http.Ha
 		}
 
 		ticker := time.NewTicker(time.Second)
-		lastStatus := db.Status(255)
+		var lastStatus db.Status
 
 		for {
 			select {
@@ -187,7 +187,7 @@ func walletsSseHandler(pool *pgxpool.Pool, templates *template.Template) http.Ha
 			}
 
 			const selectWalletStatus = `
-				select 
+				select
 					status,
 					address,
 					network,
@@ -253,8 +253,26 @@ func walletsHandler(
 	// 			w.delete_scheduled = false
 	const selectWalletsCountQuery string = `
 		select count(w.id) from wallet w where
-			w.user_account_id = $1 and 
+			w.user_account_id = $1 and
 			w.delete_scheduled = false
+	`
+
+	// resetJobsQuery
+	//
+	// 		update worker_job set
+	// 			status = 'reset_scheduled'
+	// 		where
+	// 			user_account_id = $1 and status = 'in_progress'
+	const resetJobsQuery string = `
+		update worker_job set
+			status = (
+				case
+					when status in ('in_progress', 'cancel_scheduled') then 'reset_scheduled'
+					else 'queued'
+			)::status
+		where
+			user_account_id = $1 and 
+			status != 'queued'
 	`
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -316,8 +334,6 @@ func walletsHandler(
 				return
 			}
 
-			/////////////
-			// insert
 			var status int
 			var walletId, walletsCount int32
 			var walletCreatedAt time.Time
@@ -325,6 +341,8 @@ func walletsHandler(
 			err = db.ExecuteTx(
 				r.Context(), pool,
 				func(ctx context.Context, tx pgx.Tx) error {
+					// insert wallet
+
 					const selectWalletQuery = `
 						select true from wallet w where
 							w.address = $1 and
@@ -376,7 +394,31 @@ func walletsHandler(
 						return nil
 					})
 
-					return tx.SendBatch(ctx, &batch).Close()
+					if err := tx.SendBatch(ctx, &batch).Close(); err != nil {
+						return err
+					}
+
+					// insert jobs
+
+					// TODO: if the jobs are running they need to be reset, same for delete and update
+					const setJobsAsQueuedQuery = `
+						insert into worker_job (
+							user_account_id, type, status, queued_at
+						) values
+							($1, 'parse_transactions', 'queued', now()),
+							($1, 'parse_events', 'queued', now())
+						on conflict (user_account_id, type) do update set
+							status = 'queued',
+							queued_at = now(),
+							finished_at = null
+					`
+					_, err = tx.Exec(ctx, setJobsAsQueuedQuery, userAccountId)
+					if err != nil {
+						logger.Error("unable to insert jobs for wallet %d: %s", walletId, err)
+						return err
+					}
+
+					return nil
 				},
 			)
 
@@ -418,12 +460,12 @@ func walletsHandler(
 			w.Write(html)
 		case http.MethodGet:
 			const selectWalletsQuery = `
-				select 
+				select
 					id, address, network, status, tx_count, created_at, finished_at
-				from 
+				from
 					wallet
 				where
-					user_account_id = $1 and 
+					user_account_id = $1 and
 					delete_scheduled = false
 				order by
 					created_at desc
@@ -491,10 +533,12 @@ func walletsHandler(
 				return
 			}
 
-			var status int
+			var ResponseStatus int
 			var walletsCount int32
 			err := db.ExecuteTx(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
 				batch := pgx.Batch{}
+				// delete wallet
+
 				const scheduleWalletForDeletionQuery = `
 					update wallet set
 						delete_scheduled = true,
@@ -512,7 +556,7 @@ func walletsHandler(
 					scheduleWalletForDeletionQuery, userAccountId, walletId,
 				).Exec(func(ct pgconn.CommandTag) error {
 					if ct.RowsAffected() == 0 {
-						status = 404
+						ResponseStatus = 404
 						return errors.New("")
 					}
 					return nil
@@ -526,14 +570,17 @@ func walletsHandler(
 					return nil
 				})
 
+				// reset worker jobs
+				batch.Queue(resetJobsQuery, userAccountId)
+
 				return tx.SendBatch(ctx, &batch).Close()
 			})
 
 			if err != nil {
-				if status == 0 {
-					status = 500
+				if ResponseStatus == 0 {
+					ResponseStatus = 500
 				}
-				w.WriteHeader(status)
+				w.WriteHeader(ResponseStatus)
 				return
 			}
 
@@ -570,43 +617,55 @@ func walletsHandler(
 
 			switch db.Status(newStatus) {
 			case db.StatusQueued:
-				const setWalletAsQueuedQuery = `
-					update wallet set
-						status = 'queued',
-						queued_at = now(),
-						fresh = (
-							case
-								when status = 'error' or status = 'canceled' then true
-								else false
-							end
-						)
-					where
-						user_account_id = $1 and
-						id = $2 and
-						delete_scheduled = false and
-						(
-							status = 'success' or
-							status = 'error' or
-							status = 'canceled'
-						)
-					returning
-						address, network, created_at
-				`
-				row := pool.QueryRow(
-					r.Context(), setWalletAsQueuedQuery,
-					userAccountId, walletId,
-				)
-
 				var address string
 				var network db.Network
 				var createdAt time.Time
-				if err := row.Scan(&address, &network, &createdAt); err != nil {
+
+				err := db.ExecuteTx(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
+					// update wallet
+					const setWalletAsQueuedQuery = `
+						update wallet set
+							status = 'queued',
+							queued_at = now(),
+							fresh = (
+								case
+									when status = 'error' or status = 'canceled' then true
+									else false
+								end
+							)
+						where
+							user_account_id = $1 and
+							id = $2 and
+							delete_scheduled = false and
+							status in ('success', 'error', 'canceled')
+						returning
+							address, network, created_at
+					`
+					row := tx.QueryRow(
+						ctx, setWalletAsQueuedQuery,
+						userAccountId, walletId,
+					)
+					if err := row.Scan(&address, &network, &createdAt); err != nil {
+						if errors.Is(err, pgx.ErrNoRows) {
+							return fmt.Errorf("wallet not found: %w", err)
+						}
+						return fmt.Errorf("unable to update wallet: %w", err)
+					}
+
+					// reset jobs
+					if _, err := tx.Exec(ctx, resetJobsQuery, userAccountId); err != nil {
+						return fmt.Errorf("unable to reset jobs: %w", err)
+					}
+
+					return nil
+				})
+
+				if err != nil {
 					if errors.Is(err, pgx.ErrNoRows) {
 						w.WriteHeader(404)
-						return
+					} else {
+						w.WriteHeader(500)
 					}
-					w.WriteHeader(500)
-					logger.Error("unable to update wallet: %s", err.Error())
 					return
 				}
 

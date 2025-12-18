@@ -43,15 +43,16 @@ func GetUserAccount(ctx context.Context, pool *pgxpool.Pool, id int32) (*GetUser
 	return res, nil
 }
 
-type Status uint8
+type Status string
 
 const (
-	StatusQueued Status = iota
-	StatusInProgress
-	StatusSuccess
-	StatusError
-	StatusCancelScheduled
-	StatusCanceled
+	StatusQueued          Status = "queued"
+	StatusInProgress      Status = "in_progress"
+	StatusSuccess         Status = "success"
+	StatusError           Status = "error"
+	StatusCancelScheduled Status = "cancel_scheduled"
+	StatusResetScheduled  Status = "reset_scheduled"
+	StatusCanceled        Status = "canceled"
 )
 
 func (dst *Status) ParseString(src string) error {
@@ -59,24 +60,19 @@ func (dst *Status) ParseString(src string) error {
 		return errors.New("empty")
 	}
 
-	switch src {
-	case "queued":
-		*dst = StatusQueued
-	case "in_progress":
-		*dst = StatusInProgress
-	case "success":
-		*dst = StatusSuccess
-	case "error":
-		*dst = StatusError
-	case "cancel_scheduled":
-		*dst = StatusCancelScheduled
-	case "canceled":
-		*dst = StatusCanceled
+	switch Status(src) {
+	case StatusQueued,
+		StatusInProgress,
+		StatusSuccess,
+		StatusError,
+		StatusCancelScheduled,
+		StatusResetScheduled,
+		StatusCanceled:
+		*dst = Status(src)
+		return nil
 	default:
 		return fmt.Errorf("%s is not a valid status", src)
 	}
-
-	return nil
 }
 
 func (dst *Status) Scan(src any) error {
@@ -94,18 +90,14 @@ func (dst *Status) Scan(src any) error {
 
 func (src *Status) String() (string, bool) {
 	switch *src {
-	case StatusQueued:
-		return "queued", true
-	case StatusInProgress:
-		return "in_progress", true
-	case StatusSuccess:
-		return "success", true
-	case StatusError:
-		return "error", true
-	case StatusCancelScheduled:
-		return "cancel_scheduled", true
-	case StatusCanceled:
-		return "canceled", true
+	case StatusQueued,
+		StatusInProgress,
+		StatusSuccess,
+		StatusError,
+		StatusCancelScheduled,
+		StatusResetScheduled,
+		StatusCanceled:
+		return string(*src), true
 	default:
 		return "", false
 	}
@@ -114,7 +106,7 @@ func (src *Status) String() (string, bool) {
 func (src Status) Value() (driver.Value, error) {
 	v, ok := src.String()
 	if !ok {
-		return nil, fmt.Errorf("invalid status: %d", src)
+		return nil, fmt.Errorf("invalid status: %s", src)
 	}
 	return v, nil
 }

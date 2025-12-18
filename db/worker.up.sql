@@ -28,10 +28,11 @@ create table worker_result (
     type worker_type not null,
     data jsonb,
 
-    canceled boolean not null default false,
+    status status not null,
     error_message varchar,
 
     started_at timestamptz not null,
+
     finished_at timestamptz not null
 );
 

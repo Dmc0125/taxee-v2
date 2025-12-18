@@ -34,26 +34,69 @@ import (
 //	)
 const insertWorkerResultQuery string = `
 	insert into worker_result (
-		type, canceled, error_message, started_at, finished_at, data
+		type, status, error_message, started_at, finished_at, data
 	) values (
 		$1, $2, $3, $4, now(), $5
 	)
 `
 
-type workerState struct {
-	runningFetchWallets      atomic.Uint32
-	runningFetchTransactions atomic.Uint32
+// selectJobScheduledForCancelQuery
+//
+//	select 1 from worker_job where
+//		id = $1 and status = 'cancel_scheduled'
+const selectJobScheduledForCancelQuery string = `
+	select status from worker_job where
+		id = $1
+`
+
+var workerErrResetScheduled = errors.New("reset scheduled")
+
+func cancelResourceJob(
+	appCtx context.Context,
+	jobCancel context.CancelFunc,
+	pool *pgxpool.Pool,
+	query string,
+	resourceId int32,
+) error {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		var status db.Status
+		err := pool.QueryRow(appCtx, query, resourceId).Scan(&status)
+		switch {
+		case err == nil:
+			switch status {
+			case db.StatusSuccess, db.StatusError:
+				return nil
+			case db.StatusCancelScheduled:
+				logger.Info("canceled job: %d", resourceId)
+				jobCancel()
+				return context.Canceled
+			case db.StatusResetScheduled:
+				logger.Info("reset job: %d", resourceId)
+				jobCancel()
+				return workerErrResetScheduled
+			}
+		case errors.Is(err, context.Canceled):
+			return nil
+		case !errors.Is(err, pgx.ErrNoRows):
+			logger.Error("unable to query resource scheduled for cancel: %s", err)
+		}
+	}
 }
 
 func consumeQueuedWallets(
+	jobCounter *atomic.Uint32,
+	ctx context.Context,
 	pool *pgxpool.Pool,
 	solanaRpc *solana.Rpc,
 	evmClient *evm.Client,
-	state *workerState,
 ) {
-	state.runningFetchWallets.Add(1)
-	defer state.runningFetchWallets.Store(state.runningFetchWallets.Load() - 1)
+	jobCounter.Add(1)
+	defer jobCounter.Store(jobCounter.Load() - 1)
 
+	// only consume wallet for which no other jobs are running
 	const consumeQueuedWalletQuery = `
 		update wallet set
 			status = 'in_progress'
@@ -61,7 +104,12 @@ func consumeQueuedWallets(
 			id = (
 				select id from wallet w where
 					status = 'queued' and
-					delete_scheduled = false
+					delete_scheduled = false and
+					not exists (
+						select 1 from worker_job wj where
+							wj.user_account_id = w.id and
+							wj.status in ('in_progress', 'cancel_scheduled', 'reset_scheduled')
+					)
 				order by
 					queued_at asc
 				limit
@@ -70,7 +118,7 @@ func consumeQueuedWallets(
 		returning
 			id, user_account_id, address, network, fresh, data
 	`
-	row := pool.QueryRow(context.Background(), consumeQueuedWalletQuery)
+	row := pool.QueryRow(ctx, consumeQueuedWalletQuery)
 
 	var (
 		walletId, userAccountId int32
@@ -91,60 +139,35 @@ func consumeQueuedWallets(
 		return
 	}
 
-	fetchCtx, fetchCtxCancel := context.WithCancel(context.Background())
-
-	var errgroup errgroup.Group
-	groupCtx, groupCtxCancel := context.WithCancel(context.Background())
+	var eg errgroup.Group
+	groupCtx, groupCtxCancel := context.WithCancel(ctx)
 
 	startedAt := time.Now()
 
-	errgroup.Go(func() error {
-		err := fetcher.Fetch(
-			fetchCtx, pool, solanaRpc, evmClient,
+	eg.Go(func() error {
+		defer groupCtxCancel()
+		return fetcher.Fetch(
+			groupCtx, pool, solanaRpc, evmClient,
 			userAccountId, network, walletAddress, walletId,
 			walletDataSerialized, fresh,
 		)
-		groupCtxCancel()
-		return err
 	})
 
-	errgroup.Go(func() error {
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-groupCtx.Done():
-				return nil
-			case <-ticker.C:
-			}
-
-			const selectWalletScheduledForCancelQuery = `
-				select 1 from wallet where
-					id = $1 and status = 'cancel_scheduled'
-			`
-			tag, err := pool.Exec(
-				context.Background(), selectWalletScheduledForCancelQuery,
-				walletId,
-			)
-			if err != nil {
-				// NOTE: should this return an error and cancel the process ?
-				logger.Error("unable to query cancel message: %s", err)
-				continue
-			}
-
-			if tag.RowsAffected() > 0 {
-				logger.Info("canceled job for wallet: %d", walletId)
-				fetchCtxCancel()
-				return fetchCtx.Err()
-			}
-		}
+	eg.Go(func() error {
+		const selectWalletScheduledForCancelQuery = `
+			select status  from wallet where
+				id = $1
+		`
+		return cancelResourceJob(
+			groupCtx, groupCtxCancel, pool,
+			selectWalletScheduledForCancelQuery, walletId,
+		)
 	})
 
-	workerError := errgroup.Wait()
+	workerError := eg.Wait()
 
 	db.ExecuteTx(
-		context.Background(), pool,
+		ctx, pool,
 		func(ctx context.Context, tx pgx.Tx) error {
 			const updateWalletQuery = `
 				update wallet set
@@ -155,7 +178,6 @@ func consumeQueuedWallets(
 					tx_count
 			`
 			var status db.Status
-			var canceled bool
 			var errorMessage pgtype.Text
 
 			switch {
@@ -163,7 +185,6 @@ func consumeQueuedWallets(
 				status = db.StatusSuccess
 			case errors.Is(workerError, context.Canceled):
 				status = db.StatusCanceled
-				canceled = true
 			default:
 				status = db.StatusError
 				errorMessage = pgtype.Text{
@@ -195,7 +216,7 @@ func consumeQueuedWallets(
 
 			_, err = tx.Exec(
 				ctx, insertWorkerResultQuery,
-				"fetch_wallet", canceled, errorMessage, startedAt, workerDataSerialized,
+				"fetch_wallet", status, errorMessage, startedAt, workerDataSerialized,
 			)
 			if err != nil {
 				logger.Error("unable to insert worker data: %s", err.Error())
@@ -232,37 +253,74 @@ func deleteWallets(pool *pgxpool.Pool) {
 }
 
 func consumeQueuedWorkerJob(
+	jobCounter *atomic.Uint32,
 	ctx context.Context,
 	pool *pgxpool.Pool,
 	evmClient *evm.Client,
-	state *workerState,
+	jobType db.JobType,
 ) {
-	state.runningFetchTransactions.Add(1)
-	defer state.runningFetchTransactions.Store(state.runningFetchTransactions.Load() - 1)
+	jobCounter.Add(1)
+	defer jobCounter.Store(jobCounter.Load() - 1)
 
-	const consumeQueuedJobQuery = `
-		update worker_job set
-			status = 'in_progress'
-		where
-			id = (
-				select id from worker_job where
-					status = 'queued'
-				order by
-					queued_at asc
-				limit
-					1
-			)
-		returning
-			id, type, user_account_id
-	`
-	row := pool.QueryRow(context.Background(), consumeQueuedJobQuery)
+	var query string
+	switch jobType {
+	case db.JobParseTransactions:
+		// only consume parse_transactions job when every wallet is in terminal state
+		query = `
+			update worker_job set
+				status = 'in_progress'
+			where
+				id = (
+					select wj.id from worker_job wj where
+						wj.status = 'queued' and
+						wj.type = 'parse_transactions' and
+						not exists (
+							select 1 from wallet w where
+								w.user_account_id = wj.user_account_id and
+								w.status in ('queued', 'in_progress', 'cancel_scheduled')
+						)
+					order by
+						queued_at asc
+					limit
+						1
+				)
+			returning
+				id, user_account_id
+		`
+	case db.JobParseEvents:
+		// only consume parse_events job when parse_transactions was successful
+		query = `
+			update worker_job set
+				status = 'in_progress'
+			where
+				id = (
+					select wj.id from worker_job wj where
+						status = 'queued' and
+						wj.type = 'parse_events' and
+						(
+							select wj2.status from worker_job wj2 where
+								wj2.user_account_id = wj.user_account_id and
+								wj2.type = 'parse_transactions'
+						) = 'success'
+					order by
+						queued_at asc
+					limit
+						1
+				)
+			returning
+				id, user_account_id
+		`
+	default:
+		assert.True(false, "invalid job type: %s", jobType)
+	}
+
+	row := pool.QueryRow(context.Background(), query)
 	var jobId, userAccountId int32
-	var jobType string
-	if err := row.Scan(&jobId, &jobType, &userAccountId); err != nil {
+	if err := row.Scan(&jobId, &userAccountId); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return
 		}
-		logger.Error("unable to consume queued job: %s", err.Error())
+		logger.Error("unable to consume queued %s job: %s", jobType, err.Error())
 		return
 	}
 
@@ -275,62 +333,38 @@ func consumeQueuedWorkerJob(
 	eg.Go(func() error {
 		defer groupCtxCancel()
 		switch jobType {
-		case "parse_transactions":
+		case db.JobParseTransactions:
 			return parser.ParseTransactions(groupCtx, pool, userAccountId, evmClient)
-		case "parse_events":
+		case db.JobParseEvents:
 			return parser.ParseEvents(groupCtx, pool, userAccountId)
 		default:
-			return fmt.Errorf("invalid type: %s", jobType)
+			assert.True(false, "unreachable")
+			return nil
 		}
 	})
 
 	eg.Go(func() error {
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-
-		for {
-			const selectJobScheduledForCancelQuery = `
-				select 1 from worker_job where
-					id = $1 and status = 'cancel_scheduled'
-			`
-			tag, err := pool.Exec(
-				groupCtx, selectJobScheduledForCancelQuery,
-				jobId,
-			)
-			if err != nil {
-				// job is done
-				if errors.Is(err, context.Canceled) {
-					return nil
-				}
-
-				// NOTE: should this return an error and cancel the process ?
-				logger.Error("unable to query cancel message: %s", err)
-				continue
-			}
-
-			if tag.RowsAffected() > 0 {
-				logger.Info("canceled job: %d", jobId)
-				groupCtxCancel()
-				return groupCtx.Err()
-			}
-		}
+		return cancelResourceJob(
+			groupCtx, groupCtxCancel, pool,
+			selectJobScheduledForCancelQuery, jobId,
+		)
 	})
 
 	err := eg.Wait()
-	logger.Info("job %d done", jobId)
+	logger.Info("%s job %d done", jobType, jobId)
 
 	var status db.Status
-	var canceled bool
 	var errorMessage pgtype.Text
 
 	switch {
 	case err == nil:
 		status = db.StatusSuccess
+	case errors.Is(err, workerErrResetScheduled):
+		status = db.StatusQueued
 	case errors.Is(err, context.Canceled):
 		status = db.StatusCanceled
-		canceled = true
 	default:
-		logger.Info("job error: %s", err.Error())
+		logger.Info("%s job error: %s", jobType, err.Error())
 		status = db.StatusError
 		errorMessage = pgtype.Text{
 			Valid:  true,
@@ -338,9 +372,20 @@ func consumeQueuedWorkerJob(
 		}
 	}
 
+	// NOTE:
+	// status has to be updated conditionally because - if job finishes successfuly
+	// and cancels the goroutine that pulls the status and in between the time
+	// when the goroutine is not pulling anymore and this update happens, wallet
+	// is added/refetched/canceled, ... whatever, job would not reset, since that
+	// state would not be known
 	const updateJobQuery = `
 		update worker_job set
-			status = $1,
+			status = (
+				case
+					when status = 'reset_scheduled' then 'queued'
+					else $1
+				end
+			)::status,
 			finished_at = now()
 		where
 			id = $2
@@ -349,6 +394,7 @@ func consumeQueuedWorkerJob(
 	err = db.ExecuteTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		batch := pgx.Batch{}
 
+		// TODO: this needs to check if job is not scheduled for reset
 		batch.Queue(updateJobQuery, status, jobId)
 
 		type workerData struct {
@@ -358,12 +404,12 @@ func consumeQueuedWorkerJob(
 			UserAccountId: userAccountId,
 		})
 		if err != nil {
-			return fmt.Errorf("unable to serialize worker data: %w", err)
+			return fmt.Errorf("unable to serialize %s worker data: %w", jobType, err)
 		}
 
 		batch.Queue(
 			insertWorkerResultQuery,
-			"parse_transactions", canceled, errorMessage, startedAt,
+			jobType, status, errorMessage, startedAt,
 			workerDataSerialized,
 		)
 
@@ -371,10 +417,10 @@ func consumeQueuedWorkerJob(
 	})
 
 	if err != nil {
-		logger.Error("unable to update job: %s", err)
+		logger.Error("unable to update %s job: %s", jobType, err)
 	}
 
-	logger.Info("updated db")
+	logger.Info("updated %s", jobType)
 }
 
 func main() {
@@ -396,17 +442,38 @@ func main() {
 	coingecko.Init()
 
 	ticker := time.NewTicker(time.Second)
-	state := workerState{}
+
+	var (
+		runningFetchWallets      atomic.Uint32
+		runningParseTransactions atomic.Uint32
+		runningParseEvents       atomic.Uint32
+	)
 
 	for {
 		<-ticker.C
 
-		if state.runningFetchWallets.Load() == 0 {
-			go consumeQueuedWallets(pool, solanaRpc, evmClient, &state)
+		if runningFetchWallets.Load() == 0 {
+			go consumeQueuedWallets(
+				&runningFetchWallets,
+				context.TODO(),
+				pool, solanaRpc, evmClient,
+			)
 		}
 
-		if state.runningFetchTransactions.Load() == 0 {
-			go consumeQueuedWorkerJob(context.TODO(), pool, evmClient, &state)
+		if runningParseTransactions.Load() == 0 {
+			go consumeQueuedWorkerJob(
+				&runningParseTransactions,
+				context.TODO(),
+				pool, evmClient, db.JobParseTransactions,
+			)
+		}
+
+		if runningParseEvents.Load() == 0 {
+			go consumeQueuedWorkerJob(
+				&runningParseEvents,
+				context.TODO(),
+				pool, evmClient, db.JobParseEvents,
+			)
 		}
 
 		go deleteWallets(pool)

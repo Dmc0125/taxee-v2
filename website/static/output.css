@@ -795,11 +795,6 @@
       gap: calc(var(--spacing) * 2);
     }
   }
-  .xl\:block {
-    @media (width >= 80rem) {
-      display: block;
-    }
-  }
   .\32 xl\:block {
     @media (width >= 96rem) {
       display: block;

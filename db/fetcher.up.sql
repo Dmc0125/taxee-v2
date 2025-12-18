@@ -6,6 +6,7 @@ create type status as enum (
     'success',
     'error',
     'cancel_scheduled',
+    'reset_scheduled',
     'canceled'
 );
 
@@ -32,6 +33,7 @@ create table wallet (
     data jsonb not null,
 
     status status not null default 'queued',
+    check (status <> 'reset_scheduled'),
     fresh boolean not null default false,
     delete_scheduled boolean not null default false,
 
