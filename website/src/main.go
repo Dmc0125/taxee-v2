@@ -14,6 +14,8 @@ import (
 	"taxee/pkg/db"
 	"taxee/pkg/dotenv"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func sendSSEError(
@@ -55,8 +57,115 @@ func initSSEHandler(w http.ResponseWriter) (flusher http.Flusher, ok bool) {
 	return
 }
 
-type pageLayoutComponentData struct {
-	Content template.HTML
+type uiIndicatorStatus string
+
+const (
+	uiIndicatorStatusSuccess       uiIndicatorStatus = "success"
+	uiIndicatorStatusError         uiIndicatorStatus = "error"
+	uiIndicatorStatusUninitialized uiIndicatorStatus = "uninitialized"
+	uiIndicatorStatusInProgress    uiIndicatorStatus = "in_progress"
+)
+
+type uiStatusIndicatorData struct {
+	SseSubscribe   bool
+	Status         uiIndicatorStatus
+	InProgressJobs []string
+}
+
+func (s *uiStatusIndicatorData) eq(other *uiStatusIndicatorData) bool {
+	if s.Status == uiIndicatorStatusInProgress && s.Status == other.Status {
+		for i, j := range s.InProgressJobs {
+			if i > len(other.InProgressJobs)-1 {
+				return false
+			}
+
+			if j != other.InProgressJobs[i] {
+				return false
+			}
+		}
+	}
+
+	return s.Status == other.Status
+}
+
+func newUiStatusIndicatorData(jobs []*uiJob) *uiStatusIndicatorData {
+	if len(jobs) == 0 {
+		return &uiStatusIndicatorData{
+			Status: uiIndicatorStatusUninitialized,
+		}
+	}
+
+	status := uiIndicatorStatusSuccess
+	var inProgressJobs []string
+
+	for _, j := range jobs {
+		switch j.t {
+		case db.JobFetchWallet:
+			switch j.status {
+			case db.StatusQueued, db.StatusInProgress:
+				inProgressJobs = append(inProgressJobs, j.label)
+			}
+		case db.JobParseTransactions, db.JobParseEvents:
+			switch j.status {
+			case db.StatusError:
+				return &uiStatusIndicatorData{
+					Status: uiIndicatorStatusError,
+				}
+			case db.StatusInProgress, db.StatusQueued, db.StatusResetScheduled:
+				inProgressJobs = append(inProgressJobs, j.label)
+			}
+		}
+	}
+
+	subscribe := false
+
+	if len(inProgressJobs) > 0 {
+		subscribe = true
+		status = uiIndicatorStatusInProgress
+	}
+
+	return &uiStatusIndicatorData{
+		SseSubscribe:   subscribe,
+		Status:         status,
+		InProgressJobs: inProgressJobs,
+	}
+}
+
+type uiJob struct {
+	status db.Status
+	label  string
+	t      db.JobType
+}
+
+type uiJobs []*uiJob
+
+func (jobs *uiJobs) appendFromRows(rows pgx.Rows) error {
+	var jobType db.JobType
+	var jobStatus db.Status
+	if err := rows.Scan(&jobType, &jobStatus); err != nil {
+		return err
+	}
+
+	var label string
+	switch jobType {
+	case db.JobParseTransactions:
+		label = "Parse transactions"
+	case db.JobParseEvents:
+		label = "Parse events"
+	}
+
+	*jobs = append(*jobs, &uiJob{
+		status: jobStatus,
+		label:  label,
+		t:      jobType,
+	})
+
+	return nil
+}
+
+type dashboardPageData struct {
+	Content         template.HTML
+	StatusIndicator *uiStatusIndicatorData
 }
 
 func loadTemplates(templates *template.Template, dirPath string) {
@@ -72,12 +181,20 @@ func loadTemplates(templates *template.Template, dirPath string) {
 			// NOTE: replace new lines with space so we can send SSE updates
 			// without encoding
 			sb := strings.Builder{}
+			var prev byte
+
+			isWhitespace := func(c byte) bool {
+				return c == ' ' || c == '\t'
+			}
+
 			for _, c := range fileData {
 				if c != '\n' {
-					sb.WriteByte(c)
-				} else {
-					sb.WriteByte(' ')
+					if !isWhitespace(c) || (isWhitespace(c) && !isWhitespace(prev)) {
+						sb.WriteByte(c)
+					}
 				}
+
+				prev = c
 			}
 
 			templates, err = templates.Parse(sb.String())
@@ -199,6 +316,22 @@ func main() {
 	coingecko.Init()
 
 	templateFuncs := template.FuncMap{
+		"struct": func(keyvals ...any) map[string]any {
+			assert.True(len(keyvals)%2 == 0, "invalid struct args len")
+
+			m := make(map[string]any)
+			for i := 0; i < len(keyvals); i += 2 {
+				k, v := keyvals[i], keyvals[i+1]
+				key, ok := k.(string)
+				assert.True(ok, "invalid key")
+				m[key] = v
+			}
+
+			return m
+		},
+		"now": func() int64 {
+			return time.Now().Unix()
+		},
 		"formatDate": func(t time.Time) string {
 			return t.Format("02/01/2006")
 		},
@@ -231,16 +364,12 @@ func main() {
 		walletsSseHandler(pool, templates),
 	)
 	http.HandleFunc(
-		"/jobs",
-		jobsHandler(pool, templates),
+		"/jobs/sse",
+		jobsSseHandler(pool, templates),
 	)
 	http.HandleFunc(
 		"/events",
 		eventsHandler(context.Background(), pool, templates),
-	)
-	http.HandleFunc(
-		"/sync_request",
-		syncRequestHandler(pool, templates),
 	)
 	http.HandleFunc(
 		"/tokens",

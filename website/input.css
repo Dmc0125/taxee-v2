@@ -53,3 +53,4 @@
 .button-sm {
     @apply h-8 px-4 hover:bg-gray-200 rounded-lg;
 }
+

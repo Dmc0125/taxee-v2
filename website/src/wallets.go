@@ -70,6 +70,13 @@ func parseUintParam[T any](
 	}
 }
 
+func defaultWalletLabel(address string) string {
+	return fmt.Sprintf(
+		"Wallet %s",
+		address[len(address)-4:],
+	)
+}
+
 type walletComponent struct {
 	Label   string
 	Address string
@@ -242,6 +249,38 @@ func walletsSseHandler(pool *pgxpool.Pool, templates *template.Template) http.Ha
 	}
 }
 
+type uiWalletStatus struct {
+	Status db.Status
+	Id     int32
+}
+
+// selectJobsQuery
+//
+//	select
+//		type, status
+//	from
+//		worker_job
+//	where
+//		user_account_id = $1
+//	order by
+//		case
+//			when type = 'parse_transactions' then 0
+//			else 1
+//		end
+const selectJobsQuery string = `
+	select
+		type, status
+	from
+		worker_job
+	where
+		user_account_id = $1
+	order by
+		case
+			when type = 'parse_transactions' then 0
+			else 1
+		end
+`
+
 func walletsHandler(
 	pool *pgxpool.Pool,
 	templates *template.Template,
@@ -257,22 +296,34 @@ func walletsHandler(
 			w.delete_scheduled = false
 	`
 
+	// TODO: this only returns if if atctually updates - NOT correct for deletion
 	// resetJobsQuery
 	//
 	// 		update worker_job set
-	// 			status = 'reset_scheduled'
+	// 			status = (
+	// 				case
+	// 					when status in ('in_progress', 'cancel_scheduled') then 'reset_scheduled'
+	// 					else 'queued'
+	// 				end
+	// 			)::status
 	// 		where
-	// 			user_account_id = $1 and status = 'in_progress'
+	// 			user_account_id = $1 and
+	// 			status != 'queued'
+	// 		returning
+	// 			status, type
 	const resetJobsQuery string = `
 		update worker_job set
 			status = (
 				case
 					when status in ('in_progress', 'cancel_scheduled') then 'reset_scheduled'
 					else 'queued'
+				end
 			)::status
 		where
 			user_account_id = $1 and 
 			status != 'queued'
+		returning
+			status, type
 	`
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -280,6 +331,131 @@ func walletsHandler(
 		// TODO: auth
 
 		switch r.Method {
+		case http.MethodGet:
+			const selectWalletsQuery = `
+				select
+					id, label, address, network, status, tx_count, created_at, finished_at
+				from
+					wallet
+				where
+					user_account_id = $1 and
+					delete_scheduled = false
+				order by
+					created_at desc
+			`
+
+			var responseStatus int
+			var walletsRows []*walletComponent
+			var jobs []*uiJob
+
+			db.ExecuteTx(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
+				batch := pgx.Batch{}
+
+				batch.Queue(
+					selectWalletsQuery, userAccountId,
+				).Query(func(rows pgx.Rows) error {
+					for rows.Next() {
+						var walletId int32
+						var walletLabel pgtype.Text
+						var walletAddress string
+						var network db.Network
+						var status db.Status
+						var txCount int32
+						var finishedAt pgtype.Timestamp
+						var createdAt time.Time
+						if err := rows.Scan(
+							&walletId, &walletLabel, &walletAddress, &network,
+							&status, &txCount, &createdAt, &finishedAt,
+						); err != nil {
+							responseStatus = 500
+							logger.Error("unable to scan wallets: %s", err)
+							return err
+						}
+
+						if walletLabel.Valid == false {
+							walletLabel.Valid = true
+							walletLabel.String = defaultWalletLabel(walletAddress)
+						}
+
+						if status == db.StatusQueued || status == db.StatusInProgress {
+							jobs = append(jobs, &uiJob{
+								status: status,
+								label:  walletLabel.String,
+								t:      db.JobFetchWallet,
+							})
+						}
+
+						walletData := newWalletComponent(
+							walletAddress,
+							txCount,
+							walletId,
+							network,
+							status,
+							finishedAt,
+							createdAt,
+						)
+						walletsRows = append(walletsRows, &walletData)
+					}
+
+					return nil
+				})
+
+				batch.Queue(
+					selectJobsQuery, userAccountId,
+				).Query(func(rows pgx.Rows) error {
+					for rows.Next() {
+						var jobType db.JobType
+						var jobStatus db.Status
+						if err := rows.Scan(&jobType, &jobStatus); err != nil {
+							responseStatus = 500
+							logger.Error("unable to scan jobs: %s", err)
+							return err
+						}
+
+						var label string
+						switch jobType {
+						case db.JobParseTransactions:
+							label = "Parse transactions"
+						case db.JobParseEvents:
+							label = "Parse events"
+						}
+
+						jobs = append(jobs, &uiJob{
+							status: jobStatus,
+							label:  label,
+							t:      jobType,
+						})
+					}
+
+					return nil
+				})
+
+				if err := tx.SendBatch(ctx, &batch).Close(); err != nil {
+					responseStatus = 500
+					logger.Error("unable to execute batch: %s", err)
+					return err
+				}
+
+				return nil
+			})
+
+			if responseStatus != 0 {
+				w.WriteHeader(responseStatus)
+				return
+			}
+
+			walletsPage := walletsComponent{
+				WalletsCount: len(walletsRows),
+				Wallets:      walletsRows,
+			}
+			walletsPageContent := executeTemplateMust(templates, "wallets_page", walletsPage)
+
+			page := executeTemplateMust(templates, "dashboard_layout", dashboardPageData{
+				Content:         template.HTML(walletsPageContent),
+				StatusIndicator: newUiStatusIndicatorData(jobs),
+			})
+			w.WriteHeader(200)
+			w.Write(page)
 		case http.MethodPost:
 			err := r.ParseMultipartForm(10 << 20)
 			if err != nil {
@@ -334,9 +510,10 @@ func walletsHandler(
 				return
 			}
 
-			var status int
+			var responseStatus int
 			var walletId, walletsCount int32
 			var walletCreatedAt time.Time
+			var jobs uiJobs
 
 			err = db.ExecuteTx(
 				r.Context(), pool,
@@ -359,7 +536,7 @@ func walletsHandler(
 						return err
 					}
 					if walletFound {
-						status = 409
+						responseStatus = 409
 						return errors.New("")
 					}
 
@@ -381,6 +558,12 @@ func walletsHandler(
 							logger.Error("unable to insert wallet: %s", err)
 							return err
 						}
+
+						jobs = append(jobs, &uiJob{
+							status: db.StatusQueued,
+							label:  defaultWalletLabel(walletAddress),
+							t:      db.JobFetchWallet,
+						})
 						return nil
 					})
 
@@ -400,7 +583,6 @@ func walletsHandler(
 
 					// insert jobs
 
-					// TODO: if the jobs are running they need to be reset, same for delete and update
 					const setJobsAsQueuedQuery = `
 						insert into worker_job (
 							user_account_id, type, status, queued_at
@@ -408,14 +590,28 @@ func walletsHandler(
 							($1, 'parse_transactions', 'queued', now()),
 							($1, 'parse_events', 'queued', now())
 						on conflict (user_account_id, type) do update set
-							status = 'queued',
+							status = (
+								case
+									when worker_job.status in ('in_progress', 'cancel_scheduled') then 'reset_scheduled'
+									else 'queued'
+								end
+							)::status,
 							queued_at = now(),
 							finished_at = null
+						returning
+							type, worker_job.status
 					`
-					_, err = tx.Exec(ctx, setJobsAsQueuedQuery, userAccountId)
+					rows, err := tx.Query(ctx, setJobsAsQueuedQuery, userAccountId)
 					if err != nil {
 						logger.Error("unable to insert jobs for wallet %d: %s", walletId, err)
 						return err
+					}
+					for rows.Next() {
+						if err := jobs.appendFromRows(rows); err != nil {
+							responseStatus = 500
+							logger.Error("unable to update jobs: %s", err.Error())
+							return err
+						}
 					}
 
 					return nil
@@ -423,14 +619,23 @@ func walletsHandler(
 			)
 
 			if err != nil {
-				if status == 0 {
-					status = 500
+				if responseStatus == 0 {
+					responseStatus = 500
 				}
-				w.WriteHeader(status)
+				w.WriteHeader(responseStatus)
 				return
 			}
 
-			w.Header().Add("location", fmt.Sprintf("/wallets/sse?id=%d", walletId))
+			statusData := newUiStatusIndicatorData(jobs)
+			if statusData.SseSubscribe {
+				w.Header().Add("location", fmt.Sprintf(
+					"/wallets/sse?id=%d,/jobs/sse",
+					walletId,
+				))
+			} else {
+				w.Header().Add("location", fmt.Sprintf("/wallets/sse?id=%d", walletId))
+			}
+
 			w.WriteHeader(202)
 
 			walletData := newWalletComponent(
@@ -442,89 +647,27 @@ func walletsHandler(
 				pgtype.Timestamp{},
 				walletCreatedAt,
 			)
+
 			var html []byte
 
 			if walletsCount == 1 {
-				html = executeTemplateMust(templates, "wallets", walletsComponent{
-					WalletsCount: 1,
-					Wallets:      []*walletComponent{&walletData},
-				})
+				html = newResponseHtml(
+					executeTemplateMust(templates, "wallets", walletsComponent{
+						WalletsCount: 1,
+						Wallets:      []*walletComponent{&walletData},
+					}),
+					executeTemplateMust(templates, "global_status", statusData),
+				)
 			} else {
 				walletData.Insert = true
 				html = newResponseHtml(
 					executeTemplateMust(templates, "wallet", walletData),
 					executeTemplateMust(templates, "wallets_count", walletsCount),
+					executeTemplateMust(templates, "global_status", statusData),
 				)
 			}
 
 			w.Write(html)
-		case http.MethodGet:
-			const selectWalletsQuery = `
-				select
-					id, address, network, status, tx_count, created_at, finished_at
-				from
-					wallet
-				where
-					user_account_id = $1 and
-					delete_scheduled = false
-				order by
-					created_at desc
-			`
-			rows, err := pool.Query(r.Context(), selectWalletsQuery, userAccountId)
-			if err != nil {
-				w.WriteHeader(500)
-				logger.Info("unable to query wallets: %s", err)
-				return
-			}
-
-			var walletsRows []*walletComponent
-
-			for rows.Next() {
-				var walletId int32
-				var walletAddress string
-				var network db.Network
-				var status db.Status
-				var txCount int32
-				var finishedAt pgtype.Timestamp
-				var createdAt time.Time
-				if err := rows.Scan(
-					&walletId, &walletAddress, &network, &status, &txCount, &createdAt, &finishedAt,
-				); err != nil {
-					w.WriteHeader(500)
-					w.Write(fmt.Appendf(nil, "unable to scan wallets: %s", err))
-					return
-				}
-
-				walletData := newWalletComponent(
-					walletAddress,
-					txCount,
-					walletId,
-					network,
-					status,
-					finishedAt,
-					createdAt,
-				)
-				walletsRows = append(walletsRows, &walletData)
-			}
-
-			if err := rows.Err(); err != nil {
-				w.WriteHeader(500)
-				w.Write(fmt.Appendf(nil, "unable to read wallets: %s", err))
-				return
-			}
-
-			walletsPage := walletsComponent{
-				WalletsCount: len(walletsRows),
-				Wallets:      walletsRows,
-			}
-
-			walletsPageContent := executeTemplateMust(templates, "wallets_page", walletsPage)
-
-			page := executeTemplateMust(templates, "dashboard_layout", pageLayoutComponentData{
-				Content: template.HTML(walletsPageContent),
-			})
-			w.WriteHeader(200)
-			w.Write(page)
 		case http.MethodDelete:
 			var walletId int32
 			if err := parseIntParam(r.URL.Query(), &walletId, "id", true, 32); err != nil {
@@ -533,9 +676,11 @@ func walletsHandler(
 				return
 			}
 
-			var ResponseStatus int
+			var responseStatus int
 			var walletsCount int32
-			err := db.ExecuteTx(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
+			var jobs uiJobs
+
+			db.ExecuteTx(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
 				batch := pgx.Batch{}
 				// delete wallet
 
@@ -556,7 +701,7 @@ func walletsHandler(
 					scheduleWalletForDeletionQuery, userAccountId, walletId,
 				).Exec(func(ct pgconn.CommandTag) error {
 					if ct.RowsAffected() == 0 {
-						ResponseStatus = 404
+						responseStatus = 404
 						return errors.New("")
 					}
 					return nil
@@ -564,23 +709,26 @@ func walletsHandler(
 
 				batch.Queue(selectWalletsCountQuery, userAccountId).QueryRow(func(row pgx.Row) error {
 					if err := row.Scan(&walletsCount); err != nil {
+						responseStatus = 500
 						logger.Error("unable to select wallets count: %s", err)
 						return err
 					}
 					return nil
 				})
 
-				// reset worker jobs
-				batch.Queue(resetJobsQuery, userAccountId)
+				if err := tx.SendBatch(ctx, &batch).Close(); err != nil {
+					responseStatus = 500
+					logger.Error("unable to execute batch: %s", err)
+					return err
+				}
 
-				return tx.SendBatch(ctx, &batch).Close()
+				// TODO: rerun jobs but only if any wallets exist
+
+				return nil
 			})
 
-			if err != nil {
-				if ResponseStatus == 0 {
-					ResponseStatus = 500
-				}
-				w.WriteHeader(ResponseStatus)
+			if responseStatus != 0 {
+				w.WriteHeader(responseStatus)
 				return
 			}
 
@@ -590,6 +738,11 @@ func walletsHandler(
 			} else {
 				html = executeTemplateMust(templates, "wallets_count", walletsCount)
 			}
+
+			html = newResponseHtml(
+				html,
+				executeTemplateMust(templates, "global_status", newUiStatusIndicatorData(jobs)),
+			)
 
 			w.WriteHeader(200)
 			w.Write(html)
@@ -608,22 +761,20 @@ func walletsHandler(
 				return
 			}
 
-			var newStatus uint8
-			if err := parseUintParam(r.Form, &newStatus, "status", 8); err != nil {
+			var newStatus db.Status
+			if err := newStatus.ParseString(r.Form.Get("status")); err != nil {
 				w.WriteHeader(400)
-				w.Write([]byte(err.Error()))
+				w.Write(fmt.Appendf(nil, "status: %s", err.Error()))
 				return
 			}
 
-			switch db.Status(newStatus) {
-			case db.StatusQueued:
-				var address string
-				var network db.Network
-				var createdAt time.Time
+			var jobs uiJobs
 
+			switch newStatus {
+			case db.StatusQueued:
 				err := db.ExecuteTx(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
 					// update wallet
-					const setWalletAsQueuedQuery = `
+					const queueWallet = `
 						update wallet set
 							status = 'queued',
 							queued_at = now(),
@@ -639,21 +790,44 @@ func walletsHandler(
 							delete_scheduled = false and
 							status in ('success', 'error', 'canceled')
 						returning
-							address, network, created_at
+							address, label
 					`
-					row := tx.QueryRow(
-						ctx, setWalletAsQueuedQuery,
-						userAccountId, walletId,
-					)
-					if err := row.Scan(&address, &network, &createdAt); err != nil {
-						if errors.Is(err, pgx.ErrNoRows) {
-							return fmt.Errorf("wallet not found: %w", err)
-						}
+					var address string
+					var label pgtype.Text
+					err := tx.QueryRow(
+						ctx, queueWallet, userAccountId, walletId,
+					).Scan(&address, &label)
+					if errors.Is(err, pgx.ErrNoRows) {
+						return fmt.Errorf("wallet not found: %w", pgx.ErrNoRows)
+					}
+					if err != nil {
 						return fmt.Errorf("unable to update wallet: %w", err)
 					}
+					if !label.Valid {
+						label.String = defaultWalletLabel(address)
+					}
+					jobs = append(jobs, &uiJob{
+						status: db.StatusQueued,
+						label:  label.String,
+						t:      db.JobFetchWallet,
+					})
 
 					// reset jobs
-					if _, err := tx.Exec(ctx, resetJobsQuery, userAccountId); err != nil {
+					_, err = tx.Exec(ctx, resetJobsQuery, userAccountId)
+					if err != nil {
+						return fmt.Errorf("unable to reset jobs: %w", err)
+					}
+
+					rows, err := tx.Query(ctx, selectJobsQuery, userAccountId)
+					if err != nil {
+						return fmt.Errorf("unable to query jobs: %w", err)
+					}
+					for rows.Next() {
+						if err := jobs.appendFromRows(rows); err != nil {
+							return fmt.Errorf("unable to scan jobs: %w", err)
+						}
+					}
+					if err := rows.Err(); err != nil {
 						return fmt.Errorf("unable to reset jobs: %w", err)
 					}
 
@@ -666,22 +840,41 @@ func walletsHandler(
 					} else {
 						w.WriteHeader(500)
 					}
+					logger.Error(err.Error())
 					return
 				}
 
-				w.Header().Add("location", fmt.Sprintf("/wallets/sse?id=%d", walletId))
+				w.Header().Add("location", fmt.Sprintf(
+					"/wallets/sse?id=%d,/jobs/sse",
+					walletId,
+				))
 				w.WriteHeader(202)
 
-				html := executeTemplateMust(templates, "wallet", newWalletComponent(
-					address,
-					0,
-					walletId,
-					network,
-					db.StatusQueued,
-					pgtype.Timestamp{},
-					createdAt,
+				walletStatusData := uiWalletStatus{
+					Status: db.StatusQueued,
+					Id:     walletId,
+				}
+				walletStatusHtml := executeTemplateMust(
+					templates,
+					"wallet_status",
+					&walletStatusData,
+				)
+				walletFetchButtnHtml := executeTemplateMust(
+					templates,
+					"wallet_fetch_button",
+					&walletStatusData,
+				)
+				globalStatusHtml := executeTemplateMust(
+					templates,
+					"global_status",
+					newUiStatusIndicatorData(jobs),
+				)
+
+				w.Write(newResponseHtml(
+					walletStatusHtml,
+					walletFetchButtnHtml,
+					globalStatusHtml,
 				))
-				w.Write(html)
 			case db.StatusCanceled:
 				const setWalletAsCanceledQuery = `
 					update wallet set
@@ -697,7 +890,7 @@ func walletsHandler(
 						delete_scheduled = false and
 						(status = 'queued' or status = 'in_progress')
 					returning
-						status, address, network, created_at
+						status
 				`
 				row := pool.QueryRow(
 					r.Context(), setWalletAsCanceledQuery,
@@ -705,10 +898,7 @@ func walletsHandler(
 				)
 
 				var status db.Status
-				var address string
-				var network db.Network
-				var createdAt time.Time
-				if err := row.Scan(&status, &address, &network, &createdAt); err != nil {
+				if err := row.Scan(&status); err != nil {
 					if errors.Is(err, pgx.ErrNoRows) {
 						w.WriteHeader(404)
 						return
@@ -725,16 +915,22 @@ func walletsHandler(
 					w.WriteHeader(200)
 				}
 
-				html := executeTemplateMust(templates, "wallet", newWalletComponent(
-					address,
-					0,
-					walletId,
-					network,
-					status,
-					pgtype.Timestamp{},
-					createdAt,
-				))
-				w.Write(html)
+				walletStatusData := uiWalletStatus{
+					Status: status,
+					Id:     walletId,
+				}
+				walletStatusHtml := executeTemplateMust(
+					templates,
+					"wallet_status",
+					&walletStatusData,
+				)
+				walletFetchButtnHtml := executeTemplateMust(
+					templates,
+					"wallet_fetch_button",
+					&walletStatusData,
+				)
+
+				w.Write(newResponseHtml(walletStatusHtml, walletFetchButtnHtml))
 			default:
 				w.WriteHeader(400)
 				w.Write([]byte("status: invalid"))

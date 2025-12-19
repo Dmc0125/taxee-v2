@@ -205,7 +205,9 @@ async function registerFormSubmit(e) {
         if (res.status == 202) {
             const loc = res.headers.get("location")
             if (loc && loc.length > 0) {
-                sseSubscribe(loc)
+                loc.split(",").forEach(function(l) {
+                    sseSubscribe(l)
+                })
             }
         }
     }

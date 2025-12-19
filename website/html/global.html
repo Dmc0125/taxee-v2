@@ -1,71 +1,106 @@
-{{ define "dashboard_sidebar" }}
-<div class="
-    w-[3rem] h-screen fixed py-10 px-2 flex flex-col items-center 
-    border-r border-gray-200 z-50
-">
-    <p class="text-gray-800 text-2xl font-semibold">T</p>
+{{ define "icon" }}
+<use href="/static/sprites.svg?t={{ now }}#{{ . }}" />
+{{ end }}
 
-    {{ $iconBtn := "w-full aspect-square border border-gray-200 rounded-md p-1 hover:bg-gray-200 cursor-pointer" }}
-    <div class="flex flex-col gap-2 w-full mt-10 text-gray-600">
-        <a class="{{ $iconBtn }}" href="/wallets">
-            <svg class="w-full h-full p-0.25" xmlns="http://www.w3.org/2000/svg"
-                 fill="none" viewBox="0 0 24 24" stroke-width="1.5"
-                 stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round"
-                      d="M21 12a2.25 2.25 0 0 0-2.25-2.25H15a3 3 0 1 1-6 0H5.25A2.25 2.25 0 0 0 3 12m18 0v6a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 18v-6m18 0V9M3 12V9m18 0a2.25 2.25 0 0 0-2.25-2.25H5.25A2.25 2.25 0 0 0 3 9m18 0V6a2.25 2.25 0 0 0-2.25-2.25H5.25A2.25 2.25 0 0 0 3 6v3" />
-            </svg>
-        </a>
-        <a class="{{ $iconBtn }}" href="/events">
-            <svg class="w-full h-full p-0.25" xmlns="http://www.w3.org/2000/svg"
-                 fill="none" viewBox="0 0 24 24" stroke-width="1.5"
-                 stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round"
-                      d="M6.429 9.75 2.25 12l4.179 2.25m0-4.5 5.571 3 5.571-3m-11.142 0L2.25 7.5 12 2.25l9.75 5.25-4.179 2.25m0 0L21.75 12l-4.179 2.25m0 0 4.179 2.25L12 21.75 2.25 16.5l4.179-2.25m11.142 0-5.571 3-5.571-3" />
-            </svg>
-        </a>
-
-        <div class="w-[calc(100%+1rem)] -mx-2 border-t border-gray-200"></div>
-
-        <button class="{{ $iconBtn }} hoverable" id="btn-refetch">
-            <svg class="w-full h-full p-0.25" xmlns="http://www.w3.org/2000/svg"
-                 fill="none" viewBox="0 0 24 24" stroke-width="1.5"
-                 stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round"
-                      d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
-            </svg>
-
-            <div class="floating-right">
-                Refetch
-            </div>
-        </button>
-
-        <div class="{{ $iconBtn }} hoverable" id="btn-parse-txs">
-            <svg class="w-full h-full p-0.25" xmlns="http://www.w3.org/2000/svg"
-                 fill="none" viewBox="0 0 24 24" stroke-width="1.5"
-                 stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round"
-                      d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
-            </svg>
-
-            <span class="floating-right">
-                Parse transactions and events
-            </span>
-        </div>
-
-        <button class="{{ $iconBtn }} hoverable" id="btn-parse-events">
-            <svg class="w-full h-full p-0.25" xmlns="http://www.w3.org/2000/svg"
-                 fill="none" viewBox="0 0 24 24" stroke-width="1.5"
-                 stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round"
-                      d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
-            </svg>
-
-            <span class="floating-right">
-                Parse events
-            </span>
-        </button>
+{{ define "loading_spinner" }}
+<div class="w-full aspect-square flex items-center justify-center">
+    <div
+         class="w-full aspect-square animate-spin rounded-full border-2 border-[currentColor] border-b-transparent">
     </div>
 </div>
+{{ end }}
+
+{{ define "global_status" }}
+<div id="global_status" class="w-full h-8" {{ if .SseSubscribe }}
+     data-sse-subscribe="/jobs/sse" {{ end }}>
+    {{ if eq .Status "success" }}
+    <div class="w-full h-8 flex items-center gap-3">
+        <svg
+             class="size-8 p-1.5 rounded-lg bg-green-600/20 shrink-0 text-green-600">
+            {{ template "icon" "checkmark" }}
+        </svg>
+        <span class="hidden group-hover:inline pr-1.5">All synced</span>
+    </div>
+    {{ else if eq .Status "uninitialized" }}
+    <div class="w-full h-8 flex items-center gap-3">
+        <div
+             class="size-8 rounded-lg bg-gray-200 flex items-center justify-center">
+            <div class="size-4 rounded-full bg-gray-300">
+            </div>
+        </div>
+        <span class="hidden group-hover:inline pr-1.5">No wallets yet</span>
+    </div>
+    {{ else if eq .Status "error" }}
+    <div class="w-full h-8 flex items-center gap-3">
+        <svg class="size-8 p-1.5 rounded-lg bg-red-600/20 shrink-0 text-red-600"
+             xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+             stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round"
+                  d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+        </svg>
+        <span class="hidden group-hover:inline pr-1.5">Error</span>
+    </div>
+    {{ else }}
+    <!-- queued / in progress -->
+    <div class="w-full h-fit">
+        <div class="w-full h-8 flex items-center gap-3">
+            <div
+                 class="size-8 p-2 rounded-lg bg-gray-200 shrink-0 text-gray-600">
+                {{ template "loading_spinner" }}
+            </div>
+            <span class="hidden group-hover:inline pr-1.5">Syncing</span>
+        </div>
+
+        <ul
+            class="w-full h-fit pl-11 mt-4 hidden group-hover:flex text-sm flex-col gap-2 text-gray-600">
+            {{ range .InProgressJobs }}
+            <li class="flex gap-3 items-center">
+                <div class="size-3">
+                    {{ template "loading_spinner" }}
+                </div>
+                {{ . }}
+            </li>
+            {{ end }}
+        </ul>
+    </div>
+    {{ end }}
+</div>
+{{ end }}
+
+{{ define "nav_links" }}
+<a href="/wallets"
+   class="block w-full rounded-lg hover:bg-gray-200 flex items-center gap-3">
+    <svg class="size-8 p-1.5 shrink-0">
+        {{ template "icon" "wallet" }}
+    </svg>
+    {{ if . }}
+    <span class="hidden group-hover:inline pr-1.5">Wallets</span>
+    {{ else }}
+    <span class="pr-1.5">Wallets</span>
+    {{ end }}
+</a>
+<a href="/events"
+   class="block w-full rounded-lg hover:bg-gray-200 flex items-center gap-3">
+    <svg class="size-8 p-1.5 shrink-0">
+        {{ template "icon" "arrows" }}
+    </svg>
+    {{ if . }}
+    <span class="hidden group-hover:inline pr-1.5">Events</span>
+    {{ else }}
+    <span class="pr-1.5">Events</span>
+    {{ end }}
+</a>
+<a href="/tokens"
+   class="block w-full rounded-lg hover:bg-gray-200 flex items-center gap-3">
+    <svg class="size-8 p-1.5 shrink-0">
+        {{ template "icon" "money" }}
+    </svg>
+    {{ if . }}
+    <span class="hidden group-hover:inline pr-1.5">Tokens</span>
+    {{ else }}
+    <span class="pr-1.5">Tokens</span>
+    {{ end }}
+</a>
 {{ end }}
 
 {{ define "dashboard_layout" }}
@@ -79,71 +114,53 @@
     <meta charset="UTF-8">
 </head>
 
-<body class="min-h-screen w-full relative bg-gray-50 text-gray-800">
+<body
+      class="min-h-screen w-full relative bg-gray-50 text-gray-800 [--nav-sidebar-w:calc(var(--spacing)*12)] [--header-h:calc(var(--spacing)*12)]">
+    <div id="loading-spinner" class="absolute inset-0 hidden">
+        {{ template "loading_spinner" }}
+    </div>
+
     <header
-            class="sticky top-0 w-full px-4 h-12 bg-inherit border-b border-gray-200 flex items-center justify-between z-10">
-        <button id="nav-btn"
-                class="flex items-center gap-2 rounded-lg bg-gray-50 hover:bg-gray-200">
-            <svg class="size-8 p-1.5" xmlns="http://www.w3.org/2000/svg"
-                 fill="none" viewBox="0 0 24 24" stroke-width="1.5"
-                 stroke="currentColor" class="size-6">
-                <path stroke-linecap="round" stroke-linejoin="round"
-                      d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
-            </svg>
-            <!-- <span class="hidden sm:inline"> -->
-            <!--     Expand navigation -->
-            <!-- </span> -->
-        </button>
-        <h1 class="sm:hidden">Taxee</h1>
+            class="sticky top-0 w-full px-4 h-[var(--header-h)] bg-inherit border-b border-gray-200 flex items-center justify-between z-10">
+        <h1>Taxee</h1>
+
+        <div class="flex gap-2 items-center">
+            <!-- TODO: on mobile status should be shown here -->
+            <button id="nav-btn"
+                    class="flex items-center gap-2 rounded-lg bg-gray-50 hover:bg-gray-200 sm:hidden">
+                <svg class="size-8 p-1.5">
+                    {{ template "icon" "menu" }}
+                </svg>
+            </button>
+        </div>
     </header>
 
-    <nav id="nav"
-         class="hidden 2xl:block w-[300px] fixed top-12 bottom-0 left-0 bg-inherit border-r border-gray-200 z-10">
-        <ul class="px-4 py-4 flex flex-col gap-2">
-            <li>
-                <a href="/wallets" class="button-sm block leading-8">Wallets</a>
-            </li>
-            <li>
-                <a href="/events" class="button-sm block leading-8">Events</a>
-            </li>
-            <li class="w-full border-b border-gray-200"></li>
-            <li>
-                <form method="PUT" action="/jobs">
-                    <input type="text" name="type" value="parse_transactions"
-                           class="hidden" />
-                    <input type="text" name="status" value="queued"
-                           class="hidden" />
-                    <button class="w-full text-left button-sm">Parse
-                        transactions</button>
-                </form>
-            </li>
-            <li>
-                <form method="PUT" action="/jobs">
-                    <input type="text" name="type" value="parse_events"
-                           class="hidden" />
-                    <input type="text" name="status" value="queued"
-                           class="hidden" />
-                    <button class="w-full text-left button-sm">Parse
-                        events</button>
-                </form>
-            </li>
-        </ul>
+    <nav
+         class="w-[var(--nav-sidebar-w)] hover:w-70 p-2 hidden sm:flex flex-col gap-2 fixed top-[var(--header-h)] bottom-0 left-0 border-r border-gray-200 bg-inherit group z-10">
+        {{ template "nav_links" true }}
+
+        <div class="w-full border-b border-gray-200"></div>
+
+        {{ template "global_status" .StatusIndicator }}
+    </nav>
+
+    <nav id="mobile-nav"
+         class="hidden sm:hidden fixed top-[var(--header-h)] bottom-0 left-0 right-0 bg-inherit z-10 flex flex-col gap-2 px-2 pt-2">
+        {{ template "nav_links" }}
     </nav>
 
     <script>
         const navBtn = document.querySelector("#nav-btn");
-        const nav = document.querySelector("#nav");
+        const nav = document.querySelector("#mobile-nav");
         navBtn.addEventListener("click", function () {
-            if (nav.className.includes("2xl:block")) {
-                nav.classList.remove("2xl:block");
-                return
-            }
             nav.classList.toggle("hidden");
         })
     </script>
 
-    <!-- {{ template "dashboard_sidebar" }} -->
-    {{ .Content }}
+    <div
+         class="w-full sm:w-[calc(100%-var(--nav-sidebar-w))] sm:ml-[var(--nav-sidebar-w)]">
+        {{ .Content }}
+    </div>
 </body>
 
 </html>

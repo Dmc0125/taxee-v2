@@ -970,7 +970,7 @@ func eventsHandler(
 				eventsPageData,
 			)
 
-			page := executeTemplateMust(templates, "dashboard_layout", pageLayoutComponentData{
+			page := executeTemplateMust(templates, "dashboard_layout", dashboardPageData{
 				Content: template.HTML(eventsPageContent),
 			})
 			w.WriteHeader(200)

@@ -25,7 +25,7 @@ create table wallet (
 
     address varchar(64) not null,
     network network not null,
-    name varchar,
+    label varchar,
 
     unique (id, user_account_id),
 

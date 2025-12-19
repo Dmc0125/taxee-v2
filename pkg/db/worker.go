@@ -8,6 +8,7 @@ import (
 type JobType string
 
 const (
+	JobFetchWallet       JobType = "fetch_wallet"
 	JobParseTransactions JobType = "parse_transactions"
 	JobParseEvents       JobType = "parse_events"
 )
