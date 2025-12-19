@@ -50,96 +50,59 @@ func parseIntParam[T any](
 	}
 }
 
-func defaultWalletLabel(address string) string {
-	return fmt.Sprintf(
-		"Wallet %s",
-		address[len(address)-4:],
-	)
+// components
+
+type cmpWalletStatus struct {
+	Id     int32
+	Status db.WalletStatus
 }
 
-type walletComponent struct {
-	Label   string
-	Address string
-	TxCount int32
+type cmpWalletFetchButton struct {
+	Id       int32
+	Disabled bool
+}
 
+type cmpWallet struct {
+	Id            int32
+	Label         string
+	Address       string
+	TxCount       int32
+	LastSyncAt    pgtype.Timestamp
 	NetworkImgUrl string
 	AccountUrl    string
-	Id            int32
-	Status        string
-	Insert        bool
 
-	ShowFetch  bool
-	ShowSseUrl bool
+	Status      db.WalletStatus
+	FetchButton *cmpWalletFetchButton
 
-	LastSyncAt string
-	ImportedAt string
+	Insert       bool
+	SseSubscribe bool
 }
 
-func timeToRelativeStr(t time.Time) string {
-	n := time.Now()
-	if n.Day() != t.Day() {
-		return t.Format("02/01/2006")
+// Expects that address, id and status have been set
+func (w *cmpWallet) init(network db.Network) {
+	// network stuff
+	n, ok := networksGlobals[network]
+	assert.True(ok, "missing globals for network: %d", network)
+
+	w.NetworkImgUrl = n.imgUrl
+	assert.True(len(w.Address) > 0, "wallet address is not set")
+	w.AccountUrl = fmt.Sprintf("%s/%s", n.explorerAccountUrl, w.Address)
+
+	// fetch button
+	w.FetchButton = &cmpWalletFetchButton{
+		Id: w.Id,
 	}
-	return t.Format("15:04:05")
+
+	switch w.Status {
+	case db.WalletQueued, db.WalletInProgress:
+		w.FetchButton.Disabled = true
+		w.SseSubscribe = true
+	}
 }
 
-func newWalletComponent(
-	address string,
-	txCount,
-	id int32,
-	network db.Network,
-	status db.Status,
-	lastSyncAt pgtype.Timestamp,
-	importedAt time.Time,
-) walletComponent {
-	networkGlobals, ok := networksGlobals[network]
-	assert.True(ok, "missing globals for %s network", network.String())
-
-	s, ok := status.String()
-	assert.True(ok, "invalid status %s", status)
-
-	walletData := walletComponent{
-		// TODO: real label
-		Label:         fmt.Sprintf("Wallet %s", address[len(address)-4:]),
-		Address:       address,
-		TxCount:       txCount,
-		Id:            id,
-		Status:        s,
-		NetworkImgUrl: networkGlobals.imgUrl,
-		AccountUrl:    fmt.Sprintf("%s/%s", networkGlobals.explorerAccountUrl, address),
-		ImportedAt:    timeToRelativeStr(importedAt),
-	}
-
-	if lastSyncAt.Valid {
-		walletData.LastSyncAt = timeToRelativeStr(lastSyncAt.Time)
-	} else {
-		walletData.LastSyncAt = "-"
-	}
-
-	switch status {
-	case db.StatusSuccess, db.StatusError:
-		walletData.ShowFetch = true
-	case db.StatusQueued, db.StatusInProgress:
-		walletData.ShowSseUrl = true
-	}
-
-	return walletData
-}
-
-type walletsComponent struct {
+type cmpWallets struct {
 	WalletsCount int
-	Wallets      []*walletComponent
-}
-
-func newResponseHtml(fragments ...[]byte) []byte {
-	var sum []byte
-	for i, f := range fragments {
-		sum = append(sum, f...)
-		if i < len(fragments)-1 {
-			sum = append(sum, []byte("<!--delimiter-->")...)
-		}
-	}
-	return sum
+	Wallets      []*cmpWallet
 }
 
 func walletsSseHandler(pool *pgxpool.Pool, templates *template.Template) http.HandlerFunc {
@@ -164,7 +127,7 @@ func walletsSseHandler(pool *pgxpool.Pool, templates *template.Template) http.Ha
 		}
 
 		ticker := time.NewTicker(time.Second)
-		var lastStatus db.Status
+		var lastStatus db.WalletStatus
 
 		for {
 			select {
@@ -173,14 +136,10 @@ func walletsSseHandler(pool *pgxpool.Pool, templates *template.Template) http.Ha
 			case <-ticker.C:
 			}
 
-			const selectWalletStatus = `
+			const selectWallet = `
 				select
-					status,
-					address,
-					network,
-					tx_count,
-					created_at,
-					finished_at
+					id, status, address, network,
+					label, tx_count, finished_at
 				from
 					wallet
 				where
@@ -189,49 +148,36 @@ func walletsSseHandler(pool *pgxpool.Pool, templates *template.Template) http.Ha
 					status != 'delete'
 			`
 			row := pool.QueryRow(
-				r.Context(), selectWalletStatus,
+				r.Context(), selectWallet,
 				userAccountId, walletId,
 			)
 
-			var status db.Status
-			var address string
+			var wallet cmpWallet
 			var network db.Network
-			var createdAt time.Time
-			var finishedAt pgtype.Timestamp
-			var txCount int32
-			if err := row.Scan(&status, &address, &network, &txCount, &createdAt, &finishedAt); err != nil {
+			if err := row.Scan(
+				&wallet.Id, &wallet.Status, &wallet.Address, &network,
+				&wallet.Label, &wallet.TxCount, &wallet.LastSyncAt,
+			); err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					sendSSEClose(w, flusher)
 					return
 				}
-				logger.Error("unable to select status: %s", err.Error())
+				logger.Error("unable to select wallet: %s", err.Error())
 				sendSSEError(w, flusher, err.Error())
 				return
 			}
 
-			if status == lastStatus {
+			if wallet.Status == lastStatus {
 				continue
 			}
 
-			html := executeTemplateMust(templates, "wallet", newWalletComponent(
-				address,
-				txCount,
-				walletId,
-				network,
-				status,
-				finishedAt,
-				createdAt,
-			))
+			wallet.init(network)
+			html := executeTemplateMust(templates, "wallet", wallet)
 			sendSSEUpdate(w, flusher, string(html))
 
-			lastStatus = status
+			lastStatus = wallet.Status
 		}
 	}
-}
-
-type uiWalletStatus struct {
-	Status db.Status
-	Id     int32
 }
 
 func walletsHandler(
@@ -280,7 +226,7 @@ func walletsHandler(
 		case http.MethodGet:
 			const selectWalletsQuery = `
 				select
-					id, label, address, network, status, tx_count, created_at, finished_at
+					id, label, address, network, status, tx_count, finished_at
 				from
 					wallet
 				where
@@ -291,8 +237,8 @@ func walletsHandler(
 			`
 
 			var responseStatus int
-			var walletsRows []*walletComponent
-			var navbarStatus navbarStatus
+			var walletsRows []*cmpWallet
+			var navbarStatus cmpNavbarStatus
 
 			db.ExecuteTx(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
 				batch := pgx.Batch{}
@@ -301,38 +247,21 @@ func walletsHandler(
 					selectWalletsQuery, userAccountId,
 				).Query(func(rows pgx.Rows) error {
 					for rows.Next() {
-						var walletId int32
-						var walletLabel pgtype.Text
-						var walletAddress string
+						var wallet cmpWallet
 						var network db.Network
-						var status db.Status
-						var txCount int32
-						var finishedAt pgtype.Timestamp
-						var createdAt time.Time
 						if err := rows.Scan(
-							&walletId, &walletLabel, &walletAddress, &network,
-							&status, &txCount, &createdAt, &finishedAt,
+							&wallet.Id, &wallet.Label, &wallet.Address, &network,
+							&wallet.Status, &wallet.TxCount, &wallet.LastSyncAt,
 						); err != nil {
 							responseStatus = 500
 							logger.Error("unable to scan wallets: %s", err)
 							return err
 						}
 
-						if walletLabel.Valid == false {
-							walletLabel.String = defaultWalletLabel(walletAddress)
-						}
+						navbarStatus.appendWallet(wallet.Label, wallet.Status)
 
-						navbarStatus.appendWallet(walletLabel.String, status)
-						walletData := newWalletComponent(
-							walletAddress,
-							txCount,
-							walletId,
-							network,
-							status,
-							finishedAt,
-							createdAt,
-						)
-						walletsRows = append(walletsRows, &walletData)
+						wallet.init(network)
+						walletsRows = append(walletsRows, &wallet)
 					}
 
 					return nil
@@ -364,13 +293,13 @@ func walletsHandler(
 				navbarStatus.SseSubscribe = true
 			}
 
-			walletsPage := walletsComponent{
+			walletsPage := cmpWallets{
 				WalletsCount: len(walletsRows),
 				Wallets:      walletsRows,
 			}
 			walletsPageContent := executeTemplateMust(templates, "wallets_page", walletsPage)
 
-			page := executeTemplateMust(templates, "dashboard_layout", dashboard{
+			page := executeTemplateMust(templates, "dashboard_layout", cmpDashboard{
 				Content:      template.HTML(walletsPageContent),
 				NavbarStatus: &navbarStatus,
 			})
@@ -430,9 +359,18 @@ func walletsHandler(
 				return
 			}
 
+			walletLabel := r.Form.Get("label")
+			if walletLabel == "" {
+				walletLabel = fmt.Sprintf("Wallet %s", walletAddress[len(walletAddress)-4:])
+			}
+
 			var responseStatus int
-			var walletId, walletsCount int32
-			var walletCreatedAt time.Time
+			var walletsCount int32
+			wallet := cmpWallet{
+				Address: walletAddress,
+				Label:   walletLabel,
+				Status:  db.WalletQueued,
+			}
 
 			err = db.ExecuteTx(
 				r.Context(), pool,
@@ -463,17 +401,17 @@ func walletsHandler(
 
 					const insertWalletQuery = `
 						insert into wallet (
-							user_account_id, address, network, data, queued_at
+							user_account_id, address, network, data, queued_at, label
 						) values (
-							$1, $2, $3, '{}'::jsonb, now()
+							$1, $2, $3, '{}'::jsonb, now(), $4
 						) returning
-							id, created_at
+							id
 					`
 					batch.Queue(
 						insertWalletQuery,
-						userAccountId, walletAddress, network,
+						userAccountId, walletAddress, network, walletLabel,
 					).QueryRow(func(row pgx.Row) error {
-						if err := row.Scan(&walletId, &walletCreatedAt); err != nil {
+						if err := row.Scan(&wallet.Id); err != nil {
 							logger.Error("unable to insert wallet: %s", err)
 							return err
 						}
@@ -524,35 +462,27 @@ func walletsHandler(
 				return
 			}
 
+			wallet.init(network)
+
 			w.Header().Add(
 				"location",
-				fmt.Sprintf("/wallets/sse?id=%d,/parser/sse", walletId),
+				fmt.Sprintf("/wallets/sse?id=%d,/parser/sse", wallet.Id),
 			)
 			w.WriteHeader(202)
-
-			walletData := newWalletComponent(
-				walletAddress,
-				0,
-				walletId,
-				network,
-				db.StatusQueued,
-				pgtype.Timestamp{},
-				walletCreatedAt,
-			)
 
 			var html []byte
 
 			if walletsCount == 1 {
 				html = newResponseHtml(
-					executeTemplateMust(templates, "wallets", walletsComponent{
+					executeTemplateMust(templates, "wallets", cmpWallets{
 						WalletsCount: 1,
-						Wallets:      []*walletComponent{&walletData},
+						Wallets:      []*cmpWallet{&wallet},
 					}),
 				)
 			} else {
-				walletData.Insert = true
+				wallet.Insert = true
 				html = newResponseHtml(
-					executeTemplateMust(templates, "wallet", walletData),
+					executeTemplateMust(templates, "wallet", wallet),
 					executeTemplateMust(templates, "wallets_count", walletsCount),
 				)
 			}
@@ -632,7 +562,7 @@ func walletsHandler(
 
 			var html []byte
 			if walletsCount == 0 {
-				html = executeTemplateMust(templates, "wallets", walletsComponent{})
+				html = executeTemplateMust(templates, "wallets", cmpWallet{})
 			} else {
 				html = executeTemplateMust(templates, "wallets_count", walletsCount)
 			}
@@ -655,7 +585,7 @@ func walletsHandler(
 				return
 			}
 
-			var newStatus db.Status
+			var newStatus db.WalletStatus
 			if err := newStatus.ParseString(r.Form.Get("status")); err != nil {
 				w.WriteHeader(400)
 				w.Write(fmt.Appendf(nil, "status: %s", err.Error()))
@@ -663,7 +593,7 @@ func walletsHandler(
 			}
 
 			switch newStatus {
-			case db.StatusQueued:
+			case db.WalletQueued:
 				err := db.ExecuteTx(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
 					// update wallet
 					const queueWallet = `
@@ -679,7 +609,6 @@ func walletsHandler(
 						where
 							user_account_id = $1 and
 							id = $2 and
-							delete_scheduled = false and
 							status in ('success', 'error')
 					`
 					tag, err := tx.Exec(
@@ -716,24 +645,29 @@ func walletsHandler(
 				))
 				w.WriteHeader(202)
 
-				walletStatusData := uiWalletStatus{
-					Status: db.StatusQueued,
+				cmpStatus := cmpWalletStatus{
+					Status: db.WalletQueued,
 					Id:     walletId,
 				}
 				walletStatusHtml := executeTemplateMust(
 					templates,
 					"wallet_status",
-					&walletStatusData,
+					&cmpStatus,
 				)
-				walletFetchButtnHtml := executeTemplateMust(
+
+				fetchButton := cmpWalletFetchButton{
+					Id:       walletId,
+					Disabled: true,
+				}
+				walletFetchButtonHtml := executeTemplateMust(
 					templates,
 					"wallet_fetch_button",
-					&walletStatusData,
+					&fetchButton,
 				)
 
 				w.Write(newResponseHtml(
 					walletStatusHtml,
-					walletFetchButtnHtml,
+					walletFetchButtonHtml,
 				))
 			default:
 				w.WriteHeader(400)

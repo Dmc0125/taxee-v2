@@ -43,35 +43,35 @@ func GetUserAccount(ctx context.Context, pool *pgxpool.Pool, id int32) (*GetUser
 	return res, nil
 }
 
-type Status string
+type WalletStatus string
 
 const (
-	StatusQueued     Status = "queued"
-	StatusInProgress Status = "in_progress"
-	StatusSuccess    Status = "success"
-	StatusError      Status = "error"
-	StatusDelete     Status = "delete"
+	WalletQueued     WalletStatus = "queued"
+	WalletInProgress WalletStatus = "in_progress"
+	WalletSuccess    WalletStatus = "success"
+	WalletError      WalletStatus = "error"
+	WalletDelete     WalletStatus = "delete"
 )
 
-func (dst *Status) ParseString(src string) error {
+func (dst *WalletStatus) ParseString(src string) error {
 	if len(src) == 0 {
 		return errors.New("empty")
 	}
 
-	switch Status(src) {
-	case StatusQueued,
-		StatusInProgress,
-		StatusSuccess,
-		StatusError,
-		StatusDelete:
-		*dst = Status(src)
+	switch WalletStatus(src) {
+	case WalletQueued,
+		WalletInProgress,
+		WalletSuccess,
+		WalletError,
+		WalletDelete:
+		*dst = WalletStatus(src)
 		return nil
 	default:
 		return fmt.Errorf("%s is not a valid status", src)
 	}
 }
 
-func (dst *Status) Scan(src any) error {
+func (dst *WalletStatus) Scan(src any) error {
 	if src == nil {
 		return nil
 	}
@@ -84,20 +84,20 @@ func (dst *Status) Scan(src any) error {
 	return dst.ParseString(n)
 }
 
-func (src *Status) String() (string, bool) {
+func (src *WalletStatus) String() (string, bool) {
 	switch *src {
-	case StatusQueued,
-		StatusInProgress,
-		StatusSuccess,
-		StatusError,
-		StatusDelete:
+	case WalletQueued,
+		WalletInProgress,
+		WalletSuccess,
+		WalletError,
+		WalletDelete:
 		return string(*src), true
 	default:
 		return "", false
 	}
 }
 
-func (src Status) Value() (driver.Value, error) {
+func (src WalletStatus) Value() (driver.Value, error) {
 	v, ok := src.String()
 	if !ok {
 		return nil, fmt.Errorf("invalid status: %s", src)

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -33,7 +32,7 @@ func parserSseHandler(pool *pgxpool.Pool, templates *template.Template) http.Han
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 
-		var prevNavbarStatus navbarStatus
+		var prevNavbarStatus cmpNavbarStatus
 
 		for {
 			select {
@@ -42,7 +41,7 @@ func parserSseHandler(pool *pgxpool.Pool, templates *template.Template) http.Han
 			case <-ticker.C:
 			}
 
-			var navbarStatus navbarStatus
+			var navbarStatus cmpNavbarStatus
 
 			err := db.ExecuteTx(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
 				const selectWallets = `
@@ -55,16 +54,12 @@ func parserSseHandler(pool *pgxpool.Pool, templates *template.Template) http.Han
 					return err
 				}
 				for rows.Next() {
-					var label pgtype.Text
-					var status db.Status
-					var address string
+					var label, address string
+					var status db.WalletStatus
 					if err := rows.Scan(&label, &status, &address); err != nil {
 						return err
 					}
-					if !label.Valid {
-						label.String = defaultWalletLabel(address)
-					}
-					navbarStatus.appendWallet(label.String, status)
+					navbarStatus.appendWallet(label, status)
 				}
 				if err := rows.Err(); err != nil {
 					return err

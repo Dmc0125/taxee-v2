@@ -28,13 +28,13 @@ const (
 	navbarStatusInProgress = "in_progress"
 )
 
-type navbarStatus struct {
+type cmpNavbarStatus struct {
 	SseSubscribe bool
 	Status       string
 	Wallets      []string
 }
 
-func (c *navbarStatus) eq(other *navbarStatus) bool {
+func (c *cmpNavbarStatus) eq(other *cmpNavbarStatus) bool {
 	if c.Status == navbarStatusInProgress && c.Status == other.Status {
 		if len(c.Wallets) != len(other.Wallets) {
 			return false
@@ -52,14 +52,14 @@ func (c *navbarStatus) eq(other *navbarStatus) bool {
 	return c.Status == other.Status
 }
 
-func (c *navbarStatus) appendWallet(label string, status db.Status) {
+func (c *cmpNavbarStatus) appendWallet(label string, status db.WalletStatus) {
 	switch status {
-	case db.StatusQueued, db.StatusInProgress:
+	case db.WalletQueued, db.WalletInProgress:
 		c.Wallets = append(c.Wallets, label)
 	}
 }
 
-func (c *navbarStatus) appendParserFromRow(row pgx.Row) error {
+func (c *cmpNavbarStatus) appendParserFromRow(row pgx.Row) error {
 	var status db.ParserStatus
 	if err := row.Scan(&status); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -83,12 +83,23 @@ func (c *navbarStatus) appendParserFromRow(row pgx.Row) error {
 	return nil
 }
 
-type dashboard struct {
+type cmpDashboard struct {
 	Content      template.HTML
-	NavbarStatus *navbarStatus
+	NavbarStatus *cmpNavbarStatus
 }
 
 // Networking
+
+func newResponseHtml(fragments ...[]byte) []byte {
+	var sum []byte
+	for i, f := range fragments {
+		sum = append(sum, f...)
+		if i < len(fragments)-1 {
+			sum = append(sum, []byte("<!--delimiter-->")...)
+		}
+	}
+	return sum
+}
 
 func sendSSEError(
 	w http.ResponseWriter,
@@ -279,6 +290,13 @@ func main() {
 		},
 		"now": func() int64 {
 			return time.Now().Unix()
+		},
+		"dateRelative": func(t time.Time) string {
+			n := time.Now()
+			if n.Day() != t.Day() {
+				return t.Format("02/01/2006")
+			}
+			return t.Format("15:04:05")
 		},
 		"formatDate": func(t time.Time) string {
 			return t.Format("02/01/2006")

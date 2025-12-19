@@ -95,7 +95,7 @@ func consumeQueuedWallets(
 		for {
 			<-ticker.C
 
-			var status db.Status
+			var status db.WalletStatus
 			err := pool.QueryRow(groupCtx, selectWalletStatus, walletId).Scan(&status)
 			switch {
 			case errors.Is(err, context.Canceled):
@@ -107,7 +107,7 @@ func consumeQueuedWallets(
 				continue
 			}
 
-			if status == db.StatusDelete {
+			if status == db.WalletDelete {
 				groupCtxCancel()
 				return context.Canceled
 			}
@@ -141,14 +141,14 @@ func consumeQueuedWallets(
 				return nil
 			}
 
-			var status db.Status
+			var status db.WalletStatus
 
 			switch workerError {
 			case nil:
-				status = db.StatusSuccess
+				status = db.WalletSuccess
 			default:
 				logger.Error("unable to fetch wallet: %s", workerError.Error())
-				status = db.StatusError
+				status = db.WalletError
 			}
 
 			row := tx.QueryRow(ctx, updateWallet, status, walletId)

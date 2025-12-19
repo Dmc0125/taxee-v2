@@ -50,11 +50,12 @@
 {{ define "wallets_count" }}
 <span id="wallets-count">{{ . }}</span>
 {{ end }}
+
 <!-- TODO: group by network -->
 {{ define "wallet" }}
 <li class="w-full border border-gray-200 rounded-lg relative isolate"
     id="wallet-{{ .Id }}" {{ if .Insert }} data-insert="afterbegin"
-    data-parent="wallets-table" {{ end }} {{ if .ShowSseUrl }}
+    data-parent="wallets-table" {{ end }} {{ if .SseSubscribe }}
     data-sse-subscribe="/wallets/sse?id={{ .Id }}" {{ end }}>
     <div class=" w-6 h-6 p-0.5 absolute top-0 left-0 -translate-y-1/3 -translate-x-1/3 bg-gray-100 border
         border-gray-200 rounded-full">
@@ -73,7 +74,7 @@
             </div>
 
             <div class="flex gap-2">
-                {{ template "wallet_fetch_button" . }}
+                {{ template "wallet_fetch_button" .FetchButton }}
 
                 <!-- Delete button -->
                 <form class="size-8" method="delete"
@@ -112,14 +113,14 @@
                     <td>Transactions</td>
                     <td class="font-medium text-right">{{ .TxCount }}</td>
                 </tr>
+                {{ if .LastSyncAt.Valid }}
                 <tr class="flex items-center justify-between">
                     <td>Last sync at</td>
-                    <td class="font-medium text-right">{{ .LastSyncAt }}</td>
+                    <td class="font-medium text-right">
+                        {{ dateRelative .LastSyncAt.Time }}
+                    </td>
                 </tr>
-                <tr class="flex items-center justify-between">
-                    <td>Imported at</td>
-                    <td class="font-medium text-right">{{ .ImportedAt }}</td>
-                </tr>
+                {{ end }}
             </tbody>
         </table>
 
@@ -130,43 +131,26 @@
                 transactions
             </span>
 
-            <div class="flex flex-col sm:flex-row sm:gap-2 tex-right">
-                <span>
-                    Last sync at
-                    <span class="font-medium">{{ .LastSyncAt }}</span>
+            {{ if .LastSyncAt.Valid }}
+            <span>
+                Last sync at
+                <span class="font-medium">
+                    {{ dateRelative .LastSyncAt.Time }}
                 </span>
-                <span class="hidden sm:inline">&middot;</span>
-                <span>
-                    Imported at
-                    <span class="font-medium">{{ .ImportedAt }}</span>
-                </span>
-            </div>
+            </span>
+            {{ end }}
         </div>
     </div>
 </li>
 {{ end }}
 
 {{ define "wallet_fetch_button" }}
-{{ if or (eq .Status "queued") (eq .Status "in_progress") }}
 <form id="wallet-fetch-btn-{{ .Id }}" class="size-8" method="PUT"
       action="/wallets">
     <input class="hidden" type="text" value="{{ .Id }}" name="id" />
-    <input class="hidden" type="text" value="canceled" name="status" />
-    <button class="size-8 rounded-lg hover:bg-gray-200" data-spinner="w-4">
-        <svg class="p-1.5" xmlns="http://www.w3.org/2000/svg" fill="none"
-             viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round"
-                  d="M6 18 18 6M6 6l12 12" />
-        </svg>
-    </button>
-</form>
-{{ else }}
-<form class="size-8" method="PUT" action="/wallets">
-    <input class="hidden" type="text" value="{{ .Id }}" name="id" />
     <input class="hidden" type="text" value="queued" name="status" />
     <button class="size-8 rounded-lg hover:bg-gray-200 disabled:text-gray-400 disabled:hover:bg-inherit"
-            data-spinner="w-4" {{ if eq .Status "cancel_scheduled" }} disabled
-            {{ end }}>
+            data-spinner="w-4" {{ if .Disabled }} disabled {{ end }}>
         <svg class="p-1.5" xmlns="http://www.w3.org/2000/svg" fill="none"
              viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round"
@@ -174,7 +158,6 @@
         </svg>
     </button>
 </form>
-{{ end }}
 {{ end }}
 
 {{ define "wallet_status" }}
@@ -202,13 +185,6 @@
               d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
     </svg>
     <span class="text-sm leading-none hidden min-[470px]:inline">Error</span>
-    {{ else if or (eq .Status "cancel_scheduled") (eq .Status "canceled") }}
-    <svg class="size-4" xmlns="http://www.w3.org/2000/svg" fill="none"
-         viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-        <path stroke-linecap="round" stroke-linejoin="round"
-              d="m9.75 9.75 4.5 4.5m0-4.5-4.5 4.5M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
-    </svg>
-    <span class="text-sm leading-none hidden min-[470px]:inline">Canceled</span>
     {{ end }}
 </div>
 {{ end }}
