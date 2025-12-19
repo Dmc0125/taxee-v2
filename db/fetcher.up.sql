@@ -1,13 +1,11 @@
 begin;
 
-create type status as enum (
+create type wallet_status as enum (
     'queued',
     'in_progress',
     'success',
     'error',
-    'cancel_scheduled',
-    'reset_scheduled',
-    'canceled'
+    'delete'
 );
 
 create type network as enum (
@@ -32,14 +30,14 @@ create table wallet (
     tx_count integer default 0,
     data jsonb not null,
 
-    status status not null default 'queued',
-    check (status <> 'reset_scheduled'),
+    status wallet_status not null default 'queued',
     fresh boolean not null default false,
-    delete_scheduled boolean not null default false,
 
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
+
     queued_at timestamptz,
+    started_at timestamptz,
     finished_at timestamptz
 );
 

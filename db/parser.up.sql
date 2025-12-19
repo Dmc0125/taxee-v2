@@ -79,6 +79,33 @@ begin
 end;
 $$;
 
+create type parser_status as enum (
+    'pt_queued',
+    'pt_in_progress',
+    'pt_error',
+
+    'pe_queued',
+    'pe_in_progress',
+    'pe_error',
+
+    'success',
+    'reset'
+);
+
+create table parser (
+    id serial primary key,
+
+    user_account_id integer not null,
+    foreign key (user_account_id) references user_account (id) on delete cascade,
+
+    unique (user_account_id),
+
+    status parser_status,
+    queued_at timestamptz,
+    started_at timestamptz,
+    finished_at timestamptz
+);
+
 -- intermediary table for events errors and transactions
 --
 -- one to one with `transaction`

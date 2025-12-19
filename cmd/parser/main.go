@@ -933,7 +933,6 @@ func ParseTransactions(
 		const selectWalletsQuery = `
 			select address, network from wallet where
 				user_account_id = $1 and
-				delete_scheduled = false and
 				status = 'success'
 		`
 		rows, err := tx.Query(ctx, selectWalletsQuery, userAccountId)
@@ -975,7 +974,6 @@ func ParseTransactions(
 							tr.wallet_id is not null and exists (
 								select 1 from wallet w where
 									w.id = tr.wallet_id and
-									w.delete_scheduled = false and
 									w.status = 'success'
 						)) or (
 							tr.related_account_id is not null and exists (
@@ -983,7 +981,6 @@ func ParseTransactions(
 								join
 									wallet w on
 										w.id = ra.wallet_id and
-										w.delete_scheduled = false and
 										w.status = 'success'
 								where
 									ra.id = tr.related_account_id
@@ -1704,7 +1701,6 @@ func ParseEvents(
 		select address from wallet where	
 			user_account_id = $1 and
 			network = 'solana' and
-			delete_scheduled = false and
 			status = 'success'
 	`
 	rows, err = pool.Query(ctx, selectSolanaWalletsQuery, userAccountId)

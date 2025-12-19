@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -17,6 +18,77 @@ import (
 
 	"github.com/jackc/pgx/v5"
 )
+
+// Components
+
+const (
+	navbarStatusUninit     = ""
+	navbarStatusSuccess    = "success"
+	navbarStatusError      = "error"
+	navbarStatusInProgress = "in_progress"
+)
+
+type navbarStatus struct {
+	SseSubscribe bool
+	Status       string
+	Wallets      []string
+}
+
+func (c *navbarStatus) eq(other *navbarStatus) bool {
+	if c.Status == navbarStatusInProgress && c.Status == other.Status {
+		if len(c.Wallets) != len(other.Wallets) {
+			return false
+		}
+
+		for i, w := range c.Wallets {
+			if w != other.Wallets[i] {
+				return false
+			}
+		}
+
+		return true
+	}
+
+	return c.Status == other.Status
+}
+
+func (c *navbarStatus) appendWallet(label string, status db.Status) {
+	switch status {
+	case db.StatusQueued, db.StatusInProgress:
+		c.Wallets = append(c.Wallets, label)
+	}
+}
+
+func (c *navbarStatus) appendParserFromRow(row pgx.Row) error {
+	var status db.ParserStatus
+	if err := row.Scan(&status); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			c.Status = navbarStatusUninit
+			return nil
+		}
+		return err
+	}
+
+	switch status {
+	case db.ParserStatusUninitialized:
+		c.Status = navbarStatusUninit
+	case db.ParserStatusSuccess:
+		c.Status = navbarStatusSuccess
+	case db.ParserStatusPTError, db.ParserStatusPEError:
+		c.Status = navbarStatusError
+	default:
+		c.Status = navbarStatusInProgress
+	}
+
+	return nil
+}
+
+type dashboard struct {
+	Content      template.HTML
+	NavbarStatus *navbarStatus
+}
+
+// Networking
 
 func sendSSEError(
 	w http.ResponseWriter,
@@ -57,116 +129,12 @@ func initSSEHandler(w http.ResponseWriter) (flusher http.Flusher, ok bool) {
 	return
 }
 
-type uiIndicatorStatus string
-
-const (
-	uiIndicatorStatusSuccess       uiIndicatorStatus = "success"
-	uiIndicatorStatusError         uiIndicatorStatus = "error"
-	uiIndicatorStatusUninitialized uiIndicatorStatus = "uninitialized"
-	uiIndicatorStatusInProgress    uiIndicatorStatus = "in_progress"
-)
-
-type uiStatusIndicatorData struct {
-	SseSubscribe   bool
-	Status         uiIndicatorStatus
-	InProgressJobs []string
+func renderError(r http.ResponseWriter, statusCode int, msg string, args ...any) {
+	r.WriteHeader(statusCode)
+	r.Write(fmt.Appendf(nil, msg, args...))
 }
 
-func (s *uiStatusIndicatorData) eq(other *uiStatusIndicatorData) bool {
-	if s.Status == uiIndicatorStatusInProgress && s.Status == other.Status {
-		for i, j := range s.InProgressJobs {
-			if i > len(other.InProgressJobs)-1 {
-				return false
-			}
-
-			if j != other.InProgressJobs[i] {
-				return false
-			}
-		}
-	}
-
-	return s.Status == other.Status
-}
-
-func newUiStatusIndicatorData(jobs []*uiJob) *uiStatusIndicatorData {
-	if len(jobs) == 0 {
-		return &uiStatusIndicatorData{
-			Status: uiIndicatorStatusUninitialized,
-		}
-	}
-
-	status := uiIndicatorStatusSuccess
-	var inProgressJobs []string
-
-	for _, j := range jobs {
-		switch j.t {
-		case db.JobFetchWallet:
-			switch j.status {
-			case db.StatusQueued, db.StatusInProgress:
-				inProgressJobs = append(inProgressJobs, j.label)
-			}
-		case db.JobParseTransactions, db.JobParseEvents:
-			switch j.status {
-			case db.StatusError:
-				return &uiStatusIndicatorData{
-					Status: uiIndicatorStatusError,
-				}
-			case db.StatusInProgress, db.StatusQueued, db.StatusResetScheduled:
-				inProgressJobs = append(inProgressJobs, j.label)
-			}
-		}
-	}
-
-	subscribe := false
-
-	if len(inProgressJobs) > 0 {
-		subscribe = true
-		status = uiIndicatorStatusInProgress
-	}
-
-	return &uiStatusIndicatorData{
-		SseSubscribe:   subscribe,
-		Status:         status,
-		InProgressJobs: inProgressJobs,
-	}
-}
-
-type uiJob struct {
-	status db.Status
-	label  string
-	t      db.JobType
-}
-
-type uiJobs []*uiJob
-
-func (jobs *uiJobs) appendFromRows(rows pgx.Rows) error {
-	var jobType db.JobType
-	var jobStatus db.Status
-	if err := rows.Scan(&jobType, &jobStatus); err != nil {
-		return err
-	}
-
-	var label string
-	switch jobType {
-	case db.JobParseTransactions:
-		label = "Parse transactions"
-	case db.JobParseEvents:
-		label = "Parse events"
-	}
-
-	*jobs = append(*jobs, &uiJob{
-		status: jobStatus,
-		label:  label,
-		t:      jobType,
-	})
-
-	return nil
-}
-
-type dashboardPageData struct {
-	Content         template.HTML
-	StatusIndicator *uiStatusIndicatorData
-}
+// templates helpers
 
 func loadTemplates(templates *template.Template, dirPath string) {
 	entries, err := os.ReadDir(dirPath)
@@ -217,27 +185,7 @@ func executeTemplateMust(tmpl *template.Template, name string, data any) []byte 
 	return buf
 }
 
-func serveStaticFiles(prod bool) {
-	staticDir := ""
-
-	switch {
-	case prod:
-		staticPath := os.Getenv("STATIC_PATH")
-		assert.True(staticPath != "", "missing path to static files")
-	default:
-		_, file, _, ok := runtime.Caller(0)
-		assert.True(ok, "unable to get runtime caller")
-		staticDir = path.Join(file, "../../static")
-	}
-
-	handler := http.FileServer(http.Dir(staticDir))
-	http.Handle("/static/", http.StripPrefix("/static/", handler))
-}
-
-func renderError(r http.ResponseWriter, statusCode int, msg string, args ...any) {
-	r.WriteHeader(statusCode)
-	r.Write(fmt.Appendf(nil, msg, args...))
-}
+// helpers
 
 func shorten(s string, start, end int) string {
 	return fmt.Sprintf("%s...%s", s[:start], s[len(s)-end:])
@@ -350,7 +298,18 @@ func main() {
 	pool, err := db.InitPool(context.Background(), appEnv)
 	assert.NoErr(err, "")
 
-	serveStaticFiles(prod)
+	staticDir := ""
+	switch {
+	case prod:
+		staticPath := os.Getenv("STATIC_PATH")
+		assert.True(staticPath != "", "missing path to static files")
+	default:
+		_, file, _, ok := runtime.Caller(0)
+		assert.True(ok, "unable to get runtime caller")
+		staticDir = path.Join(file, "../../static")
+	}
+	handler := http.FileServer(http.Dir(staticDir))
+	http.Handle("/static/", http.StripPrefix("/static/", handler))
 
 	http.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/static/favicon.ico", http.StatusMovedPermanently)
@@ -364,8 +323,8 @@ func main() {
 		walletsSseHandler(pool, templates),
 	)
 	http.HandleFunc(
-		"/jobs/sse",
-		jobsSseHandler(pool, templates),
+		"/parser/sse",
+		parserSseHandler(pool, templates),
 	)
 	http.HandleFunc(
 		"/events",

@@ -46,13 +46,11 @@ func GetUserAccount(ctx context.Context, pool *pgxpool.Pool, id int32) (*GetUser
 type Status string
 
 const (
-	StatusQueued          Status = "queued"
-	StatusInProgress      Status = "in_progress"
-	StatusSuccess         Status = "success"
-	StatusError           Status = "error"
-	StatusCancelScheduled Status = "cancel_scheduled"
-	StatusResetScheduled  Status = "reset_scheduled"
-	StatusCanceled        Status = "canceled"
+	StatusQueued     Status = "queued"
+	StatusInProgress Status = "in_progress"
+	StatusSuccess    Status = "success"
+	StatusError      Status = "error"
+	StatusDelete     Status = "delete"
 )
 
 func (dst *Status) ParseString(src string) error {
@@ -65,9 +63,7 @@ func (dst *Status) ParseString(src string) error {
 		StatusInProgress,
 		StatusSuccess,
 		StatusError,
-		StatusCancelScheduled,
-		StatusResetScheduled,
-		StatusCanceled:
+		StatusDelete:
 		*dst = Status(src)
 		return nil
 	default:
@@ -94,9 +90,7 @@ func (src *Status) String() (string, bool) {
 		StatusInProgress,
 		StatusSuccess,
 		StatusError,
-		StatusCancelScheduled,
-		StatusResetScheduled,
-		StatusCanceled:
+		StatusDelete:
 		return string(*src), true
 	default:
 		return "", false

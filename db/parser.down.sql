@@ -10,6 +10,10 @@ drop table event;
 
 drop table internal_tx;
 
+drop table parser;
+
+drop type parser_status;
+
 drop procedure set_missing_pricepoint;
 
 drop table missing_pricepoint;

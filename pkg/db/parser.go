@@ -1,6 +1,8 @@
 package db
 
 import (
+	"database/sql/driver"
+	"fmt"
 	"taxee/pkg/assert"
 	"time"
 
@@ -136,6 +138,49 @@ const InsertPricepoint string = `
 		$1, $2, $3
 	) on conflict (timestamp, coingecko_id) do nothing
 `
+
+type ParserStatus string
+
+const (
+	ParserStatusUninitialized ParserStatus = "uninitialized"
+
+	ParserStatusPTQueued     ParserStatus = "pt_queued"
+	ParserStatusPTInProgress ParserStatus = "pt_in_progress"
+	ParserStatusPTError      ParserStatus = "pt_error"
+
+	ParserStatusPEQueued     ParserStatus = "pe_queued"
+	ParserStatusPEInProgress ParserStatus = "pe_in_progress"
+	ParserStatusPEError      ParserStatus = "pe_error"
+
+	ParserStatusSuccess ParserStatus = "success"
+	ParserStatusReset   ParserStatus = "reset"
+)
+
+func (dst *ParserStatus) Scan(src any) error {
+	if src == nil {
+		*dst = ParserStatusUninitialized
+		return nil
+	}
+
+	n, ok := src.(string)
+	if !ok {
+		return fmt.Errorf("invalid status type: %T", src)
+	}
+
+	// TODO: validation
+	*dst = ParserStatus(n)
+	return nil
+}
+
+func (src ParserStatus) Value() (driver.Value, error) {
+	// TODO: validation
+	switch src {
+	case ParserStatusUninitialized:
+		return nil, nil
+	default:
+		return string(src), nil
+	}
+}
 
 type EventTransferDirection uint8
 

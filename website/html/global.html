@@ -10,9 +10,9 @@
 </div>
 {{ end }}
 
-{{ define "global_status" }}
+{{ define "navbar_status" }}
 <div id="global_status" class="w-full h-8" {{ if .SseSubscribe }}
-     data-sse-subscribe="/jobs/sse" {{ end }}>
+     data-sse-subscribe="/parser/sse" {{ end }}>
     {{ if eq .Status "success" }}
     <div class="w-full h-8 flex items-center gap-3">
         <svg
@@ -21,14 +21,14 @@
         </svg>
         <span class="hidden group-hover:inline pr-1.5">All synced</span>
     </div>
-    {{ else if eq .Status "uninitialized" }}
+    {{ else if eq .Status "" }}
     <div class="w-full h-8 flex items-center gap-3">
         <div
              class="size-8 rounded-lg bg-gray-200 flex items-center justify-center">
             <div class="size-4 rounded-full bg-gray-300">
             </div>
         </div>
-        <span class="hidden group-hover:inline pr-1.5">No wallets yet</span>
+        <span class="hidden group-hover:inline pr-1.5">Nothing to sync</span>
     </div>
     {{ else if eq .Status "error" }}
     <div class="w-full h-8 flex items-center gap-3">
@@ -53,7 +53,7 @@
 
         <ul
             class="w-full h-fit pl-11 mt-4 hidden group-hover:flex text-sm flex-col gap-2 text-gray-600">
-            {{ range .InProgressJobs }}
+            {{ range .Wallets }}
             <li class="flex gap-3 items-center">
                 <div class="size-3">
                     {{ template "loading_spinner" }}
@@ -61,6 +61,13 @@
                 {{ . }}
             </li>
             {{ end }}
+
+            <li class="flex gap-3 items-center">
+                <div class="size-3">
+                    {{ template "loading_spinner" }}
+                </div>
+                <span id="navbar-status-parser-label">Parser</span>
+            </li>
         </ul>
     </div>
     {{ end }}
@@ -141,7 +148,7 @@
 
         <div class="w-full border-b border-gray-200"></div>
 
-        {{ template "global_status" .StatusIndicator }}
+        {{ template "navbar_status" .NavbarStatus }}
     </nav>
 
     <nav id="mobile-nav"

@@ -16,6 +16,6 @@ drop table wallet;
 
 drop type network;
 
-drop type status;
+drop type wallet_status;
 
 commit;

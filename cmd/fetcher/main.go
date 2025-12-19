@@ -403,6 +403,22 @@ func getSolanaTxsWithDuplicateSlots(
 	return res, nil
 }
 
+// Fetches related accounts and transactions for solana wallet
+//
+// 2 modes: normal and fresh
+//
+//   - normal mode: starts from previous checkpoints, does not change what was
+//     fetched
+//   - fresh mode: deletes all accounts, transactions and sets tx count to 0,
+//     then refetches all from start
+//
+// right now, this function commits updates to db progressively, immediately
+// when it can, so everytime it is called, there may be new transactions
+// inserted
+//
+// when canceled, the execution just stops and does not rollback what was
+// already saved which means, wallet for which fetch was canceled, most likely
+// has non sensical data related to it
 func fetchSolanaWallet(
 	ctx context.Context,
 	pool *pgxpool.Pool,

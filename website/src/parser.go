@@ -13,7 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func jobsSseHandler(pool *pgxpool.Pool, templates *template.Template) http.HandlerFunc {
+func parserSseHandler(pool *pgxpool.Pool, templates *template.Template) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userAccountId := 1
 		// TODO: auth
@@ -33,7 +33,7 @@ func jobsSseHandler(pool *pgxpool.Pool, templates *template.Template) http.Handl
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 
-		prevStatusData := &uiStatusIndicatorData{}
+		var prevNavbarStatus navbarStatus
 
 		for {
 			select {
@@ -42,13 +42,13 @@ func jobsSseHandler(pool *pgxpool.Pool, templates *template.Template) http.Handl
 			case <-ticker.C:
 			}
 
-			var jobs uiJobs
+			var navbarStatus navbarStatus
 
 			err := db.ExecuteTx(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
 				const selectWallets = `
 					select label, status, address from wallet where
 						user_account_id = $1 and
-						delete_scheduled = false
+						status != 'delete'
 				`
 				rows, err := tx.Query(ctx, selectWallets, userAccountId)
 				if err != nil {
@@ -64,26 +64,18 @@ func jobsSseHandler(pool *pgxpool.Pool, templates *template.Template) http.Handl
 					if !label.Valid {
 						label.String = defaultWalletLabel(address)
 					}
-					jobs = append(jobs, &uiJob{
-						status: status,
-						label:  label.String,
-						t:      db.JobFetchWallet,
-					})
+					navbarStatus.appendWallet(label.String, status)
 				}
 				if err := rows.Err(); err != nil {
 					return err
 				}
 
-				rows, err = tx.Query(ctx, selectJobsQuery, userAccountId)
-				if err != nil {
-					return err
-				}
-				for rows.Next() {
-					if err := jobs.appendFromRows(rows); err != nil {
-						return err
-					}
-				}
-				if err := rows.Err(); err != nil {
+				const selectParser = `
+					select status from parser
+						where user_account_id = $1
+				`
+				row := tx.QueryRow(ctx, selectParser, userAccountId)
+				if err := navbarStatus.appendParserFromRow(row); err != nil {
 					return err
 				}
 
@@ -96,16 +88,15 @@ func jobsSseHandler(pool *pgxpool.Pool, templates *template.Template) http.Handl
 				return
 			}
 
-			statusData := newUiStatusIndicatorData(jobs)
-
-			if !prevStatusData.eq(statusData) {
-				html := executeTemplateMust(templates, "global_status", statusData)
-				sendSSEUpdate(w, flusher, string(html))
+			if !prevNavbarStatus.eq(&navbarStatus) {
+				sendSSEUpdate(w, flusher, string(executeTemplateMust(
+					templates, "navbar_status", navbarStatus,
+				)))
+				prevNavbarStatus = navbarStatus
 			}
-			prevStatusData = statusData
 
-			switch statusData.Status {
-			case uiIndicatorStatusSuccess, uiIndicatorStatusError, uiIndicatorStatusUninitialized:
+			switch navbarStatus.Status {
+			case navbarStatusSuccess, navbarStatusUninit, navbarStatusError:
 				sendSSEClose(w, flusher)
 				return
 			}
