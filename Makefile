@@ -1,4 +1,4 @@
-.PHONY: tw
+.PHONY: 
 
 tw-watch:
 	bunx @tailwindcss/cli -i website/input.css -o website/static/output.css --watch

@@ -13,7 +13,6 @@ import (
 	"taxee/pkg/db"
 	"taxee/pkg/logger"
 	"time"
-	"unsafe"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -21,34 +20,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mr-tron/base58"
 )
-
-type paramGetter interface {
-	Get(string) string
-}
-
-func parseIntParam[T any](
-	getter paramGetter,
-	result *T,
-	key string,
-	positiveOnly bool,
-	size int,
-) error {
-	value := getter.Get(key)
-
-	if value == "" {
-		return fmt.Errorf("%s: missing", key)
-	}
-
-	if v, err := strconv.ParseInt(value, 10, size); err == nil {
-		if positiveOnly && v < 0 {
-			return fmt.Errorf("%s: must be positive", key)
-		}
-		*result = *(*T)(unsafe.Pointer(&v))
-		return nil
-	} else {
-		return fmt.Errorf("%s: %w", key, err)
-	}
-}
 
 // components
 

@@ -5,18 +5,23 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"log/slog"
 	"net/http"
 	"os"
 	"path"
 	"runtime"
+	"strconv"
 	"strings"
 	"taxee/pkg/assert"
 	"taxee/pkg/coingecko"
 	"taxee/pkg/db"
 	"taxee/pkg/dotenv"
 	"time"
+	"unsafe"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/lmittmann/tint"
+	"github.com/shopspring/decimal"
 )
 
 // Components
@@ -59,16 +64,7 @@ func (c *cmpNavbarStatus) appendWallet(label string, status db.WalletStatus) {
 	}
 }
 
-func (c *cmpNavbarStatus) appendParserFromRow(row pgx.Row) error {
-	var status db.ParserStatus
-	if err := row.Scan(&status); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			c.Status = navbarStatusUninit
-			return nil
-		}
-		return err
-	}
-
+func (c *cmpNavbarStatus) appendParser(status db.ParserStatus) {
 	switch status {
 	case db.ParserStatusUninitialized:
 		c.Status = navbarStatusUninit
@@ -79,7 +75,19 @@ func (c *cmpNavbarStatus) appendParserFromRow(row pgx.Row) error {
 	default:
 		c.Status = navbarStatusInProgress
 	}
+}
 
+func (c *cmpNavbarStatus) appendParserFromRow(row pgx.Row) error {
+	var status db.ParserStatus
+	if err := row.Scan(&status); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			c.Status = navbarStatusUninit
+			return nil
+		}
+		return err
+	}
+
+	c.appendParser(status)
 	return nil
 }
 
@@ -89,6 +97,36 @@ type cmpDashboard struct {
 }
 
 // Networking
+
+var errParamMissing = errors.New("missing")
+
+type paramGetter interface {
+	Get(string) string
+}
+
+func parseIntParam[T any](
+	getter paramGetter,
+	result *T,
+	key string,
+	positiveOnly bool,
+	size int,
+) error {
+	value := getter.Get(key)
+
+	if value == "" {
+		return fmt.Errorf("%s: %w", key, errParamMissing)
+	}
+
+	if v, err := strconv.ParseInt(value, 10, size); err == nil {
+		if positiveOnly && v < 0 {
+			return fmt.Errorf("%s: must be positive", key)
+		}
+		*result = *(*T)(unsafe.Pointer(&v))
+		return nil
+	} else {
+		return fmt.Errorf("%s: %w", key, err)
+	}
+}
 
 func newResponseHtml(fragments ...[]byte) []byte {
 	var sum []byte
@@ -261,6 +299,79 @@ func tern(pairs ...any) any {
 	return falseVal
 }
 
+func formatDecimal(d decimal.Decimal, digits int32) string {
+	assert.True(digits >= 0, "digits can not be negative")
+
+	if d.IsZero() {
+		return "0"
+	}
+
+	isNegative := d.IsNegative()
+	if isNegative {
+		d = d.Abs()
+	}
+
+	formatWithSuffix := func(n decimal.Decimal, suffix string, maxDigits int32) string {
+		intDigits := len(fmt.Sprintf("%d", n.IntPart()))
+		decimalPlaces := max(int(maxDigits)-intDigits, 0)
+
+		result := d.StringFixed(int32(decimalPlaces))
+		result = strings.TrimRight(result, "0")
+		result = strings.TrimRight(result, ".")
+
+		return result + suffix
+	}
+
+	var (
+		dAbs     = d.Abs()
+		smallNum = decimal.New(1, -digits)
+		one      = decimal.NewFromInt(1)
+		thousand = decimal.NewFromInt(1_000)
+		million  = decimal.NewFromInt(1_000_000)
+		billion  = decimal.NewFromInt(1_000_000_000)
+		trillion = decimal.NewFromInt(1_000_000_000_000)
+
+		result string
+	)
+
+	switch {
+	// Very small numbers: < 0.0001
+	case dAbs.LessThan(smallNum):
+		result = fmt.Sprintf("<%s", smallNum.String())
+	// Small numbers: 0.0001 <= x < 1
+	case dAbs.LessThan(one):
+		result = d.StringFixed(digits)
+		result = strings.TrimRight(result, "0")
+		result = strings.TrimRight(result, ".")
+	// Regular numbers: 1 <= x <= 999
+	case dAbs.LessThan(thousand):
+		intDigits := len(fmt.Sprintf("%d", dAbs.IntPart()))
+		decimalPlaces := max(5-intDigits, 0)
+
+		result = d.StringFixed(int32(decimalPlaces))
+		result = strings.TrimRight(result, "0")
+		result = strings.TrimRight(result, ".")
+	// Thousands: 1000 <= x < 1M
+	case dAbs.LessThan(million):
+		result = formatWithSuffix(d.Div(thousand), "K", digits-1)
+	// Millions: 1M <= x < 1B
+	case dAbs.LessThan(billion):
+		result = formatWithSuffix(d.Div(million), "M", digits-1)
+	// Billions: 1B <= x < 1T
+	case dAbs.LessThan(trillion):
+		result = formatWithSuffix(d.Div(billion), "B", digits-1)
+	// Trillions and above
+	default:
+		result = formatWithSuffix(d.Div(trillion), "T", digits-1)
+	}
+
+	if isNegative && result != "<0.0001" {
+		result = "-" + result
+	}
+
+	return result
+}
+
 func main() {
 	appEnv := os.Getenv("APP_ENV")
 	prod := true
@@ -268,6 +379,10 @@ func main() {
 		assert.NoErr(dotenv.ReadEnv(), "")
 		prod = false
 	}
+
+	slog.SetDefault(slog.New(tint.NewHandler(os.Stderr, &tint.Options{
+		AddSource: true,
+	})))
 
 	htmlPath := os.Getenv("HTML")
 	assert.True(len(htmlPath) > 0, "missing html path")
@@ -288,6 +403,11 @@ func main() {
 
 			return m
 		},
+		"formatDecimal": formatDecimal,
+		// TODO: remove
+		"round": func(n decimal.Decimal) string {
+			return n.StringFixed(2)
+		},
 		"now": func() int64 {
 			return time.Now().Unix()
 		},
@@ -296,6 +416,12 @@ func main() {
 			if n.Day() != t.Day() {
 				return t.Format("02/01/2006")
 			}
+			return t.Format("15:04:05")
+		},
+		"date": func(t time.Time) string {
+			return t.Format("02/01/2006")
+		},
+		"time": func(t time.Time) string {
 			return t.Format("15:04:05")
 		},
 		"formatDate": func(t time.Time) string {
@@ -346,7 +472,7 @@ func main() {
 	)
 	http.HandleFunc(
 		"/events",
-		eventsHandler(context.Background(), pool, templates),
+		eventsHandler(pool, templates),
 	)
 	http.HandleFunc(
 		"/tokens",

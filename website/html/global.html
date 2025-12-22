@@ -1,5 +1,8 @@
 {{ define "icon" }}
-<use href="/static/sprites.svg?t={{ now }}#{{ . }}" />
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
+     class="aspect-square p-1.5">
+    <use href="/static/sprites.svg?t={{ now }}#{{ . }}" />
+</svg>
 {{ end }}
 
 {{ define "loading_spinner" }}
@@ -15,10 +18,9 @@
      data-sse-subscribe="/parser/sse" {{ end }}>
     {{ if eq .Status "success" }}
     <div class="w-full h-8 flex items-center gap-3">
-        <svg
-             class="size-8 p-1.5 rounded-lg bg-green-600/20 shrink-0 text-green-600">
+        <div class="size-8 rounded-lg bg-green-600/20 shrink-0 text-green-600">
             {{ template "icon" "checkmark" }}
-        </svg>
+        </div>
         <span class="hidden group-hover:inline pr-1.5">All synced</span>
     </div>
     {{ else if eq .Status "" }}
@@ -32,12 +34,9 @@
     </div>
     {{ else if eq .Status "error" }}
     <div class="w-full h-8 flex items-center gap-3">
-        <svg class="size-8 p-1.5 rounded-lg bg-red-600/20 shrink-0 text-red-600"
-             xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
-             stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round"
-                  d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
-        </svg>
+        <div class="size-8 rounded-lg bg-red-600/20 shrink-0 text-red-600">
+            {{ template "icon" "error" }}
+        </div>
         <span class="hidden group-hover:inline pr-1.5">Error</span>
     </div>
     {{ else }}
@@ -77,9 +76,9 @@
 {{ define "nav_links" }}
 <a href="/wallets"
    class="block w-full rounded-lg hover:bg-gray-200 flex items-center gap-3">
-    <svg class="size-8 p-1.5 shrink-0">
+    <div class="size-8 shrink-0">
         {{ template "icon" "wallet" }}
-    </svg>
+    </div>
     {{ if . }}
     <span class="hidden group-hover:inline pr-1.5">Wallets</span>
     {{ else }}
@@ -88,9 +87,9 @@
 </a>
 <a href="/events"
    class="block w-full rounded-lg hover:bg-gray-200 flex items-center gap-3">
-    <svg class="size-8 p-1.5 shrink-0">
+    <div class="size-8 shrink-0">
         {{ template "icon" "arrows" }}
-    </svg>
+    </div>
     {{ if . }}
     <span class="hidden group-hover:inline pr-1.5">Events</span>
     {{ else }}
@@ -99,9 +98,9 @@
 </a>
 <a href="/tokens"
    class="block w-full rounded-lg hover:bg-gray-200 flex items-center gap-3">
-    <svg class="size-8 p-1.5 shrink-0">
+    <div class="size-8 shrink-0">
         {{ template "icon" "money" }}
-    </svg>
+    </div>
     {{ if . }}
     <span class="hidden group-hover:inline pr-1.5">Tokens</span>
     {{ else }}

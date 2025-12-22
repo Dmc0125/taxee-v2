@@ -124,7 +124,7 @@ func devDeleteEvents(
 	return nil
 }
 
-func fetchCoingeckoTokens(
+func FetchCoingeckoTokens(
 	ctx context.Context,
 	pool *pgxpool.Pool,
 ) {
@@ -484,7 +484,7 @@ func Parse(
 	userAccountId int32,
 ) {
 	logger.Info("Update coingecko tokens")
-	fetchCoingeckoTokens(ctx, pool)
+	FetchCoingeckoTokens(ctx, pool)
 
 	err := devDeleteEvents(ctx, pool, userAccountId)
 	assert.NoErr(err, "")

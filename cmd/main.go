@@ -208,6 +208,9 @@ func main() {
 		} else {
 			fmt.Println(string(output))
 		}
+	case "seed-coingecko":
+		coingecko.Init()
+		parser.FetchCoingeckoTokens(context.Background(), pool)
 	case "fetch":
 		// fetch txs
 		assert.True(appEnv != "prod", "this command must not be run in production env")
