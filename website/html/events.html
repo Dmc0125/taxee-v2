@@ -116,6 +116,18 @@
 </div>
 {{ end }}
 
+{{ define "img_with_fallback" }}
+{{ if .ImageUrl }}
+<img class="aspect-square max-w-full max-h-full rounded-full border border-gray-200"
+     src="{{ .ImageUrl }}" />
+{{ else }}
+<div data-fetch-logo="{{ .CoingeckoId }}"
+     class="aspect-square max-w-full max-h-full rounded-full bg-gray-200 flex items-center justify-center">
+    <span class="text-gray-600 text-xs">?</span>
+</div>
+{{ end }}
+{{ end }}
+
 {{ define "event_transfers" }}
 <div class="w-full">
     <div class="h-5 flex items-end gap-x-2 text-sm text-gray-600">
@@ -129,14 +141,12 @@
         <li
             class="w-fit grid grid-cols-[auto_1fr] gap-y-1 gap-x-2 group relative text-sm">
             <div class="h-6 col-span-full grid grid-cols-subgrid items-center">
-                <div
-                     class="size-5 rounded-full bg-gray-200 flex items-center justify-center">
-                    <span class="text-gray-600">?</span>
+                <div class="size-5 p-0.25">
+                    {{ template "img_with_fallback" . }}
                 </div>
-                <div>
-                    <span>{{ formatDecimal .Amount 4 }}
-                        {{ upper .Token }}</span>
-                </div>
+
+                <span>{{ formatDecimal .Amount 4 }}
+                    {{ upper .Token }}</span>
             </div>
             <div class="h-6 col-span-full grid grid-cols-subgrid items-center">
                 <div></div>

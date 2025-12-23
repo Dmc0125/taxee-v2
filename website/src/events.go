@@ -55,13 +55,15 @@ func eventsHandler(pool *pgxpool.Pool, templates *template.Template) http.Handle
 }
 
 type cmpTransfer struct {
-	Account  string
-	Amount   decimal.Decimal
-	Symbol   bool
-	Token    string
-	Value    decimal.Decimal
-	Price    decimal.Decimal
-	Currency string
+	Account     string
+	ImageUrl    string
+	CoingeckoId string
+	Amount      decimal.Decimal
+	Symbol      bool
+	Token       string
+	Value       decimal.Decimal
+	Price       decimal.Decimal
+	Currency    string
 }
 
 type cmpEventMissingAmount struct {
@@ -106,11 +108,86 @@ func (c *cmpEvent) init(network db.Network) {
 	c.TxExplorerUrl = fmt.Sprintf("%s/tx/%s", g.explorerUrl, c.TxId.String)
 }
 
+type tokenIdentifier struct {
+	token       string
+	network     db.Network
+	tokenSource uint16
+}
+
+type tokenReference struct {
+	coingeckoId *string
+	token       *string
+	imageUrl    *string
+}
+
+func tokensBatchAppend(
+	b map[tokenIdentifier][]tokenReference,
+	address string,
+	network db.Network,
+	tokenSource uint16,
+	coingeckoId, token, logoUrl *string,
+) {
+	id := tokenIdentifier{address, network, tokenSource}
+	b[id] = append(b[id], tokenReference{
+		coingeckoId, token, logoUrl,
+	})
+}
+
+func tokensBatchProcess(b map[tokenIdentifier][]tokenReference) *pgx.Batch {
+	handleRow := func(row pgx.Row, token string, refs []tokenReference) error {
+		var symbol, coingeckoId string
+		var imageUrl pgtype.Text
+		err := row.Scan(&symbol, &imageUrl, &coingeckoId)
+		if errors.Is(err, pgx.ErrNoRows) {
+			for _, tr := range refs {
+				*tr.token = token
+			}
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("unable to query symbol: %w", err)
+		}
+		for _, tr := range refs {
+			*tr.coingeckoId = coingeckoId
+			*tr.token = symbol
+			*tr.imageUrl = imageUrl.String
+		}
+		return nil
+	}
+
+	var batch pgx.Batch
+
+	for tid, trefs := range b {
+		if tid.tokenSource == math.MaxUint16 {
+			const selectSymbol = `
+				select symbol, image_url, coingecko_id from coingecko_token_data where coingecko_id = $1
+			`
+			batch.Queue(selectSymbol, tid.token).QueryRow(func(row pgx.Row) error {
+				return handleRow(row, tid.token, trefs)
+			})
+		} else {
+			const selectSymbol = `
+				select ctd.symbol, ctd.image_url, ctd.coingecko_id from
+					coingecko_token ct
+				join
+					coingecko_token_data ctd on ctd.coingecko_id = ct.coingecko_id
+				where
+					ct.network = $1 and ct.address = $2
+			`
+			batch.Queue(selectSymbol, tid.network, tid.token).QueryRow(func(row pgx.Row) error {
+				return handleRow(row, tid.token, trefs)
+			})
+		}
+	}
+
+	return &batch
+}
+
 func (c *cmpEvent) appendTransfers(
 	t *db.EventTransfer,
 	labels map[string]string,
 	network db.Network,
-	batch *pgx.Batch,
+	tokensBatch map[tokenIdentifier][]tokenReference,
 ) {
 	transferComponent := &cmpTransfer{
 		Amount:   t.Amount,
@@ -118,35 +195,11 @@ func (c *cmpEvent) appendTransfers(
 		Currency: "EUR",
 	}
 
-	if t.TokenSource == math.MaxUint16 {
-		const selectSymbol = `
-			select true, symbol from coingecko_token_data where coingecko_id = $1
-		`
-		batch.Queue(selectSymbol, t.Token).QueryRow(func(row pgx.Row) error {
-			if err := row.Scan(&transferComponent.Symbol, &transferComponent.Token); err != nil {
-				return fmt.Errorf("unable to query symbol: %w", err)
-			}
-			return nil
-		})
-	} else {
-		const selectSymbol = `
-			select true, ctd.symbol from
-				coingecko_token ct
-			join
-				coingecko_token_data ctd on ctd.coingecko_id = ct.coingecko_id
-			where
-				ct.network = $1 and ct.address = $2
-		`
-		batch.Queue(selectSymbol, network, t.Token).QueryRow(func(row pgx.Row) error {
-			err := row.Scan(&transferComponent.Symbol, &transferComponent.Token)
-			if errors.Is(err, pgx.ErrNoRows) {
-				transferComponent.Token = t.Token
-			} else if err != nil {
-				return fmt.Errorf("unable to query symbol: %w", err)
-			}
-			return nil
-		})
-	}
+	tokensBatchAppend(
+		tokensBatch,
+		t.Token, network, t.TokenSource,
+		&transferComponent.CoingeckoId, &transferComponent.Token, &transferComponent.ImageUrl,
+	)
 
 	if t.Direction == db.EventTransferIncoming || t.Direction == db.EventTransferInternal {
 		if c.IncomingTransfers == nil {
@@ -323,7 +376,7 @@ func eventsGetHandler(
 		var eventsComponents []*cmpEvent
 		var isLast bool
 		var lastDate time.Time
-		var batch pgx.Batch
+		tokensBatch := make(map[tokenIdentifier][]tokenReference)
 
 		for internalTxsRows.Next() {
 			var txId pgtype.Text
@@ -373,7 +426,7 @@ func eventsGetHandler(
 				switch {
 				case e.Type < db.EventTypeSwap:
 					transfer := e.Transfers[0]
-					eventComponent.appendTransfers(transfer, walletsLabels, network, &batch)
+					eventComponent.appendTransfers(transfer, walletsLabels, network, tokensBatch)
 					eventComponent.Profit = &cmpEventProfit{
 						Value:    transfer.Profit,
 						Currency: "eur",
@@ -381,7 +434,7 @@ func eventsGetHandler(
 				default:
 					profitSum := decimal.Zero
 					for _, t := range e.Transfers {
-						eventComponent.appendTransfers(t, walletsLabels, network, &batch)
+						eventComponent.appendTransfers(t, walletsLabels, network, tokensBatch)
 						profitSum = profitSum.Add(t.Profit)
 					}
 					eventComponent.Profit = &cmpEventProfit{
@@ -395,7 +448,7 @@ func eventsGetHandler(
 			return response{status: 500, err: err}
 		}
 
-		if err := tx.SendBatch(r.Context(), &batch).Close(); err != nil {
+		if err := tx.SendBatch(r.Context(), tokensBatchProcess(tokensBatch)).Close(); err != nil {
 			return response{status: 500, err: err}
 		}
 
