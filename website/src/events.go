@@ -58,17 +58,19 @@ type cmpTransfer struct {
 	Account     string
 	ImageUrl    string
 	CoingeckoId string
-	Amount      decimal.Decimal
-	Symbol      bool
-	Token       string
-	Value       decimal.Decimal
-	Price       decimal.Decimal
-	Currency    string
+
+	Amount        decimal.Decimal
+	Token         string
+	Value         decimal.Decimal
+	Price         decimal.Decimal
+	Currency      string
+	MissingAmount decimal.Decimal
 }
 
 type cmpEventMissingAmount struct {
 	Amount  decimal.Decimal
 	Account string
+	Token   string
 }
 
 type cmpEventTransfers struct {
@@ -93,7 +95,7 @@ type cmpEvent struct {
 
 	OutgoingTransfers *cmpEventTransfers
 	IncomingTransfers *cmpEventTransfers
-	MissingAmounts    []*cmpEventMissingAmount
+	MissingAmounts    bool
 
 	Profit *cmpEventProfit
 }
@@ -220,10 +222,8 @@ func (c *cmpEvent) appendTransfers(
 		c.OutgoingTransfers.Transfers = append(c.OutgoingTransfers.Transfers, transferComponent)
 
 		if t.MissingAmount.GreaterThan(decimal.Zero) {
-			c.MissingAmounts = append(c.MissingAmounts, &cmpEventMissingAmount{
-				Account: t.FromAccount,
-				Amount:  t.MissingAmount,
-			})
+			c.MissingAmounts = true
+			transferComponent.MissingAmount = t.MissingAmount
 		}
 	}
 }
@@ -335,7 +335,17 @@ func eventsGetHandler(
 							'price', et.price,
 							'value', et.value,
 							'profit', et.profit,
-							'missingAmount', et.missing_amount
+							'missingAmount', et.missing_amount,
+							'sources', (
+								select json_agg(json_build_object(
+									'transferId', ets.source_transfer_id,
+									'usedAmount', ets.used_amount
+								))
+								from
+									event_transfer_source ets
+								where
+									ets.transfer_id = et.id
+							)
 						) order by et.position asc)
 						from
 							event_transfer et
@@ -405,11 +415,13 @@ func eventsGetHandler(
 			lastDate = date
 
 			if len(events) == 0 {
-				eventsComponents = append(eventsComponents, &cmpEvent{
+				cmp := &cmpEvent{
 					ShowGroupHeader: true,
 					Timestamp:       timestamp,
 					TxId:            txId,
-				})
+				}
+				cmp.init(network)
+				eventsComponents = append(eventsComponents, cmp)
 			}
 
 			for i, e := range events {

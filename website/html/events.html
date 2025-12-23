@@ -63,7 +63,7 @@
             {{ range .Events }}
             {{ if .Header }}
             <li
-                class="w-full h-8 px-4 col-span-full grid grid-cols-subgrid items-center bg-crossed text-sm font-medium">
+                class="w-full h-8 px-4 col-span-full grid grid-cols-subgrid items-center bg-crossed border-b border-gray-200 text-sm font-medium">
                 {{ date .Timestamp }}
             </li>
             {{ else }}
@@ -78,6 +78,8 @@
                     {{ end }}
                     {{ end }}
                 </div>
+
+                {{ if or .OutgoingTransfers .IncomingTransfers }}
                 <div class="flex flex-col">
                     <span class="text-sm">{{ toTitle .Method }}</span>
                     <span
@@ -92,16 +94,25 @@
                 <div>
                     {{ template "event_profits" .Profit }}
                 </div>
+                {{ else }}
+                <div class="col-[2/-1] w-full">
+                    <p class="block w-full">This transaction does not have any
+                        events</p>
+                </div>
+                {{ end }}
 
                 {{ if .MissingAmounts }}
-                <!-- TODO: -->
-                <!-- missing amount / interest -->
                 <div
-                     class="col-span-full w-[calc(100%-var(--spacing)*8] -mx-4 px-4 py-1 bg-red-600/20 text-sm">
+                     class="col-span-full w-[calc(100%-var(--spacing)*8] -mx-4 mt-3 px-4 py-1 bg-red-600/20 text-sm">
+                    <!-- TODO: -->
+                    <!-- missing amount / interest -->
                     <p class="text-xs text-gray-600">Missing amounts</p>
-                    {{ range .MissingAmounts }}
-                    <!-- TODO: token -->
-                    <span>{{ .Account }}: {{ round .Amount }} SOL</span>
+                    {{ range .OutgoingTransfers.Transfers }}
+                    {{ if .MissingAmount }}
+                    <span>
+                        {{ .Account }}: {{ .Amount }} {{ upper .Token }}
+                    </span>
+                    {{ end }}
                     {{ end }}
                 </div>
                 {{ else }}
