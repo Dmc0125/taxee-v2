@@ -533,7 +533,7 @@ func walletsHandler(
 
 			var html []byte
 			if walletsCount == 0 {
-				html = executeTemplateMust(templates, "wallets", cmpWallet{})
+				html = executeTemplateMust(templates, "wallets", cmpWallets{})
 			} else {
 				html = executeTemplateMust(templates, "wallets_count", walletsCount)
 			}

@@ -1,42 +1,25 @@
 package solana
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
-	"os"
-	"slices"
-	"sync/atomic"
-	"taxee/pkg/assert"
+	"taxee/pkg/jsonrpc"
 )
 
-type requestTimer interface {
-	Lock()
-	Free()
+const AlchemyApiUrl = "https://solana-mainnet.g.alchemy.com/v2/"
+
+var AlchemyMethodsCosts = map[string]int{
+	GetSignaturesForAddress: 40,
+	GetTransaction:          20,
+	GetBlock:                40,
 }
 
-type ResponseError struct {
-	Code    int
-	Message string
-	Data    any
-}
-
-type Response[T any] struct {
-	Jsonrpc string
-	Id      uint64
-	Result  T
-	Error   *ResponseError
-}
-
-type request struct {
-	Jsonrpc string `json:"jsonrpc"`
-	Method  string `json:"method"`
-	Params  []any  `json:"params,omitempty"`
-	Id      uint64 `json:"id"`
-}
+const (
+	GetSignaturesForAddress = "getSignaturesForAddress"
+	GetTransaction          = "getTransaction"
+	GetBlock                = "getBlock"
+)
 
 type Commitment string
 
@@ -46,192 +29,223 @@ const (
 	CommitmentFinalized Commitment = "finalized"
 )
 
-type Rpc struct {
-	reqId atomic.Uint64
-	url   string
-	timer requestTimer
-}
-
-func NewRpc(timer requestTimer) *Rpc {
-	url := os.Getenv("SOLANA_RPC_URL")
-	assert.True(url != "", "missing SOLANA_RPC_URL")
-
-	return &Rpc{
-		url:   url,
-		timer: timer,
+func (c *Commitment) UnmarshalJSON(src []byte) error {
+	if len(src) < 2 {
+		return fmt.Errorf("invalid commitment: %s", string(src))
 	}
-}
-
-func (rpc *Rpc) newRequest(method string, params []any) *request {
-	reqId := rpc.reqId.Load()
-	rpc.reqId.Store(reqId + 1)
-	return &request{
-		Jsonrpc: "2.0",
-		Method:  method,
-		Params:  params,
-		Id:      reqId,
+	switch Commitment(src[1 : len(src)-1]) {
+	case CommitmentProcessed:
+		*c = CommitmentProcessed
+	case CommitmentConfirmed:
+		*c = CommitmentConfirmed
+	case CommitmentFinalized:
+		*c = CommitmentFinalized
+	default:
+		return fmt.Errorf("invalid commitment: %s", string(src))
 	}
-}
-
-var ERROR_STATUS_CODE_NOT_OK = errors.New("response status != 200")
-
-func (rpc *Rpc) sendRequest(reqData any, resData any) error {
-	reqBody, err := json.Marshal(reqData)
-	assert.NoErr(err, "unable to marshal solana RPC request")
-
-	rpc.timer.Lock()
-
-	res, err := http.Post(rpc.url, "application/json", bytes.NewReader(reqBody))
-	if err != nil {
-		return fmt.Errorf("unable to execute request: %s", err)
-	}
-	defer res.Body.Close()
-
-	rpc.timer.Free()
-
-	resBody, err := io.ReadAll(res.Body)
-	if err != nil {
-		return fmt.Errorf("unable to read body: %s", err)
-	}
-	if res.StatusCode != 200 {
-		return fmt.Errorf(
-			"%w\nBody: %s", ERROR_STATUS_CODE_NOT_OK, string(resBody),
-		)
-	}
-
-	if err := json.Unmarshal(resBody, resData); err != nil {
-		return fmt.Errorf(
-			"unable to unmarshal response: %w\nBody: %s",
-			err,
-			string(resBody),
-		)
-	}
-
 	return nil
 }
 
-type GetSignaturesForAddressParams struct {
+type GetSignaturesForAddressConfig struct {
 	Commitment Commitment `json:"commitment"`
 	Limit      uint16     `json:"limit,omitempty"`
 	Before     string     `json:"before,omitempty"`
 	Until      string     `json:"until,omitempty"`
 }
 
-type GetSignaturesForAddressResponse struct {
-	Signature          string
-	Slot               uint64
-	Err                any
-	Memo               string
-	BlockTime          int64
-	ConfirmationStatus Commitment
+type GetSignaturesForAddressParams struct {
+	Address string
+	Config  *GetSignaturesForAddressConfig
 }
 
-func (rpc *Rpc) GetSignaturesForAddress(
-	address string,
-	params *GetSignaturesForAddressParams,
-) (*Response[[]*GetSignaturesForAddressResponse], error) {
-	p := new(GetSignaturesForAddressParams)
-	if params == nil {
-		p.Commitment = CommitmentFinalized
-	} else {
-		p = params
+func (p *GetSignaturesForAddressParams) MarshalJSON() ([]byte, error) {
+	return json.Marshal([]any{p.Address, p.Config})
+}
+
+type SignatureResult struct {
+	Signature          string     `json:"signature"`
+	Slot               uint64     `json:"slot"`
+	Err                any        `json:"err"`
+	BlockTime          int64      `json:"blockTime"`
+	ConfirmationStatus Commitment `json:"confirmationStatus"`
+}
+
+func (r *SignatureResult) Validate() error {
+	if r.Signature == "" {
+		return errors.New("missing signature")
 	}
-	req := rpc.newRequest("getSignaturesForAddress", []any{address, p})
-
-	res := new(Response[[]*GetSignaturesForAddressResponse])
-	err := rpc.sendRequest(req, res)
-	return res, err
+	if r.Slot == 0 {
+		return errors.New("missing slot")
+	}
+	if r.BlockTime == 0 {
+		return errors.New("missing blockTime")
+	}
+	if r.ConfirmationStatus == "" {
+		return errors.New("missing confirmationStatus")
+	}
+	return nil
 }
 
-type GetMultipleTransactionsParams struct {
-	Signature  string
-	Commitment Commitment
+type GetSignaturesForAddressResult []SignatureResult
+
+var _ jsonrpc.Validator = (*GetSignaturesForAddressResult)(nil)
+
+func (r *GetSignaturesForAddressResult) Validate() error {
+	for _, s := range *r {
+		if err := s.Validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type Encoding string
+
+const (
+	EncodingBase64 Encoding = "base64"
+)
+
+func (e *Encoding) UnmarshalJSON(src []byte) error {
+	if len(src) < 2 {
+		return fmt.Errorf("invalid encoding: %s", string(src))
+	}
+
+	switch Encoding(src[1 : len(src)-1]) {
+	case EncodingBase64:
+		*e = EncodingBase64
+	default:
+		return fmt.Errorf("invalid encoding: %s", string(src))
+	}
+
+	return nil
+}
+
+type GetTransactionConfig struct {
+	Commitment                     Commitment `json:"commitment"`
+	MaxSupportedTransactionVersion uint       `json:"maxSupportedTransactionVersion"`
+	Encoding                       Encoding   `json:"encoding"`
+}
+
+type GetTransactionParams struct {
+	Signature string                `json:"signature"`
+	Config    *GetTransactionConfig `json:"config"`
+}
+
+var _ json.Marshaler = (*GetTransactionParams)(nil)
+
+func (p *GetTransactionParams) MarshalJSON() ([]byte, error) {
+	return json.Marshal([]any{p.Signature, p.Config})
 }
 
 type TransactionLoadedAddress struct {
-	Writable []string
-	Readonly []string
+	Writable []string `json:"writable"`
+	Readonly []string `json:"readonly"`
 }
 
 type TransactionUiTokenAmount struct {
-	Amount   string
-	Decimals uint8
+	Amount   string `json:"amount"`
+	Decimals uint8  `json:"decimals"`
 }
 
 type TransactionTokenBalance struct {
-	AccountIndex  uint8
-	Mint          string
-	Owner         string
-	ProgramId     string
-	UiTokenAmount *TransactionUiTokenAmount
+	AccountIndex  uint8                     `json:"accountIndex"`
+	Mint          string                    `json:"mint"`
+	Owner         string                    `json:"owner"`
+	ProgramId     string                    `json:"programId"`
+	UiTokenAmount *TransactionUiTokenAmount `json:"uiTokenAmount"`
 }
 
 type CompiledInnerInstruction struct {
-	ProgramIdIndex uint8
-	Accounts       []uint8
-	Data           string
+	ProgramIdIndex uint8   `json:"programIdIndex"`
+	Accounts       []uint8 `json:"accounts"`
+	Data           string  `json:"data"`
 }
 
 type TransactionInnerInstructions struct {
-	Index        int
-	Instructions []*CompiledInnerInstruction
+	Index        int                         `json:"index"`
+	Instructions []*CompiledInnerInstruction `json:"instructions"`
 }
 
 type TransactionMeta struct {
-	Err               any
-	Fee               uint64
-	PostBalances      []uint64
-	PreBalances       []uint64
-	LogMessages       []string
-	Version           any
-	LoadedAddresses   *TransactionLoadedAddress
-	PreTokenBalances  []*TransactionTokenBalance
-	PostTokenBalances []*TransactionTokenBalance
-	InnerInstructions []*TransactionInnerInstructions
+	Err               any                             `json:"err"`
+	Fee               uint64                          `json:"fee"`
+	PostBalances      []uint64                        `json:"postBalances"`
+	PreBalances       []uint64                        `json:"preBalances"`
+	LogMessages       []string                        `json:"logMessages"`
+	Version           any                             `json:"version"`
+	LoadedAddresses   *TransactionLoadedAddress       `json:"loadedAddresses"`
+	PreTokenBalances  []*TransactionTokenBalance      `json:"preTokenBalances"`
+	PostTokenBalances []*TransactionTokenBalance      `json:"postTokenBalances"`
+	InnerInstructions []*TransactionInnerInstructions `json:"innerInstructions"`
 }
 
-type GetTransactionResponse struct {
-	BlockTime   int64
-	Meta        *TransactionMeta
-	Slot        uint64
-	Transaction [2]string
-	Version     any
+type GetTransactionResult struct {
+	BlockTime   int64            `json:"blockTime"`
+	Meta        *TransactionMeta `json:"meta"`
+	Slot        uint64           `json:"slot"`
+	Transaction [2]string        `json:"transaction"`
+	Version     any              `json:"version"`
 }
 
-func (rpc *Rpc) GetMultipleTransactions(
-	params []*GetMultipleTransactionsParams,
-) ([]*Response[*GetTransactionResponse], error) {
-	requests := make([]*request, len(params))
-	for i, p := range params {
-		reqParam := map[string]any{
-			"maxSupportedTransactionVersion": 0,
-			"encoding":                       "base64",
-			"commitment":                     p.Commitment,
-		}
-		if p.Commitment == "" {
-			reqParam["commitment"] = CommitmentConfirmed
-		}
-		req := rpc.newRequest("getTransaction", []any{p.Signature, reqParam})
-		requests[i] = req
+var _ jsonrpc.Validator = (*GetTransactionResult)(nil)
+
+func (r *GetTransactionResult) Validate() error {
+	if r.BlockTime == 0 {
+		return errors.New("missing blockTime")
+	}
+	if r.Meta == nil {
+		// TODO: Actual validation
+		return errors.New("missing transaction meta")
+	}
+	if r.Slot == 0 {
+		return errors.New("missing slot")
 	}
 
-	responses := []*Response[*GetTransactionResponse]{}
-	err := rpc.sendRequest(requests, &responses)
+	if r.Transaction[0] == "" {
+		return errors.New("missing transaction")
+	}
+	if r.Transaction[1] == "" {
+		return errors.New("missing transaction encoding")
+	}
 
-	type r = *Response[*GetTransactionResponse]
-	slices.SortFunc(responses, func(a r, b r) int {
-		return int(a.Id - b.Id)
-	})
+	switch v := r.Version.(type) {
+	case string:
+		if v != "legacy" {
+			return fmt.Errorf("invalid version: %s", v)
+		}
+	case float64:
+		if v != 0 {
+			return fmt.Errorf("invalid version: %f", v)
+		}
+	default:
+		return fmt.Errorf("invalid version: %T (%#v)", v, v)
+	}
 
-	return responses, err
+	return nil
 }
 
-type GetMultipleBlocksSignaturesParams struct {
-	Slot       uint64
-	Commitment Commitment
+const (
+	TransactionDetailsSignatures = "signatures"
+)
+
+type GetBlockConfig struct {
+	Commitment                     Commitment `json:"commitment"`
+	Encoding                       Encoding   `json:"encoding"`
+	TransactionDetails             string     `json:"transactionDetails"`
+	MaxSupportedTransactionVersion int        `json:"maxSupportedTransactionVersion"`
+	Rewards                        bool       `json:"rewards"`
 }
 
-type GetBlockSignaturesResponse struct {
+type GetBlockParams struct {
+	Slot   uint64
+	Config *GetBlockConfig
+}
+
+func (p *GetBlockParams) MarshalJSON() ([]byte, error) {
+	return json.Marshal([]any{p.Slot, p.Config})
+}
+
+type GetBlockResult struct {
 	BlockHeight       uint64   `json:"blockHeight"`
 	BlockTime         int64    `json:"blockTime"`
 	Blockhash         string   `json:"blockhash"`
@@ -240,51 +254,23 @@ type GetBlockSignaturesResponse struct {
 	Signatures        []string `json:"signatures"`
 }
 
-func (rpc *Rpc) GetMultipleBlocksSignatures(
-	params []*GetMultipleBlocksSignaturesParams,
-) ([]*Response[*GetBlockSignaturesResponse], error) {
-	requests := make([]*request, len(params))
-	for i, p := range params {
-		reqParam := map[string]any{
-			"maxSupportedTransactionVersion": 0,
-			"encoding":                       "base64",
-			"commitment":                     p.Commitment,
-			"rewards":                        false,
-			"transactionDetails":             "signatures",
-		}
-		if p.Commitment == "" {
-			reqParam["commitment"] = CommitmentConfirmed
-		}
-		req := rpc.newRequest("getBlock", []any{p.Slot, reqParam})
-		requests[i] = req
+var _ jsonrpc.Validator = (*GetBlockResult)(nil)
+
+func (r *GetBlockResult) Validate() error {
+	if r.BlockHeight == 0 {
+		return errors.New("missing blockHeight")
 	}
-
-	responses := []*Response[*GetBlockSignaturesResponse]{}
-	err := rpc.sendRequest(requests, &responses)
-	if err != nil {
-		return nil, err
+	if r.BlockTime == 0 {
+		return errors.New("missing blockTime")
 	}
-
-	type r = *Response[*GetBlockSignaturesResponse]
-	slices.SortFunc(responses, func(a r, b r) int {
-		return int(a.Id - b.Id)
-	})
-
-	return responses, nil
-}
-
-func (rpc *Rpc) GetBlockSignatures(
-	slot uint64, commitment Commitment,
-) (*Response[*GetBlockSignaturesResponse], error) {
-	reqParams := map[string]any{
-		"maxSupportedTransactionVersion": 0,
-		"encoding":                       "base64",
-		"commitment":                     commitment,
-		"rewards":                        false,
-		"transactionDetails":             "signatures",
+	if r.Blockhash == "" {
+		return errors.New("missing blockhash")
 	}
-	res := new(Response[*GetBlockSignaturesResponse])
-	req := rpc.newRequest("getBlock", []any{slot, reqParams})
-	err := rpc.sendRequest(req, res)
-	return res, err
+	if r.ParentSlot == 0 {
+		return errors.New("missing parentSlot")
+	}
+	if r.PreviousBlockhash == "" {
+		return errors.New("missing previousBlockhash")
+	}
+	return nil
 }

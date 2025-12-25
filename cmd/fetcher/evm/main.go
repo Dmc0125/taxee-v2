@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"taxee/pkg/assert"
 	"taxee/pkg/db"
+	"taxee/pkg/jsonrpc"
 	requesttimer "taxee/pkg/request_timer"
 )
 
@@ -294,6 +297,304 @@ func (client *Client) GetInternalTransactionsByHash(
 ///////////////////
 // RPC methods
 
+const (
+	GetTransactionByHash  = "eth_getTransactionByHash"
+	GetTransactionReceipt = "eth_getTransactionReceipt"
+	GetCode               = "eth_getCode"
+	Call                  = "eth_call"
+)
+
+func AlchemyApiUrl(network db.Network, apiKey string) (string, error) {
+	var alchemyNetwork string
+	switch network {
+	case db.NetworkArbitrum:
+		alchemyNetwork = "arb-mainnet"
+	case db.NetworkAvaxC:
+		alchemyNetwork = "avax-mainnet"
+	case db.NetworkBsc:
+		alchemyNetwork = "bnb-mainnet"
+	case db.NetworkEthereum:
+		alchemyNetwork = "eth-mainnet"
+	default:
+		return "", fmt.Errorf("unsupported EVM network: %d", network)
+	}
+
+	url := fmt.Sprintf(
+		"https://%s.g.alchemy.com/v2/%s",
+		alchemyNetwork, apiKey,
+	)
+
+	return url, nil
+}
+
+func unmarshalUnformattedData(dst *[]byte, src []byte, expectedLen int, name string) error {
+	if len(src) < 2 {
+		return fmt.Errorf("unable to unmarshal %s: invalid: %s", name, string(src))
+	}
+	src = src[1 : len(src)-1] // remove json quotes
+
+	if string(src[:2]) != "0x" {
+		return fmt.Errorf("unable to unmarshal %s: missing prefix: %s", name, string(src))
+	}
+	src = src[2:] // remove 0x prefix
+
+	if expectedLen != 0 && len(src) != expectedLen*2 {
+		return fmt.Errorf("unable to unmarshal %s: invalid len: %s", name, string(src))
+	}
+
+	if len(src) == 0 {
+		return nil
+	}
+
+	bytes, err := hex.DecodeString(string(src))
+	if err != nil {
+		return fmt.Errorf("unable to unmarshal %s: invalid hex: %w: %s", name, err, string(src))
+	}
+
+	if len(*dst) == 0 {
+		*dst = append(*dst, bytes...)
+	} else {
+		copy(*dst, bytes)
+	}
+
+	return nil
+}
+
+func unmarshalQuantityUnsigned(src []byte, size int, name string) (uint64, error) {
+	if len(src) < 2 {
+		return 0, fmt.Errorf("unable to unmarshal %s: invalid: %s", name, string(src))
+	}
+	src = src[1 : len(src)-1] // remove json quotes
+	return strconv.ParseUint(string(src), 0, size)
+}
+
+type DataBytes32 [32]byte
+
+var _ json.Unmarshaler = (*DataBytes32)(nil)
+
+func (b *DataBytes32) UnmarshalJSON(src []byte) error {
+	t := (*b)[:]
+	return unmarshalUnformattedData(&t, src, 32, "bytes32")
+}
+
+type DataBytes []byte
+
+// MarshalJSON implements json.Marshaler.
+func (b *DataBytes) MarshalJSON() ([]byte, error) {
+	return []byte("0x" + hex.EncodeToString(*b)), nil
+}
+
+func (b *DataBytes) UnmarshalJSON(src []byte) error {
+	return unmarshalUnformattedData((*[]byte)(b), src, 0, "bytes")
+}
+
+var _ json.Unmarshaler = (*DataBytes)(nil)
+var _ json.Marshaler = (*DataBytes)(nil)
+
+type QuantityUint64 uint64
+
+func (q *QuantityUint64) UnmarshalJSON(src []byte) error {
+	_q, err := unmarshalQuantityUnsigned(src, 64, "quantityUint64")
+	if err == nil {
+		*q = QuantityUint64(_q)
+	}
+	return err
+}
+
+func (q *QuantityUint64) MarshalJSON() ([]byte, error) {
+	output := strconv.AppendUint([]byte("0x"), uint64(*q), 16)
+	return output, nil
+}
+
+var _ json.Unmarshaler = (*QuantityUint64)(nil)
+var _ json.Marshaler = (*QuantityUint64)(nil)
+
+type QuantityBigInt big.Int
+
+func (q *QuantityBigInt) UnmarshalJSON(src []byte) error {
+	if len(src) < 2 {
+		return fmt.Errorf("unable to unmarshal quantityBigInt: invalid: %s", string(src))
+	}
+	src = src[1 : len(src)-1] // remove json quotes
+
+	b, ok := new(big.Int).SetString(string(src), 0)
+	if !ok {
+		return fmt.Errorf("unable to unmarshal quantityBigInt: invalid hex: %s", string(src))
+	}
+
+	*q = QuantityBigInt(*b)
+	return nil
+}
+
+var _ json.Unmarshaler = (*QuantityBigInt)(nil)
+
+type Hash string
+
+func (a *Hash) UnmarshalJSON(src []byte) error {
+	if len(src) < 2 {
+		return fmt.Errorf("unable to unmarshal address: invalid: %s", string(src))
+	}
+	src = src[1 : len(src)-1] // remove json quotes
+
+	*a = Hash(src)
+	return nil
+}
+
+var _ json.Unmarshaler = (*Hash)(nil)
+
+type GetTransactionParams string
+
+func (g *GetTransactionParams) MarshalJSON() ([]byte, error) {
+	return json.Marshal([]any{*g})
+}
+
+var _ json.Marshaler = (*GetTransactionParams)(nil)
+
+type GetTransactionByHashResult struct {
+	BlockHash        Hash           `json:"blockHash"`
+	BlockNumber      QuantityUint64 `json:"blockNumber"`
+	From             Hash           `json:"from"`
+	Gas              QuantityBigInt `json:"gas"`
+	GasPrice         QuantityBigInt `json:"gasPrice"`
+	Hash             Hash           `json:"hash"`
+	Input            DataBytes      `json:"input"`
+	Nonce            QuantityUint64 `json:"nonce"`
+	To               Hash           `json:"to"`
+	TransactionIndex QuantityUint64 `json:"transactionIndex"`
+	Value            QuantityBigInt `json:"value"`
+}
+
+func (g *GetTransactionByHashResult) Validate() error {
+	if len(g.BlockHash) != 66 {
+		return fmt.Errorf("invalid blockhash")
+	}
+	if g.BlockNumber == 0 {
+		return fmt.Errorf("missing quantity")
+	}
+	if len(g.From) != 42 {
+		return fmt.Errorf("invalid from address")
+	}
+	if len(g.To) != 42 {
+		return fmt.Errorf("invalid to address")
+	}
+	if len(g.Hash) != 66 {
+		return fmt.Errorf("invalid hash")
+	}
+	return nil
+}
+
+var _ jsonrpc.Validator = (*GetTransactionByHashResult)(nil)
+
+type Log struct {
+	Address Hash           `json:"address"`
+	Topics  [4]DataBytes32 `json:"topics"`
+	Data    DataBytes      `json:"data"`
+}
+
+func (l *Log) Validate() error {
+	if len(l.Address) != 42 {
+		return fmt.Errorf("invalid from address")
+	}
+	return nil
+}
+
+var _ jsonrpc.Validator = (*Log)(nil)
+
+type GetTransactionReceiptResult struct {
+	TransactionHash   Hash           `json:"transactionHash"`
+	TransactionIndex  QuantityUint64 `json:"transactionIndex"`
+	BlockHash         Hash           `json:"blockHash"`
+	BlockNumber       QuantityUint64 `json:"blockNumber"`
+	From              Hash           `json:"from"`
+	To                Hash           `json:"to"`
+	CumulativeGasUsed QuantityBigInt `json:"cumulativeGasUsed"`
+	GasUsed           QuantityBigInt `json:"gasUsed"`
+	ContractAddress   Hash           `json:"contractAddress"`
+	Logs              []*Log         `json:"logs"`
+	Type              QuantityUint64 `json:"type"`
+	// 1 => success, 0 => error
+	Status QuantityUint64 `json:"status"`
+}
+
+func (g *GetTransactionReceiptResult) Validate() error {
+	if len(g.BlockHash) != 66 {
+		return fmt.Errorf("invalid blockhash")
+	}
+	if g.BlockNumber == 0 {
+		return fmt.Errorf("missing quantity")
+	}
+	if len(g.From) != 42 {
+		return fmt.Errorf("invalid from address")
+	}
+	if len(g.To) != 42 {
+		return fmt.Errorf("invalid to address")
+	}
+	if len(g.TransactionHash) != 66 {
+		return fmt.Errorf("invalid hash")
+	}
+
+	for _, l := range g.Logs {
+		if err := l.Validate(); err != nil {
+			return err
+		}
+	}
+
+	if g.Status > 1 {
+		return fmt.Errorf("invalid status")
+	}
+
+	return nil
+}
+
+var _ jsonrpc.Validator = (*GetTransactionReceiptResult)(nil)
+
+const (
+	BlockTagLatest = "latest"
+)
+
+type GetCodeParams struct {
+	Address     string `json:"address"`
+	BlockNumber QuantityUint64
+	BlockTag    string
+}
+
+func (g *GetCodeParams) MarshalJSON() ([]byte, error) {
+	p := []any{g.Address}
+	if g.BlockTag != "" {
+		p = append(p, g.BlockTag)
+	} else {
+		p = append(p, g.BlockNumber)
+	}
+	return json.Marshal(p)
+}
+
+var _ json.Marshaler = (*GetCodeParams)(nil)
+
+type GetCodeResult DataBytes
+
+type CallParams struct {
+	To          string         `json:"to"`
+	Input       DataBytes      `json:"input"`
+	BlockNumber QuantityUint64 `json:"-"`
+	BlockTag    string         `json:"-"`
+}
+
+// MarshalJSON implements json.Marshaler.
+func (c *CallParams) MarshalJSON() ([]byte, error) {
+	p := []any{c}
+	if c.BlockTag != "" {
+		p = append(p, c.BlockNumber)
+	} else {
+		p = append(p, c.BlockNumber)
+	}
+
+	return json.Marshal(p)
+}
+
+var _ json.Marshaler = (*CallParams)(nil)
+
+/////////////////
+
 type RpcError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
@@ -349,108 +650,6 @@ func (client *Client) NewRpcRequest(
 		Id:      id,
 	}
 	return &r
-}
-
-type RpcTransaction struct {
-	Hash        string     `json:"hash"`
-	BlockHash   string     `json:"blockHash"`
-	BlockNumber HexUint64  `json:"blockNumber"`
-	TxIdx       HexUint32  `json:"transactionIndex"`
-	From        string     `json:"from"`
-	To          string     `json:"to"`
-	Value       *HexBigInt `json:"value"`
-	Input       HexBytes   `json:"input"`
-	Gas         *HexBigInt `json:"gas"`
-	GasPrice    *HexBigInt `json:"gasPrice"`
-}
-
-func (client *Client) BatchGetTransactionByHash(
-	network db.Network,
-	hashes []string,
-) ([]*RpcResponse[*RpcTransaction], error) {
-	requests := make([]*RpcRequest, len(hashes))
-	for i, hash := range hashes {
-		requests[i] = client.NewRpcRequest(
-			"eth_getTransactionByHash",
-			[]string{hash},
-			i,
-		)
-	}
-
-	body, err := json.Marshal(requests)
-	if err != nil {
-		return nil, fmt.Errorf("unable to marshal requests: %w", err)
-	}
-
-	url, err := client.newAlchemyUrl(network)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
-	if err != nil {
-		return nil, fmt.Errorf("unable to create http request: %w", err)
-	}
-
-	var data []*RpcResponse[*RpcTransaction]
-	err = client.sendRequest(req, &data, client.alchemyTimer)
-	return data, err
-}
-
-type ReceiptErr bool
-
-func (dst *ReceiptErr) UnmarshalJSON(src []byte) error {
-	s := string(src[3 : len(src)-1])
-	// 0 => err
-	// 1 => ok
-	*dst = s == "0"
-	return nil
-}
-
-type RpcTransactionEventLog struct {
-	Address string      `json:"address"`
-	Topics  [4]HexBytes `json:"topics"`
-	Data    HexBytes    `json:"data"`
-}
-
-type RpcTransactionReceipt struct {
-	Hash        string                    `json:"transactionHash"`
-	BlockHash   string                    `json:"blockHash"`
-	BlockNumber HexUint64                 `json:"blockNumber"`
-	GasUsed     *HexBigInt                `json:"gasUsed"`
-	Err         ReceiptErr                `json:"status"`
-	Logs        []*RpcTransactionEventLog `json:"logs"`
-}
-
-func (client *Client) BatchGetTransactionReceipt(
-	network db.Network,
-	hashes []string,
-) ([]*RpcResponse[*RpcTransactionReceipt], error) {
-	requests := make([]*RpcRequest, len(hashes))
-	for i, hash := range hashes {
-		requests[i] = client.NewRpcRequest(
-			"eth_getTransactionReceipt",
-			[]string{hash},
-			i,
-		)
-	}
-
-	body, err := json.Marshal(requests)
-	if err != nil {
-		return nil, fmt.Errorf("unable to marshal requests: %w", err)
-	}
-
-	url, err := client.newAlchemyUrl(network)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
-	if err != nil {
-		return nil, fmt.Errorf("unable to create http request: %w", err)
-	}
-
-	var data []*RpcResponse[*RpcTransactionReceipt]
-	err = client.sendRequest(req, &data, client.alchemyTimer)
-	return data, err
 }
 
 func (client *Client) GetCode(network db.Network, address string) (string, error) {
@@ -525,44 +724,4 @@ func (client *Client) Batch(
 	}
 
 	return res, nil
-}
-
-func (client *Client) BatchGetTokenDecimals(
-	network db.Network,
-	tokens []string,
-) ([]*RpcResponse[string], error) {
-	requests := make([]*RpcRequest, len(tokens))
-	for i, token := range tokens {
-		params := struct {
-			To    string `json:"to"`
-			Input string `json:"input"`
-		}{
-			To: token,
-			// decimals() selector
-			Input: "0x313ce567",
-		}
-		requests[i] = client.NewRpcRequest(
-			"eth_call",
-			[]any{params, "latest"},
-			i,
-		)
-	}
-
-	body, err := json.Marshal(requests)
-	if err != nil {
-		return nil, fmt.Errorf("unable to marshal requests: %w", err)
-	}
-
-	url, err := client.newAlchemyUrl(network)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
-	if err != nil {
-		return nil, fmt.Errorf("unable to create http request: %w", err)
-	}
-
-	var data []*RpcResponse[string]
-	err = client.sendRequest(req, &data, client.alchemyTimer)
-	return data, err
 }

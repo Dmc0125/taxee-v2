@@ -503,13 +503,17 @@ func DecompileTransaction(
 		)
 
 		for j, ciix := range innerInstructions.Instructions {
-			data, err := base58.Decode(ciix.Data)
-			if err != nil {
-				return nil, fmt.Errorf(
-					"%w: unable to decode inner ix data: %w",
-					ERROR_DECOMPILE_TRANSACTION, err,
-				)
+			var data []byte
+			if ciix.Data != "" {
+				var err error
+				if data, err = base58.Decode(ciix.Data); err != nil {
+					return nil, fmt.Errorf(
+						"%w: unable to decode inner ix data: %w",
+						ERROR_DECOMPILE_TRANSACTION, err,
+					)
+				}
 			}
+
 			iix, err := decompileInstruction(
 				accounts,
 				ciix.ProgramIdIndex,

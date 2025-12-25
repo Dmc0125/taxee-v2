@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync/atomic"
 	"taxee/cmd/fetcher"
@@ -15,12 +16,14 @@ import (
 	"taxee/pkg/coingecko"
 	"taxee/pkg/db"
 	"taxee/pkg/dotenv"
+	"taxee/pkg/jsonrpc"
 	"taxee/pkg/logger"
 	requesttimer "taxee/pkg/request_timer"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/lmittmann/tint"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -28,7 +31,7 @@ func consumeQueuedWallets(
 	jobCounter *atomic.Uint32,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	solanaRpc *solana.Rpc,
+	alchemyApiKey string,
 	evmClient *evm.Client,
 ) {
 	jobCounter.Add(1)
@@ -78,7 +81,7 @@ func consumeQueuedWallets(
 	eg.Go(func() error {
 		defer groupCtxCancel()
 		return fetcher.Fetch(
-			groupCtx, pool, solanaRpc, evmClient,
+			groupCtx, pool, evmClient, alchemyApiKey,
 			userAccountId, network, walletAddress, walletId,
 			walletDataSerialized, fresh,
 		)
@@ -425,16 +428,27 @@ func main() {
 		assert.NoErr(dotenv.ReadEnv(), "")
 	}
 
-	logger.Info("Initializing db pool")
+	slog.SetDefault(slog.New(tint.NewHandler(os.Stderr, &tint.Options{
+		AddSource: true,
+	})))
+
+	slog.Info("", "appEnv", appEnv)
+	slog.Info("initializing db pool")
+
 	pool, err := db.InitPool(context.Background(), appEnv)
 	assert.NoErr(err, "")
 
-	logger.Info("Initializing evm client")
+	slog.Info("initializing jsonrpc")
+
+	jsonrpc.NewLimiter(5000, solana.AlchemyMethodsCosts)
+
+	alchemyApiKey := os.Getenv("ALCHEMY_API_KEY")
+	assert.True(len(alchemyApiKey) > 0, "missing alchemy api key")
+
 	alchemyReqTimer := requesttimer.NewDefault(100)
 	evmClient := evm.NewClient(alchemyReqTimer)
-	solanaRpc := solana.NewRpc(alchemyReqTimer)
 
-	logger.Info("Initializing coingecko")
+	slog.Info("initializing coingecko")
 	coingecko.Init()
 
 	ticker := time.NewTicker(time.Second)
@@ -452,7 +466,7 @@ func main() {
 			go consumeQueuedWallets(
 				&runningFetchWallets,
 				context.TODO(),
-				pool, solanaRpc, evmClient,
+				pool, alchemyApiKey, evmClient,
 			)
 		}
 

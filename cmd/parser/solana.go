@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"fmt"
 	"math"
 	"slices"
 	"taxee/pkg/db"
@@ -205,6 +206,7 @@ func (ctx *solContext) findOwnedOrError(
 }
 
 func solPreprocessIx(ctx *solContext, ix *db.SolanaInstruction) {
+	fmt.Println(ctx.txId)
 	switch ix.ProgramAddress {
 	case SOL_SYSTEM_PROGRAM_ADDRESS:
 		solPreprocessSystemIx(ctx, ix)
@@ -318,6 +320,7 @@ func solProcessIx(
 	ctx *solContext,
 	ix *db.SolanaInstruction,
 ) {
+	fmt.Println(ctx.txId)
 	switch ix.ProgramAddress {
 	case SOL_SYSTEM_PROGRAM_ADDRESS:
 		solProcessSystemIx(ctx, ix)

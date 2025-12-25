@@ -2,9 +2,11 @@ package parser
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"math"
 	"math/big"
@@ -15,6 +17,7 @@ import (
 	"taxee/pkg/assert"
 	"taxee/pkg/coingecko"
 	"taxee/pkg/db"
+	"taxee/pkg/jsonrpc"
 	"taxee/pkg/logger"
 	"time"
 
@@ -1215,61 +1218,75 @@ func ParseTransactions(
 	}
 
 	// fetch evm tokens decimals
-	logger.Info("fetching evm tokens decimals")
-	evmTokenAmounts := make(map[db.Network]map[string][]*decimal.Decimal)
+	slog.Info("fetching evm tokens decimals")
+	evmTokens := make(map[db.Network]map[string][]*decimal.Decimal)
+
 	for _, events := range eventsByTx {
 		for _, event := range events {
 			if db.NetworkEvmStart < event.Network && event.Network < db.NetworksCount {
-				networkTokens, ok := evmTokenAmounts[event.Network]
+				tokens, ok := evmTokens[event.Network]
 				if !ok {
-					networkTokens = make(map[string][]*decimal.Decimal)
+					tokens = make(map[string][]*decimal.Decimal)
 				}
 
 				for _, t := range event.Transfers {
 					if t.TokenSource != tokenSourceCoingecko {
-						networkTokens[t.Token] = append(networkTokens[t.Token], &t.Amount)
+						tokens[t.Token] = append(tokens[t.Token], &t.Amount)
 					}
 				}
 
-				evmTokenAmounts[event.Network] = networkTokens
+				evmTokens[event.Network] = tokens
 			}
 		}
 	}
 
-	for network, tokens := range evmTokenAmounts {
-		tokensAddresses := slices.Collect(maps.Keys(tokens))
-		tokensDecimals, err := evmClient.BatchGetTokenDecimals(
-			network,
-			tokensAddresses,
-		)
+	for network, tokens := range evmTokens {
+		url, err := evm.AlchemyApiUrl(network, "")
 		if err != nil {
-			return fmt.Errorf("unable to get tokens decimals: %w", err)
+			return err
+		}
+		batch := jsonrpc.NewBatch(url)
+
+		for token, amounts := range tokens {
+			params := evm.CallParams{
+				To: token,
+				// NOTE: ERC20 decimals() selector - 0x313ce567
+				Input:    evm.DataBytes{49, 60, 229, 103},
+				BlockTag: "latest",
+			}
+			batch.Queue(
+				evm.Call, &params,
+				func(rm json.RawMessage) (bool, error) {
+					srm := string(rm)
+					if srm == "null" {
+						return true, nil
+					}
+					// 32 bytes * 2 + 0x = 66
+					if srm != "0x" && len(rm) != 66 {
+						return false, fmt.Errorf("invalid decimals response: %s", string(rm))
+					}
+
+					decimals := int32(0)
+					if len(rm) != 2 {
+						// use last byte only
+						d, err := strconv.ParseUint(srm[len(srm)-2:], 16, 8)
+						if err != nil {
+							return false, fmt.Errorf("unable to parse decimals: %w", err)
+						}
+						decimals = int32(d)
+					}
+
+					for _, a := range amounts {
+						*a = decimal.NewFromBigInt(a.BigInt(), -decimals)
+					}
+
+					return false, nil
+				},
+			)
 		}
 
-		for i, token := range tokensAddresses {
-			decimalsResult := tokensDecimals[i]
-			if decimalsResult.Error != nil {
-				return fmt.Errorf("unable to get tokens decimals: %s", decimalsResult.Error.Message)
-			}
-
-			decimals := int64(0)
-			if decimalsResult.Result != "0x" {
-				var err error
-				// NOTE: last byte of the result
-				hexDecimals := decimalsResult.Result[len(decimalsResult.Result)-2:]
-				decimals, err = strconv.ParseInt(hexDecimals, 16, 8)
-				if err != nil {
-					return fmt.Errorf(
-						"unable to parse evm token decimals: %s: %w",
-						decimalsResult.Result,
-						err,
-					)
-				}
-			}
-
-			for _, a := range tokens[token] {
-				*a = decimal.NewFromBigInt(a.BigInt(), -int32(decimals))
-			}
+		if err := jsonrpc.CallBatch(ctx, batch); err != nil {
+			return fmt.Errorf("unable to get decimals for %s: %w", network.String(), err)
 		}
 	}
 
@@ -1536,7 +1553,7 @@ func ParseEvents(
 		transfer *db.EventTransfer,
 	) error {
 		var coingeckoId string
-		var price decimal.Decimal
+		var price string
 		var missing bool
 		if err := row.Scan(&coingeckoId, &price, &missing); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -1547,8 +1564,10 @@ func ParseEvents(
 			return fmt.Errorf("unable to scan pricepoint: %w", err)
 		}
 		if missing {
-			transfer.Price = price
-			transfer.Value = price.Mul(transfer.Amount)
+			if transfer.Price, err = decimal.NewFromString(price); err != nil {
+				return fmt.Errorf("can not convert price to decimal: %w", err)
+			}
+			transfer.Value = transfer.Price.Mul(transfer.Amount)
 			return nil
 		}
 		coingeckoTokensQueue = append(

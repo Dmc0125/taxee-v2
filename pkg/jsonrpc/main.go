@@ -1,0 +1,334 @@
+package jsonrpc
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"slices"
+	"sync"
+	"sync/atomic"
+	"taxee/pkg/assert"
+	"time"
+)
+
+var errMaxRetries = errors.New("maxRetries")
+
+var id atomic.Uint64
+var mx sync.Mutex
+var lm *limiter
+
+const (
+	maxAlchemyBatchSize = 1000
+)
+
+type limiter struct {
+	bucket       float64
+	cuPerSecond  float64
+	lastUpdate   time.Time
+	methodsCosts map[string]int
+	batchCost    float64
+}
+
+func (lm *limiter) wait(ctx context.Context, cost float64) error {
+	if lm.bucket < cost {
+		// refill
+		now := time.Now()
+		elapsed := now.Sub(lm.lastUpdate).Seconds()
+		lm.bucket += elapsed * float64(lm.cuPerSecond)
+		if lm.bucket > lm.cuPerSecond {
+			lm.bucket = lm.cuPerSecond
+		}
+		lm.lastUpdate = now
+
+		// wait
+		if lm.bucket < cost {
+			missing := cost - lm.bucket
+			waitSeconds := missing / lm.cuPerSecond
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+				time.Sleep(time.Duration(waitSeconds*1000) * time.Millisecond)
+			}
+		}
+	}
+	lm.bucket -= cost
+	return nil
+}
+
+func NewLimiter(cuPerSecond int, methodsCosts map[string]int) {
+	mx.Lock()
+	defer mx.Unlock()
+	lm = &limiter{
+		bucket:       float64(cuPerSecond),
+		cuPerSecond:  float64(cuPerSecond),
+		methodsCosts: methodsCosts,
+	}
+}
+
+type request struct {
+	Jsonrpc string `json:"jsonrpc"`
+	Method  string `json:"method"`
+	Params  any    `json:"params,omitempty"`
+	Id      uint64 `json:"id"`
+}
+
+type responseError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    any    `json:"data"`
+}
+
+type response struct {
+	Id     uint64          `json:"id"`
+	Error  *responseError  `json:"error"`
+	Result json.RawMessage `json:"result,omitempty"`
+}
+
+type Validator interface {
+	Validate() error
+}
+
+func send(
+	ctx context.Context,
+	url string,
+	body []byte,
+	result any,
+) (int, bool, error) {
+	select {
+	case <-ctx.Done():
+		return 0, false, ctx.Err()
+	default:
+	}
+
+	res, err := http.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return 0, false, fmt.Errorf("unable to send request: %w", err)
+	}
+	defer res.Body.Close()
+	statusOk := res.StatusCode >= 200 && res.StatusCode < 300
+
+	var buf bytes.Buffer
+	chunk := make([]byte, 32*1024)
+	for {
+		select {
+		case <-ctx.Done():
+			return res.StatusCode, statusOk, ctx.Err()
+		default:
+		}
+		n, err := res.Body.Read(chunk)
+		if n > 0 {
+			buf.Write(chunk[:n])
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return res.StatusCode, statusOk, fmt.Errorf("stream error after reading %d bytes: %w", buf.Len(), err)
+		}
+	}
+
+	resBody := buf.Bytes()
+
+	if err := json.Unmarshal(resBody, result); err != nil {
+		return res.StatusCode, statusOk, fmt.Errorf("unable to unmarshal: %w\nBody: %s", err, string(resBody))
+	}
+
+	return res.StatusCode, statusOk, nil
+}
+
+func Call(
+	ctx context.Context,
+	url, method string,
+	params any,
+	result Validator,
+	retry bool,
+) error {
+	retries, ok := ctx.Value("jsonrpc_retries").(int)
+	// max 5 retries
+	if ok && retries > 4 {
+		return fmt.Errorf("%w: failed to call %s", errMaxRetries, method)
+	}
+
+	httpBody, err := json.Marshal(request{
+		Jsonrpc: "2.0",
+		Method:  method,
+		Id:      id.Add(1),
+		Params:  params,
+	})
+	if err != nil {
+		return fmt.Errorf("unable to marshal request: %w", err)
+	}
+
+	mx.Lock()
+
+	if lm != nil {
+		if err := lm.wait(ctx, float64(lm.methodsCosts[method])); err != nil {
+			mx.Unlock()
+			return err
+		}
+	}
+
+	var res response
+	statusCode, statusOk, err := send(ctx, url, httpBody, &res)
+	mx.Unlock()
+
+	if err != nil {
+		return err
+	}
+	if res.Error != nil {
+		assert.True(false, "TODO: handle jsonrpc errors")
+	}
+	if !statusOk {
+		assert.True(false, "TODO: handle status not ok: %d %v", statusCode, res)
+	}
+
+	if len(res.Result) == 0 && retry {
+		return Call(
+			context.WithValue(ctx, "jsonrpc_retries", retries+1),
+			url, method, params, result, true,
+		)
+	}
+
+	if err := json.Unmarshal(res.Result, result); err != nil {
+		return fmt.Errorf("unable to unmarshal response: %w\nBody: %s", err, string(res.Result))
+	}
+
+	return result.Validate()
+}
+
+type BatchCallback func(json.RawMessage) (retry bool, err error)
+
+type batchRequest struct {
+	*request
+	cb      BatchCallback
+	retries int
+}
+
+type Batch struct {
+	url   string
+	queue map[uint64]*batchRequest
+}
+
+func NewBatch(url string) *Batch {
+	return &Batch{
+		url:   url,
+		queue: make(map[uint64]*batchRequest),
+	}
+}
+
+func (b *Batch) Len() int {
+	return len(b.queue)
+}
+
+func (b *Batch) Queue(method string, params any, callback BatchCallback) {
+	rid := id.Add(1)
+
+	b.queue[rid] = &batchRequest{
+		request: &request{
+			Jsonrpc: "2.0",
+			Method:  method,
+			Params:  params,
+			Id:      rid,
+		},
+		cb: callback,
+	}
+}
+
+func CallBatch(ctx context.Context, batch *Batch) error {
+	if len(batch.queue) == 0 {
+		return nil
+	}
+
+	mx.Lock()
+
+	// calc total batch CUs
+	batchChunk := make([]*request, 0)
+	batchCus := float64(0)
+
+	for _, br := range batch.queue {
+		if len(batchChunk) == maxAlchemyBatchSize {
+			break
+		}
+
+		if lm != nil {
+			cost := float64(lm.methodsCosts[br.Method])
+			if cost+batchCus > float64(lm.cuPerSecond) {
+				break
+			}
+			batchCus += cost
+		}
+
+		batchChunk = append(batchChunk, br.request)
+	}
+
+	// wait
+	if lm != nil {
+		if err := lm.wait(ctx, batchCus); err != nil {
+			mx.Unlock()
+			return err
+		}
+	}
+
+	body, err := json.Marshal(batchChunk)
+	if err != nil {
+		mx.Unlock()
+		return fmt.Errorf("unable to marshal requests: %w", err)
+	}
+
+	var responses []*response
+	statusCode, statusOk, err := send(
+		ctx, batch.url, body, &responses,
+	)
+	mx.Unlock()
+
+	if err != nil {
+		return err
+	}
+	if !statusOk {
+		assert.True(false, "unreachable: %d", statusCode)
+	}
+
+	slices.SortFunc(responses, func(r1, r2 *response) int {
+		return int(r1.Id - r2.Id)
+	})
+
+	for _, response := range responses {
+		if response.Error != nil {
+			assert.True(false, "TODO: handle jsonrpc errors")
+		}
+
+		rid := response.Id
+		br := batch.queue[rid]
+		if br.cb != nil {
+			retry, err := br.cb(response.Result)
+			if err != nil {
+				return err
+			}
+
+			if retry {
+				if br.retries > 4 {
+					return fmt.Errorf(
+						"%w: unable to send batch: request id %d",
+						errMaxRetries, response.Id,
+					)
+				}
+
+				br.retries += 1
+				continue
+			}
+		}
+
+		delete(batch.queue, rid)
+	}
+
+	if len(batch.queue) > 0 {
+		return CallBatch(ctx, batch)
+	}
+
+	return nil
+}

@@ -161,6 +161,9 @@ func solProcessMeteoraFarmsIx(
 		)
 	// claim
 	case [8]uint8{62, 198, 214, 193, 213, 159, 108, 210}:
+		if len(ix.InnerInstructions) == 0 {
+			return
+		}
 		transferIx := ix.InnerInstructions[0]
 		amount, _, to := solParseTokenTransfer(
 			transferIx.Accounts,

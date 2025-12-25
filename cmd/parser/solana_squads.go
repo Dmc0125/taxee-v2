@@ -83,10 +83,11 @@ func (acc *solSquadsV4CompiledTxAccountData) initFromData(data []byte) {
 	// transaction messages byte vec size => 4 bytes (u32)
 	msg := data[14:]
 
-	accountKeysCount := msg[3]
+	accountKeysCount := int(msg[3])
 	acc.accountKeys = make([]string, accountKeysCount)
 	for i := range accountKeysCount {
 		offset := 4 + i*32
+
 		acc.accountKeys[i] = base58.Encode(msg[offset : offset+32])
 	}
 
@@ -120,7 +121,7 @@ func (acc *solSquadsV4CompiledTxAccountData) initFromData(data []byte) {
 		acc.ixs[i] = ix
 	}
 
-	lookupsCount := msg[offset]
+	lookupsCount := int(msg[offset])
 	offset += 1
 
 	acc.lookups = make([]solSquadsV4Lookup, lookupsCount)
