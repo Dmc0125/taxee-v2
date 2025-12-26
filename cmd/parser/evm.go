@@ -1,79 +1,21 @@
 package parser
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
-	"maps"
 	"math"
 	"slices"
 	"strings"
 	"taxee/cmd/fetcher/evm"
-	"taxee/pkg/assert"
 	"taxee/pkg/db"
+	"taxee/pkg/jsonrpc"
 	"time"
 
 	"github.com/shopspring/decimal"
 )
-
-func queryBatchUntilAllSuccessful(
-	client *evm.Client,
-	network db.Network,
-	requests []*evm.RpcRequest,
-) []*evm.BatchResult[any] {
-	type queuedRequest struct {
-		idx    int
-		errors []*evm.RpcError
-	}
-
-	queue := make(map[int]*queuedRequest)
-	for i, req := range requests {
-		queue[i] = &queuedRequest{
-			idx: req.Id,
-		}
-	}
-
-	batchResult := make([]*evm.BatchResult[any], len(requests))
-
-	for try := 0; len(queue) > 0 && try < 5; try += 1 {
-		r, reqIdx := make([]*evm.RpcRequest, len(queue)), 0
-		for _, qr := range queue {
-			r[reqIdx] = requests[qr.idx]
-			reqIdx += 1
-		}
-
-		result, err := client.Batch(network, r)
-		assert.NoErr(err, "unable to send batch")
-
-		for i, res := range result {
-			req := *r[i]
-			qr := queue[req.Id]
-
-			switch {
-			case res.Error == nil:
-				batchResult[qr.idx] = res
-				delete(queue, req.Id)
-			default:
-				qr.errors = append(qr.errors, res.Error)
-			}
-		}
-	}
-
-	if len(queue) != 0 {
-		for _, qr := range queue {
-			req := requests[qr.idx]
-			fmt.Printf("Method: %s\n", req.Method)
-			fmt.Printf("Params: %#v\n", req.Params)
-			for i, err := range qr.errors {
-				fmt.Printf("\t%d: Err: %#v\n", i, err)
-			}
-		}
-		fmt.Println()
-		assert.True(false, "unable to query batch")
-	}
-
-	return batchResult
-}
 
 func evmIdentifyNonProxyContract(bytecode []byte) []uint32 {
 	implementations := make([]uint32, 0)
@@ -132,202 +74,201 @@ func evmIdentifyNonProxyContract(bytecode []byte) []uint32 {
 	return implementations
 }
 
+// Identifies contracts in 4 steps
+//
+// - Fetch bytecodes for all addresses
+//
+// - Detect proxies (slot-based or EIP-1167)
+//
+// - Fetch implementation bytecodes
+//
+// - Analyze implementations and associate with proxy addresses
 func evmIdentifyContracts(
-	client *evm.Client,
+	ctx context.Context,
 	network db.Network,
+	alchemyApiKey string,
 	addressesWithBlocksMap map[string][]uint64,
 	context *evmContext,
-) {
-	////////////////
-	// get bytecodes for contracts
-	// NOTE: evm contracts are immutable, no need to keep slot
-	addresses := slices.Collect(maps.Keys(addressesWithBlocksMap))
-
-	requests := make([]*evm.RpcRequest, len(addresses))
-	for i, address := range addresses {
-		requests[i] = client.NewRpcRequest(
-			"eth_getCode",
-			[]string{address, "latest"},
-			i,
-		)
+) error {
+	url, err := evm.AlchemyApiUrl(network, alchemyApiKey)
+	if err != nil {
+		return err
 	}
 
-	bytecodesResult := queryBatchUntilAllSuccessful(client, network, requests)
 	bytecodes := make(map[string][]byte)
 
 	type contractId struct {
-		block   uint64
-		address string
+		address     string
+		blockNumber uint64
 	}
 
-	// NOTE: This needs to be fetched
-	proxyContractsMemorySlots := make(map[contractId][32]byte)
-	logicContractsAddresses := make([]string, 0)
-	proxiesToLogicContractsAddresses := make(map[contractId]string)
-
-	for i, bytecodeResult := range bytecodesResult {
-		assert.True(bytecodeResult.Error == nil, "")
-
-		bytecodeEncoded, ok := bytecodeResult.Data.(string)
-		assert.True(ok, "invalid bytecode type: %T", bytecodeResult.Data)
-
-		if bytecodeEncoded == "0x" {
-			// not a contract
-			continue
-		}
-
-		bytecode, err := hex.DecodeString(bytecodeEncoded[2:])
-		assert.NoErr(err, "invalid bytecode")
-
-		contractAddress := addresses[i]
-		bytecodes[contractAddress] = bytecode
-
-		if implMemorySlot, ok := evmIdentifyProxyContract(bytecode); ok {
-			blocks := addressesWithBlocksMap[contractAddress]
-			for _, b := range blocks {
-				proxyContractsMemorySlots[contractId{
-					block:   b,
-					address: contractAddress,
-				}] = implMemorySlot
-			}
-			continue
-		}
-
-		if logicContractAddressBytes, ok := evmIdentifyEip1167ProxyContract(bytecode); ok {
-			logicContractAddress := fmt.Sprintf(
-				"0x%s",
-				hex.EncodeToString(logicContractAddressBytes[:]),
-			)
-			proxiesToLogicContractsAddresses[contractId{
-				block:   math.MaxUint64,
-				address: contractAddress,
-			}] = logicContractAddress
-
-			if !slices.Contains(logicContractsAddresses, logicContractAddress) {
-				logicContractsAddresses = append(
-					logicContractsAddresses,
-					logicContractAddress,
-				)
-			}
-
-			continue
-		}
-
-		// TODO: Gnome proxy, ...
-
-		blocks := addressesWithBlocksMap[contractAddress]
-		implementations := evmIdentifyNonProxyContract(
-			bytecode,
-		)
-
-		for _, b := range blocks {
-			evmAppendContractImplementation(
-				context,
-				contractAddress,
-				b,
-				implementations,
-			)
-		}
-
+	type storageSlotRequest struct {
+		proxyAddress string
+		blockNumber  uint64
+		slot         [32]byte
 	}
 
-	////////////////
-	// get logic contracts addreses for proxies
+	proxies := make(map[contractId]string)
+	var storageSlotsToGet []*storageSlotRequest
+	implAddressesToGet := make(map[string]bool)
 
-	if len(proxyContractsMemorySlots) > 0 {
-		memorySlotsKeys := slices.Collect(maps.Keys(proxyContractsMemorySlots))
-		requests = make([]*evm.RpcRequest, len(memorySlotsKeys))
+	rpcBatch := jsonrpc.NewBatch(url)
 
-		for i, contractId := range memorySlotsKeys {
-			memSlot := proxyContractsMemorySlots[contractId]
-			memSlotHex := hex.EncodeToString(memSlot[:])
-
-			requests[i] = client.NewRpcRequest(
-				"eth_getStorageAt",
-				[]string{
-					contractId.address,
-					fmt.Sprintf("0x%s", memSlotHex),
-					fmt.Sprintf("0x%x", contractId.block),
-				},
-				i,
-			)
-		}
-
-		implAddressesResults := queryBatchUntilAllSuccessful(client, network, requests)
-
-		for i, implAddressResult := range implAddressesResults {
-			assert.True(implAddressResult.Error == nil, "")
-
-			valueEncoded, ok := implAddressResult.Data.(string)
-			assert.True(ok, "invalid address type: %T", implAddressResult.Data)
-			assert.True(strings.HasPrefix(valueEncoded, "0x"), "not a valid hex string: %s", valueEncoded)
-
-			// NOTE: the value at the memory slot is 32 bytes long
-			// so 64 characters as hex and the last 20 bytes is the address
-			// so it's 2 (0x prefix) + 12 * 2 (24) = 26
-			address := fmt.Sprintf("0x%s", valueEncoded[26:])
-			proxiesToLogicContractsAddresses[memorySlotsKeys[i]] = address
-
-			// NOTE: if bytecode for the implementation contract is already fetched
-			// don't need to fetch it again
-			if _, ok := bytecodes[address]; !ok {
-				// NOTE: only need to fetch once for each address
-				if !slices.Contains(logicContractsAddresses, address) {
-					logicContractsAddresses = append(logicContractsAddresses, address)
+	for address, blocks := range addressesWithBlocksMap {
+		rpcBatch.Queue(
+			evm.GetCode, &evm.GetCodeParams{
+				Address:  address,
+				BlockTag: evm.BlockTagLatest,
+			},
+			func(rm json.RawMessage) (retry bool, err error) {
+				if string(rm) == "null" {
+					return true, nil
 				}
-			}
-		}
-	}
 
-	////////////////
-	// get bytecodes of the implementation contracts
+				var code evm.DataBytes
+				if err := json.Unmarshal(rm, &code); err != nil {
+					return false, fmt.Errorf("unable to unmarshal code: %w", err)
+				}
 
-	if len(logicContractsAddresses) > 0 {
-		requests = make([]*evm.RpcRequest, len(logicContractsAddresses))
-		for i, implAddress := range logicContractsAddresses {
-			requests[i] = client.NewRpcRequest(
-				"eth_getCode",
-				[]string{implAddress, "latest"},
-				i,
-			)
-		}
+				if len(code) == 0 {
+					// not a contract
+					return false, nil
+				}
 
-		implBytecodesResult := queryBatchUntilAllSuccessful(client, network, requests)
+				// process bytecode
 
-		for i, bytecodeResult := range implBytecodesResult {
-			assert.True(bytecodeResult.Error == nil, "")
+				// identify proxy contract based on implementation memory slot
+				// need to fetch the implementation slot at all blocks occurences
+				if implMemorySlot, ok := evmIdentifyProxyContract(code); ok {
+					for _, b := range blocks {
+						storageSlotsToGet = append(storageSlotsToGet, &storageSlotRequest{
+							proxyAddress: address,
+							blockNumber:  b,
+							slot:         implMemorySlot,
+						})
+					}
+					return false, nil
+				}
 
-			bytecodeEncoded, ok := bytecodeResult.Data.(string)
-			assert.True(ok, "invalid bytecode type: %T", bytecodeResult.Data)
+				// identify proxy contract based on EIP1167, returns
+				// implementation address
+				if implAddressBytes, ok := evmIdentifyEip1167ProxyContract(code); ok {
+					implAddress := fmt.Sprintf("0x%s", hex.EncodeToString(implAddressBytes[:]))
+					implAddressesToGet[implAddress] = true
 
-			if bytecodeEncoded == "0x" {
-				// not a contract
-				continue
-			}
+					for _, b := range blocks {
+						proxies[contractId{address, b}] = implAddress
+					}
 
-			bytecode, err := hex.DecodeString(bytecodeEncoded[2:])
-			assert.NoErr(err, "invalid bytecode")
+					return false, nil
+				}
 
-			address := logicContractsAddresses[i]
-			bytecodes[address] = bytecode
-		}
-	}
+				// TODO: Gnome proxy, ...
 
-	////////////////
-	// parse the proxy contracts
+				// not a proxy contract
 
-	for proxyContractId, logicContractAddress := range proxiesToLogicContractsAddresses {
-		logicContractBytecode := bytecodes[logicContractAddress]
-		implementations := evmIdentifyNonProxyContract(
-			logicContractBytecode,
+				bytecodes[address] = code
+
+				implementations := evmIdentifyNonProxyContract(code)
+				for _, b := range addressesWithBlocksMap[address] {
+					context.appendContractImplementation(
+						address, b, implementations,
+					)
+				}
+
+				return false, nil
+			},
 		)
-		evmAppendContractImplementation(
-			context,
-			proxyContractId.address,
-			proxyContractId.block,
-			implementations,
+	}
+
+	if err := jsonrpc.CallBatch(ctx, rpcBatch); err != nil {
+		return fmt.Errorf("unable to get bytecodes: %w", err)
+	}
+
+	rpcBatch = jsonrpc.NewBatch(url)
+
+	for _, r := range storageSlotsToGet {
+		rpcBatch.Queue(
+			evm.GetStorageAt, &evm.GetStorageAtParams{
+				Address:     r.proxyAddress,
+				StorageSlot: r.slot[:],
+				BlockNumber: evm.QuantityUint64(r.blockNumber),
+			},
+			func(rm json.RawMessage) (retry bool, err error) {
+				if string(rm) == "null" {
+					return true, nil
+				}
+
+				// NOTE: this should always be non empty value with size of 32
+				// bytes
+				var result evm.DataBytes32
+				if err := json.Unmarshal(rm, &result); err != nil {
+					return false, fmt.Errorf("unable to unmarshal storage slot: %w", err)
+				}
+
+				// assign implementations to proxies
+
+				// address is last 20 bytes
+				implAddress := fmt.Sprintf("0x%s", hex.EncodeToString(result[12:]))
+				if _, ok := bytecodes[implAddress]; !ok {
+					implAddressesToGet[implAddress] = true
+				}
+
+				proxies[contractId{r.proxyAddress, r.blockNumber}] = implAddress
+				return false, nil
+			},
 		)
 	}
+
+	if err := jsonrpc.CallBatch(ctx, rpcBatch); err != nil {
+		return fmt.Errorf("unable to get implementation addresses: %w", err)
+	}
+
+	rpcBatch = jsonrpc.NewBatch(url)
+
+	for implAddress := range implAddressesToGet {
+		p := evm.GetCodeParams{
+			Address:  implAddress,
+			BlockTag: evm.BlockTagLatest,
+		}
+		rpcBatch.Queue(evm.GetCode, &p, func(rm json.RawMessage) (retry bool, err error) {
+			if string(rm) == "null" {
+				return true, nil
+			}
+
+			var code evm.DataBytes
+			if err := json.Unmarshal(rm, &code); err != nil {
+				return false, fmt.Errorf("unable to unmarshal code: %w", err)
+			}
+
+			if len(code) == 0 {
+				// NOTE: this is a proxy implementation fetched at block when
+				// the contract was called, it has to exist
+				//
+				// TODO: I guess calling selfdestruct could remove the code, so maybe
+				// the code should be fetched at the block it was called
+				return false, fmt.Errorf("should be a contract: %s", implAddress)
+			}
+
+			bytecodes[implAddress] = code
+			return false, nil
+		})
+	}
+
+	if err := jsonrpc.CallBatch(ctx, rpcBatch); err != nil {
+		return fmt.Errorf("unable to get bytecodes: %w", err)
+	}
+
+	// go over all the proxies
+
+	for proxy, implementationAddress := range proxies {
+		impls := evmIdentifyNonProxyContract(bytecodes[implementationAddress])
+		context.appendContractImplementation(
+			proxy.address, uint64(proxy.blockNumber), impls,
+		)
+	}
+
+	return nil
 }
 
 type evmContractImplementation struct {
@@ -346,26 +287,15 @@ type evmContext struct {
 	txId      string
 }
 
-func evmAppendContractImplementation(
-	context *evmContext,
+func (c *evmContext) appendContractImplementation(
 	address string,
 	blockNumber uint64,
 	implementations []uint32,
 ) {
-	c, ok := context.contracts[address]
-	if !ok {
-		context.contracts[address] = []evmContractImplementation{{
-			block: blockNumber,
-			impl:  implementations,
-		}}
-		return
-	}
-
-	c = append(c, evmContractImplementation{
+	c.contracts[address] = append(c.contracts[address], evmContractImplementation{
 		block: blockNumber,
 		impl:  implementations,
 	})
-	context.contracts[address] = c
 }
 
 func evmFindContract(

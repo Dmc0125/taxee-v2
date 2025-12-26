@@ -171,7 +171,7 @@ func consumeQueuedParseTransactions(
 	jobCounterPe *atomic.Uint32,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	evmClient *evm.Client,
+	alchemyApiKey string,
 ) {
 	jobCounterPt.Add(1)
 	defer jobCounterPt.Store(jobCounterPt.Load() - 1)
@@ -219,7 +219,7 @@ func consumeQueuedParseTransactions(
 	// parse
 	eg.Go(func() error {
 		defer groupCtxCancel()
-		if err := parser.ParseTransactions(groupCtx, pool, userAccountId, evmClient); err != nil {
+		if err := parser.ParseTransactions(groupCtx, pool, alchemyApiKey, userAccountId); err != nil {
 			logger.Error("unable to parse transactios: %s", err)
 			return fmt.Errorf("%w: %w", errPt, err)
 		}
@@ -440,7 +440,7 @@ func main() {
 
 	slog.Info("initializing jsonrpc")
 
-	jsonrpc.NewLimiter(5000, solana.AlchemyMethodsCosts)
+	jsonrpc.NewLimiter(5000, solana.AlchemyMethodsCosts, evm.AlchemyMethodsCosts)
 
 	alchemyApiKey := os.Getenv("ALCHEMY_API_KEY")
 	assert.True(len(alchemyApiKey) > 0, "missing alchemy api key")
@@ -474,7 +474,7 @@ func main() {
 			go consumeQueuedParseTransactions(
 				&runningParseTransactions,
 				&runningParseEvents,
-				context.TODO(), pool, evmClient,
+				context.TODO(), pool, alchemyApiKey,
 			)
 		}
 

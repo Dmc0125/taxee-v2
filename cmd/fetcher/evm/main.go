@@ -1,7 +1,6 @@
 package evm
 
 import (
-	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -301,8 +300,17 @@ const (
 	GetTransactionByHash  = "eth_getTransactionByHash"
 	GetTransactionReceipt = "eth_getTransactionReceipt"
 	GetCode               = "eth_getCode"
+	GetStorageAt          = "eth_getStorageAt"
 	Call                  = "eth_call"
 )
+
+var AlchemyMethodsCosts = map[string]int{
+	GetTransactionByHash:  20,
+	GetTransactionReceipt: 20,
+	GetCode:               20,
+	GetStorageAt:          20,
+	Call:                  26,
+}
 
 func AlchemyApiUrl(network db.Network, apiKey string) (string, error) {
 	var alchemyNetwork string
@@ -379,9 +387,9 @@ func (b *DataBytes32) UnmarshalJSON(src []byte) error {
 
 type DataBytes []byte
 
-// MarshalJSON implements json.Marshaler.
-func (b *DataBytes) MarshalJSON() ([]byte, error) {
-	return []byte("0x" + hex.EncodeToString(*b)), nil
+func (b DataBytes) MarshalJSON() ([]byte, error) {
+	encoded := "0x" + hex.EncodeToString(b)
+	return fmt.Appendf(nil, `"%s"`, encoded), nil
 }
 
 func (b *DataBytes) UnmarshalJSON(src []byte) error {
@@ -401,9 +409,8 @@ func (q *QuantityUint64) UnmarshalJSON(src []byte) error {
 	return err
 }
 
-func (q *QuantityUint64) MarshalJSON() ([]byte, error) {
-	output := strconv.AppendUint([]byte("0x"), uint64(*q), 16)
-	return output, nil
+func (q QuantityUint64) MarshalJSON() ([]byte, error) {
+	return fmt.Appendf(nil, `"0x%x"`, q), nil
 }
 
 var _ json.Unmarshaler = (*QuantityUint64)(nil)
@@ -444,8 +451,8 @@ var _ json.Unmarshaler = (*Hash)(nil)
 
 type GetTransactionParams string
 
-func (g *GetTransactionParams) MarshalJSON() ([]byte, error) {
-	return json.Marshal([]any{*g})
+func (g GetTransactionParams) MarshalJSON() ([]byte, error) {
+	return json.Marshal([]string{string(g)})
 }
 
 var _ json.Marshaler = (*GetTransactionParams)(nil)
@@ -558,7 +565,7 @@ type GetCodeParams struct {
 	BlockTag    string
 }
 
-func (g *GetCodeParams) MarshalJSON() ([]byte, error) {
+func (g GetCodeParams) MarshalJSON() ([]byte, error) {
 	p := []any{g.Address}
 	if g.BlockTag != "" {
 		p = append(p, g.BlockTag)
@@ -579,11 +586,14 @@ type CallParams struct {
 	BlockTag    string         `json:"-"`
 }
 
-// MarshalJSON implements json.Marshaler.
-func (c *CallParams) MarshalJSON() ([]byte, error) {
-	p := []any{c}
+func (c CallParams) MarshalJSON() ([]byte, error) {
+	o := struct {
+		To    string    `json:"to"`
+		Input DataBytes `json:"input"`
+	}{c.To, c.Input}
+	p := []any{o}
 	if c.BlockTag != "" {
-		p = append(p, c.BlockNumber)
+		p = append(p, c.BlockTag)
 	} else {
 		p = append(p, c.BlockNumber)
 	}
@@ -593,135 +603,21 @@ func (c *CallParams) MarshalJSON() ([]byte, error) {
 
 var _ json.Marshaler = (*CallParams)(nil)
 
-/////////////////
-
-type RpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-	Data    any    `json:"data"`
+type GetStorageAtParams struct {
+	Address     string
+	StorageSlot DataBytes
+	BlockNumber QuantityUint64
+	BlockTag    string
 }
 
-type RpcResponse[T any] struct {
-	Id     int       `json:"id"`
-	Result T         `json:"result"`
-	Error  *RpcError `json:"error"`
+func (g GetStorageAtParams) MarshalJSON() ([]byte, error) {
+	p := []any{g.Address, g.StorageSlot}
+	if g.BlockTag != "" {
+		p = append(p, g.BlockTag)
+	} else {
+		p = append(p, g.BlockNumber)
+	}
+	return json.Marshal(p)
 }
 
-func (client *Client) newAlchemyUrl(network db.Network) (string, error) {
-	var alchemyNetwork string
-	switch network {
-	case db.NetworkArbitrum:
-		alchemyNetwork = "arb-mainnet"
-	case db.NetworkAvaxC:
-		alchemyNetwork = "avax-mainnet"
-	case db.NetworkBsc:
-		alchemyNetwork = "bnb-mainnet"
-	case db.NetworkEthereum:
-		alchemyNetwork = "eth-mainnet"
-	default:
-		return "", fmt.Errorf("invalid EVM network: %d", network)
-	}
-
-	url := fmt.Sprintf(
-		"https://%s.g.alchemy.com/v2/%s",
-		alchemyNetwork,
-		client.alchemyApiKey,
-	)
-
-	return url, nil
-}
-
-type RpcRequest struct {
-	Jsonrpc string `json:"jsonrpc"`
-	Method  string `json:"method"`
-	Params  any    `json:"params"`
-	Id      int    `json:"id"`
-}
-
-func (client *Client) NewRpcRequest(
-	method string,
-	params any,
-	id int,
-) *RpcRequest {
-	r := RpcRequest{
-		Jsonrpc: "2.0",
-		Method:  method,
-		Params:  params,
-		Id:      id,
-	}
-	return &r
-}
-
-func (client *Client) GetCode(network db.Network, address string) (string, error) {
-	rpcReq := client.NewRpcRequest(
-		"eth_getCode",
-		[]string{address, "latest"},
-		1,
-	)
-	body, err := json.Marshal(rpcReq)
-	assert.NoErr(err, "")
-
-	url, err := client.newAlchemyUrl(network)
-	if err != nil {
-		return "", err
-	}
-	req, err := http.NewRequest(
-		"POST",
-		url,
-		bytes.NewBuffer(body),
-	)
-	if err != nil {
-		return "", fmt.Errorf("unable to create http request: %w", err)
-	}
-	var data RpcResponse[string]
-	err = client.sendRequest(req, &data, client.alchemyTimer)
-	return data.Result, err
-}
-
-type BatchResult[T any] struct {
-	Data  T
-	Error *RpcError
-}
-
-func (client *Client) Batch(
-	network db.Network,
-	requests []*RpcRequest,
-) ([]*BatchResult[any], error) {
-	body, err := json.Marshal(requests)
-	if err != nil {
-		return nil, fmt.Errorf("unable to marshal requests: %w", err)
-	}
-
-	url, err := client.newAlchemyUrl(network)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequest(
-		"POST", url,
-		bytes.NewBuffer(body),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("unable to create http request: %w", err)
-	}
-
-	var data []RpcResponse[any]
-	err = client.sendRequest(req, &data, client.alchemyTimer)
-	if err != nil {
-		return nil, err
-	}
-
-	res := make([]*BatchResult[any], len(data))
-	for i, d := range data {
-		if d.Error != nil {
-			res[i] = &BatchResult[any]{
-				Error: d.Error,
-			}
-		} else {
-			res[i] = &BatchResult[any]{
-				Data: d.Result,
-			}
-		}
-	}
-
-	return res, nil
-}
+var _ json.Marshaler = (*GetStorageAtParams)(nil)

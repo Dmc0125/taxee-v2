@@ -12,13 +12,11 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"taxee/cmd/fetcher/evm"
 	"taxee/cmd/parser"
 	"taxee/pkg/assert"
 	"taxee/pkg/coingecko"
 	"taxee/pkg/db"
 	"taxee/pkg/dotenv"
-	requesttimer "taxee/pkg/request_timer"
 
 	"golang.org/x/crypto/sha3"
 )
@@ -207,55 +205,5 @@ func main() {
 	case "seed-coingecko":
 		coingecko.Init()
 		parser.FetchCoingeckoTokens(context.Background(), pool)
-	case "fetch":
-		// fetch txs
-		// assert.True(appEnv != "prod", "this command must not be run in production env")
-		// assert.True(len(cliArgs) > 2, "Need to provide wallet address")
-		// assert.True(len(cliArgs) > 3, "Need to provide network")
-		//
-		// userAccountId := int32(1)
-		// _, err := db.GetUserAccount(context.Background(), pool, userAccountId)
-		// if errors.Is(err, pgx.ErrNoRows) {
-		// 	_, err = db.InsertUserAccount(context.Background(), pool, "testing123")
-		// 	assert.NoErr(err, "")
-		// }
-		//
-		// walletAddress, network := cliArgs[2], cliArgs[3]
-		// validNetwork, ok := db.NewNetwork(network)
-		// assert.True(ok, "network is not valid: %s", network)
-		//
-		// alchemyReqTimer := requesttimer.NewDefault(100)
-		//
-		// solanaRpc := solana.NewRpc(alchemyReqTimer)
-		// etherscanClient := evm.NewClient(alchemyReqTimer)
-		//
-		// fresh := false
-		// if len(cliArgs) > 4 && cliArgs[4] == "fresh" {
-		// 	fresh = true
-		// }
-		//
-		// walletId, walletData, err := db.DevSetWallet(
-		// 	context.Background(), pool,
-		// 	userAccountId, walletAddress, validNetwork,
-		// )
-		// assert.NoErr(err, "unable to set wallet")
-		//
-		// err = fetcher.Fetch(
-		// 	context.Background(),
-		// 	pool, solanaRpc, etherscanClient,
-		// 	userAccountId,
-		// 	validNetwork, walletAddress, walletId, walletData,
-		// 	fresh,
-		// )
-		// assert.NoErr(err, "unable to fetch transactions for wallet")
-	case "parse":
-		assert.True(appEnv != "prod", "this command must not be run in production env")
-
-		coingecko.Init()
-
-		alchemyReqTimer := requesttimer.NewDefault(100)
-		etherscanClient := evm.NewClient(alchemyReqTimer)
-
-		parser.Parse(context.Background(), pool, etherscanClient, 1)
 	}
 }

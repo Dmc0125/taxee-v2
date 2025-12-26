@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"slices"
 	"sync"
@@ -60,13 +61,17 @@ func (lm *limiter) wait(ctx context.Context, cost float64) error {
 	return nil
 }
 
-func NewLimiter(cuPerSecond int, methodsCosts map[string]int) {
+func NewLimiter(cuPerSecond int, methodsCosts ...map[string]int) {
 	mx.Lock()
 	defer mx.Unlock()
 	lm = &limiter{
 		bucket:       float64(cuPerSecond),
 		cuPerSecond:  float64(cuPerSecond),
-		methodsCosts: methodsCosts,
+		methodsCosts: make(map[string]int),
+	}
+
+	for _, mc := range methodsCosts {
+		maps.Copy(lm.methodsCosts, mc)
 	}
 }
 
@@ -299,7 +304,7 @@ func CallBatch(ctx context.Context, batch *Batch) error {
 
 	for _, response := range responses {
 		if response.Error != nil {
-			assert.True(false, "TODO: handle jsonrpc errors")
+			assert.True(false, "TODO: handle jsonrpc errors: %v", *response.Error)
 		}
 
 		rid := response.Id
