@@ -6,12 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"net/http"
 	"slices"
 	"sync"
 	"sync/atomic"
+	apiutils "taxee/pkg/api_utils"
 	"taxee/pkg/assert"
 	"time"
 )
@@ -98,54 +98,6 @@ type Validator interface {
 	Validate() error
 }
 
-func send(
-	ctx context.Context,
-	url string,
-	body []byte,
-	result any,
-) (int, bool, error) {
-	select {
-	case <-ctx.Done():
-		return 0, false, ctx.Err()
-	default:
-	}
-
-	res, err := http.Post(url, "application/json", bytes.NewReader(body))
-	if err != nil {
-		return 0, false, fmt.Errorf("unable to send request: %w", err)
-	}
-	defer res.Body.Close()
-	statusOk := res.StatusCode >= 200 && res.StatusCode < 300
-
-	var buf bytes.Buffer
-	chunk := make([]byte, 32*1024)
-	for {
-		select {
-		case <-ctx.Done():
-			return res.StatusCode, statusOk, ctx.Err()
-		default:
-		}
-		n, err := res.Body.Read(chunk)
-		if n > 0 {
-			buf.Write(chunk[:n])
-		}
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return res.StatusCode, statusOk, fmt.Errorf("stream error after reading %d bytes: %w", buf.Len(), err)
-		}
-	}
-
-	resBody := buf.Bytes()
-
-	if err := json.Unmarshal(resBody, result); err != nil {
-		return res.StatusCode, statusOk, fmt.Errorf("unable to unmarshal: %w\nBody: %s", err, string(resBody))
-	}
-
-	return res.StatusCode, statusOk, nil
-}
-
 func Call(
 	ctx context.Context,
 	url, method string,
@@ -178,8 +130,14 @@ func Call(
 		}
 	}
 
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(httpBody))
+	if err != nil {
+		return fmt.Errorf("unable to create request: %w", err)
+	}
+	req.Header.Add("content-type", "application/json")
+
 	var res response
-	statusCode, statusOk, err := send(ctx, url, httpBody, &res)
+	statusCode, statusOk, err := apiutils.HttpSend(ctx, req, &res)
 	mx.Unlock()
 
 	if err != nil {
@@ -285,10 +243,14 @@ func CallBatch(ctx context.Context, batch *Batch) error {
 		return fmt.Errorf("unable to marshal requests: %w", err)
 	}
 
+	req, err := http.NewRequest("POST", batch.url, bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("unable to create request: %w", err)
+	}
+	req.Header.Add("content-type", "application/json")
+
 	var responses []*response
-	statusCode, statusOk, err := send(
-		ctx, batch.url, body, &responses,
-	)
+	statusCode, statusOk, err := apiutils.HttpSend(ctx, req, &responses)
 	mx.Unlock()
 
 	if err != nil {

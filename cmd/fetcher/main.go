@@ -603,7 +603,6 @@ func fetchSolanaWallet(
 func fetchEvmWallet(
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	client *evm.Client,
 	alchemyApiKey string,
 	userAccountId,
 	walletId int32,
@@ -611,10 +610,15 @@ func fetchEvmWallet(
 	network db.Network,
 	walletData *db.EvmWalletData,
 ) error {
-	chainId, nativeDecimals, err := evm.ChainIdAndNativeDecimals(network)
-	if err != nil {
-		return err
+	chainId, ok := evm.ChainIds[network]
+	if !ok {
+		return fmt.Errorf("missing chainid for evm network: %d", network)
 	}
+	nativeDecimals, ok := evm.NativeDecimals[network]
+	if !ok {
+		return fmt.Errorf("missing native decimals for evm network: %d", network)
+	}
+
 	rpcUrl, err := evm.AlchemyApiUrl(network, alchemyApiKey)
 	if err != nil {
 		return err
@@ -646,14 +650,9 @@ func fetchEvmWallet(
 	txsStartTxHash := walletData.TxsLatestHash
 
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
 		slog.Info("fetching normal txs", "startblock", txsStartBlock)
-		txs, err := client.GetWalletNormalTransactions(
+		txs, err := evm.GetWalletNormalTransactions(
+			ctx,
 			chainId, walletAddress,
 			txsStartBlock, endBlock,
 		)
@@ -707,15 +706,9 @@ func fetchEvmWallet(
 	internalTxsStartTxHash := walletData.InternalTxsLatestHash
 
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
 		slog.Info("fetching internal txs", "startblock", internalTxsStartBlock)
-		txs, err := client.GetInternalTransactionsByAddress(
-			chainId, walletAddress,
+		txs, err := evm.GetInternalTransactionsByAddress(
+			ctx, chainId, walletAddress,
 			internalTxsStartBlock, endBlock,
 		)
 		if err != nil {
@@ -768,14 +761,9 @@ func fetchEvmWallet(
 	eventsStartTxHash := walletData.EventsLatestHash
 
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
 		slog.Info("fetching incoming transfers", "startblock", eventsStartBlock)
-		events, err := client.GetEventLogsByTopics(
+		events, err := evm.GetEventLogsByTopics(
+			ctx,
 			chainId,
 			eventsStartBlock, endBlock,
 			topics, topicsOperators,
@@ -824,15 +812,7 @@ func fetchEvmWallet(
 
 	go func() {
 		for i, hash := range allHashes {
-			select {
-			case <-ctx.Done():
-				chanInternalTxs <- ctx.Err()
-				close(chanInternalTxs)
-				return
-			default:
-			}
-
-			internalTxs, err := client.GetInternalTransactionsByHash(chainId, string(hash))
+			internalTxs, err := evm.GetInternalTransactionsByHash(ctx, chainId, string(hash))
 			if err != nil {
 				chanInternalTxs <- fmt.Errorf("unable to get internal tx by hash: %w", err)
 				close(chanInternalTxs)
@@ -1026,7 +1006,6 @@ func fetchEvmWallet(
 func Fetch(
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	etherscanClient *evm.Client,
 	alchemyApiKey string,
 	//
 	userAccountId int32,
@@ -1081,7 +1060,7 @@ func Fetch(
 		}
 
 		return fetchEvmWallet(
-			ctx, pool, etherscanClient, alchemyApiKey,
+			ctx, pool, alchemyApiKey,
 			userAccountId, walletId, walletAddress, network, &walletData,
 		)
 	default:

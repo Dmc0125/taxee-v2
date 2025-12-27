@@ -16,7 +16,6 @@ import (
 	"taxee/pkg/coingecko"
 	"taxee/pkg/db"
 	"taxee/pkg/jsonrpc"
-	"taxee/pkg/logger"
 	"time"
 
 	"github.com/google/uuid"
@@ -112,27 +111,13 @@ func getTransferEventDirection(fromInternal, toInternal bool) db.EventTransferDi
 	return direction
 }
 
-func devDeleteEvents(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	userAccountId int32,
-) error {
-	_, err := pool.Exec(ctx, "delete from internal_tx where user_account_id = $1", userAccountId)
-	if err != nil {
-		return fmt.Errorf("unable to delete events")
-	}
-
-	return nil
-}
-
 func FetchCoingeckoTokens(
 	ctx context.Context,
 	pool *pgxpool.Pool,
-) {
-	coins, err := coingecko.GetCoins()
+) error {
+	coins, err := coingecko.GetCoins(ctx)
 	if err != nil {
-		logger.Warn("unable to update coingecko tokens: %s", err)
-		return
+		return fmt.Errorf("unable to fetch coingecko tokens: %w", err)
 	}
 
 	batch := pgx.Batch{}
@@ -187,9 +172,11 @@ func FetchCoingeckoTokens(
 		}
 	}
 
-	qr := pool.SendBatch(ctx, &batch)
-	err = qr.Close()
-	assert.NoErr(err, "unable to insert coingecko tokens")
+	if err := pool.SendBatch(ctx, &batch).Close(); err != nil {
+		return fmt.Errorf("unable to insert coingecko tokens: %w", err)
+	}
+
+	return nil
 }
 
 func ParseTransactions(
@@ -198,6 +185,10 @@ func ParseTransactions(
 	alchemyApiKey string,
 	userAccountId int32,
 ) error {
+	if err := FetchCoingeckoTokens(ctx, pool); err != nil {
+		return err
+	}
+
 	var solanaContext solContext
 	evmContexts := make(map[db.Network]*evmContext)
 	for i := db.NetworkEvmStart + 1; i < db.NetworksCount; i += 1 {
@@ -844,7 +835,7 @@ func ParseEvents(
 			}
 			return fmt.Errorf("unable to scan pricepoint: %w", err)
 		}
-		if missing {
+		if !missing {
 			if transfer.Price, err = decimal.NewFromString(price); err != nil {
 				return fmt.Errorf("can not convert price to decimal: %w", err)
 			}
@@ -935,7 +926,10 @@ func ParseEvents(
 
 	batch = pgx.Batch{}
 	// TODO: this probably should be global
-	var coingeckoCache coingeckoPricesCache
+	coingeckoCache := coingeckoPricesCache{
+		found:   make(map[string][]*coingecko.OhlcCoinData),
+		missing: make(map[string][]*coingecko.MissingPricepointsRange),
+	}
 
 	for _, token := range coingeckoTokensQueue {
 		if price, found, ok := coingeckoCache.get(token.coingeckoId, token.timestamp); ok {
@@ -947,9 +941,8 @@ func ParseEvents(
 		}
 
 		prices, missingPrices, err := coingecko.GetCoinOhlc(
-			token.coingeckoId,
-			"eur",
-			token.timestamp,
+			ctx,
+			token.coingeckoId, "eur", token.timestamp,
 		)
 		if err != nil {
 			return fmt.Errorf("unable to get prices from coingecko: %w", err)

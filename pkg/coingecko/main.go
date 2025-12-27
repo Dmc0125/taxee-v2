@@ -1,13 +1,12 @@
 package coingecko
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
-	"io"
 	"net/http"
-	"os"
 	"strconv"
-	"sync"
+	"sync/atomic"
+	apiutils "taxee/pkg/api_utils"
 	"taxee/pkg/assert"
 	"taxee/pkg/logger"
 	"time"
@@ -21,80 +20,39 @@ const (
 )
 
 var apiKey, apiType string
-var reqTimeoutMillis, lastReqUnixMillis int64
-var lock sync.Mutex
+var initDone atomic.Int32
+var reqLimiter *apiutils.Limiter
 
-func Init() {
-	apiKey = os.Getenv("COINGECKO_API_KEY")
-	assert.True(apiKey != "", "missing COINGECKO_API_KEY")
-	apiType = os.Getenv("COINGECKO_API_TYPE")
+func Init(nApiKey, nApiType string) {
+	if initDone.Add(1) != 1 {
+		assert.True(false, "init already done")
+	}
 
-	if apiType == "demo" {
-		reqTimeoutMillis = 1000
+	apiKey = nApiKey
+	apiType = nApiType
+
+	if apiType == "pro" {
+		reqLimiter = apiutils.NewLimiter(50)
 	} else {
-		reqTimeoutMillis = 50
+		reqLimiter = apiutils.NewLimiter(1000)
 	}
 }
 
-func sendRequest[T any](
-	endpoint string,
-	resBodyData *T,
-) error {
-	lock.Lock()
-	nextReqUnixMillis := lastReqUnixMillis + reqTimeoutMillis
-	if now := time.Now().UnixMilli(); now < nextReqUnixMillis {
-		rem := nextReqUnixMillis - now
-		time.Sleep(time.Duration(rem) * time.Millisecond)
-	}
-
-	assert.True(apiKey != "", "missing COINGECKO_API_KEY")
+func newRequest(endpoint string) (*http.Request, error) {
 	apiUrl, header := proApiUrl, "x-cg-pro-api-key"
 	if apiType == "demo" {
 		apiUrl, header = demoApiUrl, "x-cg-demo-api-key"
 	}
 
 	req, err := http.NewRequest(
-		"GET",
-		fmt.Sprintf("%s%s", apiUrl, endpoint),
-		nil,
+		"GET", fmt.Sprintf("%s%s", apiUrl, endpoint), nil,
 	)
-	assert.NoErr(err, "unable to create new request")
+	if err != nil {
+		return nil, fmt.Errorf("unable to create request: %w", err)
+	}
 	req.Header.Add(header, apiKey)
 
-	// NOTE: workaround because of HTTP/2 error:
-	// stream error: stream ID 1; INTERNAL_ERROR; received from peer
-	httpClient := http.Client{
-		Transport: &http.Transport{
-			ForceAttemptHTTP2: false,
-		},
-	}
-	res, err := httpClient.Do(req)
-
-	lastReqUnixMillis = time.Now().UnixMilli()
-	lock.Unlock()
-
-	if err != nil {
-		return fmt.Errorf("unable to send request: %w", err)
-	}
-
-	defer res.Body.Close()
-	resBody, err := io.ReadAll(res.Body)
-
-	if err != nil {
-		return fmt.Errorf("unable to read response body: %w", err)
-	}
-	if res.StatusCode != 200 {
-		return fmt.Errorf("body: %s\nresponse status != 200", string(resBody))
-	}
-	if err = json.Unmarshal(resBody, resBodyData); err != nil {
-		return fmt.Errorf(
-			"body: %s\nunable to unmarshal response body: %w",
-			string(resBody),
-			err,
-		)
-	}
-
-	return nil
+	return req, nil
 }
 
 type CoingeckoCoin struct {
@@ -104,9 +62,26 @@ type CoingeckoCoin struct {
 	Platforms map[string]string `json:"platforms"`
 }
 
-func GetCoins() (res []*CoingeckoCoin, err error) {
-	err = sendRequest("/coins/list?include_platform=true", &res)
-	return
+func GetCoins(ctx context.Context) ([]*CoingeckoCoin, error) {
+	req, err := newRequest("/coins/list?include_platform=true")
+	if err != nil {
+		return nil, err
+	}
+
+	if reqLimiter != nil {
+		reqLimiter.Lock()
+		defer reqLimiter.Free()
+	}
+
+	var res []*CoingeckoCoin
+	statusCode, statusOk, err := apiutils.HttpSend(ctx, req, &res)
+	if err != nil {
+		return nil, err
+	}
+	if !statusOk {
+		return nil, fmt.Errorf("status not ok: %d", statusCode)
+	}
+	return res, nil
 }
 
 type FiatCurrency string
@@ -146,6 +121,7 @@ type marketChartResponse struct {
 }
 
 func GetCoinPrices(
+	ctx context.Context,
 	coinId string,
 	vsCurrency FiatCurrency,
 	from time.Time,
@@ -162,9 +138,24 @@ func GetCoinPrices(
 	)
 
 	var res marketChartResponse
-	err := sendRequest(endpoint, &res)
+	req, err := newRequest(endpoint)
+	if err != nil {
+		return nil, err
+	}
 
-	return res.Prices, err
+	if reqLimiter != nil {
+		reqLimiter.Lock()
+		defer reqLimiter.Free()
+	}
+
+	statusCode, statusOk, err := apiutils.HttpSend(ctx, req, &res)
+	if err != nil {
+		return nil, err
+	}
+	if !statusOk {
+		return nil, fmt.Errorf("status not ok: %d", statusCode)
+	}
+	return res.Prices, nil
 }
 
 type OhlcCoinData struct {
@@ -244,6 +235,7 @@ func getMissingPricepoints(ohlc []*OhlcCoinData, from, to time.Time) []*MissingP
 }
 
 func GetCoinOhlc(
+	ctx context.Context,
 	coinId string,
 	vsCurrency FiatCurrency,
 	from time.Time,
@@ -269,11 +261,27 @@ func GetCoinOhlc(
 			fromUnix,
 			toUnix,
 		)
-		res := make([]*OhlcCoinData, 0)
-		err := sendRequest(endpoint, &res)
-		missing := getMissingPricepoints(res, from, time.Unix(toUnix, 0))
+		req, err := newRequest(endpoint)
+		if err != nil {
+			return nil, nil, err
+		}
 
-		return res, missing, err
+		if reqLimiter != nil {
+			reqLimiter.Lock()
+			defer reqLimiter.Free()
+		}
+
+		res := make([]*OhlcCoinData, 0)
+		statusCode, statusOk, err := apiutils.HttpSend(ctx, req, &res)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !statusOk {
+			return nil, nil, fmt.Errorf("status not ok: %d", statusCode)
+		}
+
+		missing := getMissingPricepoints(res, from, time.Unix(toUnix, 0))
+		return res, missing, nil
 	}
 }
 
@@ -285,8 +293,27 @@ type CoinMetadata struct {
 	} `json:"image"`
 }
 
-func GetCoinMetadata(coinId string) (res CoinMetadata, err error) {
+func GetCoinMetadata(ctx context.Context, coinId string) (CoinMetadata, error) {
 	endpoint := fmt.Sprintf("/coins/%s", coinId)
-	err = sendRequest(endpoint, &res)
-	return
+
+	req, err := newRequest(endpoint)
+	if err != nil {
+		return CoinMetadata{}, err
+	}
+
+	if reqLimiter != nil {
+		reqLimiter.Lock()
+		defer reqLimiter.Free()
+	}
+
+	var res CoinMetadata
+	statusCode, statusOk, err := apiutils.HttpSend(ctx, req, &res)
+	if err != nil {
+		return res, err
+	}
+	if !statusOk {
+		return res, fmt.Errorf("status not ok: %d", statusCode)
+	}
+
+	return res, nil
 }

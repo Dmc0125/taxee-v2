@@ -1,25 +1,25 @@
-package requesttimer
+package apiutils
 
 import (
 	"sync"
 	"time"
 )
 
-type DefaultTimer struct {
+type Limiter struct {
 	lastReqTs time.Time
 	timeoutMs int64
 	mx        *sync.Mutex
 }
 
-func NewDefault(timeoutMs int64) *DefaultTimer {
-	return &DefaultTimer{
+func NewLimiter(timeoutMs int64) *Limiter {
+	return &Limiter{
 		lastReqTs: time.Unix(0, 0),
 		timeoutMs: timeoutMs,
 		mx:        &sync.Mutex{},
 	}
 }
 
-func (timer *DefaultTimer) Lock() {
+func (timer *Limiter) Lock() {
 	timer.mx.Lock()
 
 	now := time.Now().UnixMilli()
@@ -32,7 +32,7 @@ func (timer *DefaultTimer) Lock() {
 	}
 }
 
-func (timer *DefaultTimer) Free() {
+func (timer *Limiter) Free() {
 	timer.lastReqTs = time.Now()
 	timer.mx.Unlock()
 }

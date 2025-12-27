@@ -18,7 +18,6 @@ import (
 	"taxee/pkg/dotenv"
 	"taxee/pkg/jsonrpc"
 	"taxee/pkg/logger"
-	requesttimer "taxee/pkg/request_timer"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -32,7 +31,6 @@ func consumeQueuedWallets(
 	ctx context.Context,
 	pool *pgxpool.Pool,
 	alchemyApiKey string,
-	evmClient *evm.Client,
 ) {
 	jobCounter.Add(1)
 	defer jobCounter.Store(jobCounter.Load() - 1)
@@ -81,7 +79,7 @@ func consumeQueuedWallets(
 	eg.Go(func() error {
 		defer groupCtxCancel()
 		return fetcher.Fetch(
-			groupCtx, pool, evmClient, alchemyApiKey,
+			groupCtx, pool, alchemyApiKey,
 			userAccountId, network, walletAddress, walletId,
 			walletDataSerialized, fresh,
 		)
@@ -445,11 +443,15 @@ func main() {
 	alchemyApiKey := os.Getenv("ALCHEMY_API_KEY")
 	assert.True(len(alchemyApiKey) > 0, "missing alchemy api key")
 
-	alchemyReqTimer := requesttimer.NewDefault(100)
-	evmClient := evm.NewClient(alchemyReqTimer)
+	etherscanApiKey := os.Getenv("ETHERSCAN_API_KEY")
+	assert.True(len(alchemyApiKey) > 0, "missing etherscan api key")
+	evm.EtherscanInit(etherscanApiKey)
 
 	slog.Info("initializing coingecko")
-	coingecko.Init()
+
+	coingeckoApiKey := os.Getenv("COINGECKO_API_KEY")
+	coingeckoApiType := os.Getenv("COINGECKO_API_TYPE")
+	coingecko.Init(coingeckoApiKey, coingeckoApiType)
 
 	ticker := time.NewTicker(time.Second)
 
@@ -466,7 +468,7 @@ func main() {
 			go consumeQueuedWallets(
 				&runningFetchWallets,
 				context.TODO(),
-				pool, alchemyApiKey, evmClient,
+				pool, alchemyApiKey,
 			)
 		}
 

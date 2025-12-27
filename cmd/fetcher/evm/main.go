@@ -1,107 +1,53 @@
 package evm
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"math/big"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	apiutils "taxee/pkg/api_utils"
 	"taxee/pkg/assert"
 	"taxee/pkg/db"
 	"taxee/pkg/jsonrpc"
-	requesttimer "taxee/pkg/request_timer"
 )
 
-type requestTimer interface {
-	Lock()
-	Free()
+var ChainIds = map[db.Network]int{
+	db.NetworkArbitrum: 42161,
+	db.NetworkEthereum: 1,
+	db.NetworkAvaxC:    43114,
+	db.NetworkBsc:      56,
+}
+
+var NativeDecimals = map[db.Network]int{
+	db.NetworkArbitrum: 18,
+	db.NetworkEthereum: 18,
+	db.NetworkAvaxC:    18,
+	db.NetworkBsc:      18,
 }
 
 const etherscanApiUrl = "https://api.etherscan.io/v2/api"
 
-type Client struct {
-	etherscanApiKey string
-	etherscanTimer  *requesttimer.DefaultTimer
+// NOTE: not using mutex, init is only called once and never again
+var (
+	etherscanReqLimiter *apiutils.Limiter
+	etherscanApiKey     string
+	initCalled          atomic.Int32
+)
 
-	alchemyApiKey string
-	alchemyTimer  requestTimer
+// NOTE: must not be called in other place than program init
+func EtherscanInit(apiKey string) {
+	if initCalled.Add(1) != 1 {
+		assert.True(false, "init called more than once")
+	}
+
+	etherscanApiKey = apiKey
+	etherscanReqLimiter = apiutils.NewLimiter(200)
 }
-
-func NewClient(alchemyTimer requestTimer) *Client {
-	etherscanApiKey := os.Getenv("ETHERSCAN_API_KEY")
-	assert.True(len(etherscanApiKey) > 0, "missing ETHERSCAN_API_KEY")
-
-	alchemyApiKey := os.Getenv("ALCHEMY_API_KEY")
-	assert.True(len(alchemyApiKey) > 0, "missing ALCHEMY_API_KEY")
-
-	return &Client{
-		etherscanApiKey: etherscanApiKey,
-		etherscanTimer:  requesttimer.NewDefault(200),
-
-		alchemyApiKey: alchemyApiKey,
-		alchemyTimer:  alchemyTimer,
-	}
-}
-
-func ChainIdAndNativeDecimals(network db.Network) (chainId, decimals int, err error) {
-	switch network {
-	case db.NetworkArbitrum:
-		chainId = 42161
-	case db.NetworkEthereum:
-		chainId = 1
-	case db.NetworkAvaxC:
-		chainId = 43114
-	case db.NetworkBsc:
-		chainId = 56
-	default:
-		err = fmt.Errorf("invalid EVM network: %d", network)
-		return
-	}
-
-	switch network {
-	case db.NetworkArbitrum, db.NetworkEthereum, db.NetworkBsc, db.NetworkAvaxC:
-		decimals = 18
-	default:
-		err = fmt.Errorf("invalid EVM network: %d", network)
-		return
-	}
-
-	return
-}
-
-func (client *Client) sendRequest(
-	request *http.Request,
-	data any,
-	timer requestTimer,
-) error {
-	timer.Lock()
-
-	res, err := http.DefaultClient.Do(request)
-	if err != nil {
-		return fmt.Errorf("unable to execute request: %w", err)
-	}
-
-	timer.Free()
-	defer res.Body.Close()
-
-	dataBytes, err := io.ReadAll(res.Body)
-	if err != nil {
-		return fmt.Errorf("unable to read body: %w", err)
-	}
-
-	if err := json.Unmarshal(dataBytes, data); err != nil {
-		return fmt.Errorf("unable to unmarshal response: %w\nbody: %s", err, string(dataBytes))
-	}
-
-	return nil
-}
-
-////////////////
-// ETHERSCAN methods
 
 type etherscanResponse[T any] struct {
 	Status  string `json:"status"`
@@ -125,11 +71,14 @@ type EtherscanTransaction struct {
 	Contract    string        `json:"contractAddress"`
 }
 
-func (client *Client) GetWalletNormalTransactions(
+func GetWalletNormalTransactions(
+	ctx context.Context,
 	chainId int,
 	walletAddress string,
 	startBlock, endBlock uint64,
 ) ([]*EtherscanTransaction, error) {
+	assert.True(len(etherscanApiKey) > 0, "missing etherscan api key")
+
 	url := fmt.Sprintf(
 		"%s?chainId=%d&module=account&action=txlist&address=%s&startBlock=%d&endBlock=%d&sort=asc&apiKey=%s",
 		etherscanApiUrl,
@@ -137,14 +86,27 @@ func (client *Client) GetWalletNormalTransactions(
 		walletAddress,
 		startBlock,
 		endBlock,
-		client.etherscanApiKey,
+		etherscanApiKey,
 	)
 	req, err := http.NewRequest("GET", url, nil)
-	assert.NoErr(err, "")
+	if err != nil {
+		return nil, fmt.Errorf("unable to create request: %w", err)
+	}
+
+	if etherscanReqLimiter != nil {
+		etherscanReqLimiter.Lock()
+		defer etherscanReqLimiter.Free()
+	}
 
 	var data etherscanResponse[[]*EtherscanTransaction]
-	err = client.sendRequest(req, &data, client.etherscanTimer)
-	return data.Result, err
+	statusCode, statusOk, err := apiutils.HttpSend(ctx, req, &data)
+	if err != nil {
+		return nil, err
+	}
+	if !statusOk {
+		return nil, fmt.Errorf("status not ok: %d", statusCode)
+	}
+	return data.Result, nil
 }
 
 type TopicOperator string
@@ -179,12 +141,15 @@ type EtherscanEvent struct {
 // 4   | 0,3
 //
 // 5   | 1,3
-func (client *Client) GetEventLogsByTopics(
+func GetEventLogsByTopics(
+	ctx context.Context,
 	chainId int,
 	startBlock, endBlock uint64,
 	topics [4][]byte,
 	topicsOperators [6]TopicOperator,
 ) ([]*EtherscanEvent, error) {
+	assert.True(len(etherscanApiKey) > 0, "missing etherscan api key")
+
 	topicsQueryParams := [4]string{
 		"topic0", "topic1", "topic2", "topic3",
 	}
@@ -220,15 +185,28 @@ func (client *Client) GetEventLogsByTopics(
 		chainId,
 		startBlock,
 		endBlock,
-		client.etherscanApiKey,
+		etherscanApiKey,
 		topicsQuery.String(),
 	)
 	req, err := http.NewRequest("GET", url, nil)
-	assert.NoErr(err, "")
+	if err != nil {
+		return nil, fmt.Errorf("unable to create request: %w", err)
+	}
+
+	if etherscanReqLimiter != nil {
+		etherscanReqLimiter.Lock()
+		defer etherscanReqLimiter.Free()
+	}
 
 	var data etherscanResponse[[]*EtherscanEvent]
-	err = client.sendRequest(req, &data, client.etherscanTimer)
-	return data.Result, err
+	statusCode, statusOk, err := apiutils.HttpSend(ctx, req, &data)
+	if err != nil {
+		return nil, err
+	}
+	if !statusOk {
+		return nil, fmt.Errorf("status not ok: %d", statusCode)
+	}
+	return data.Result, nil
 }
 
 type EtherscanInternalTxByAddress struct {
@@ -242,11 +220,14 @@ type EtherscanInternalTxByAddress struct {
 	Timestamp       StringTime    `json:"timeStamp"`
 }
 
-func (client *Client) GetInternalTransactionsByAddress(
+func GetInternalTransactionsByAddress(
+	ctx context.Context,
 	chainId int,
 	address string,
 	startBlock, endBlock uint64,
 ) ([]*EtherscanInternalTxByAddress, error) {
+	assert.True(len(etherscanApiKey) > 0, "missing etherscan api key")
+
 	url := fmt.Sprintf(
 		"%s?chainid=%d&module=account&action=txlistinternal&address=%s&startBlock=%d&endBlock=%d&apiKey=%s",
 		etherscanApiUrl,
@@ -254,14 +235,28 @@ func (client *Client) GetInternalTransactionsByAddress(
 		address,
 		startBlock,
 		endBlock,
-		client.etherscanApiKey,
+		etherscanApiKey,
 	)
 	req, err := http.NewRequest("GET", url, nil)
-	assert.NoErr(err, "")
+	if err != nil {
+		return nil, fmt.Errorf("unable to create request: %w", err)
+	}
+
+	if etherscanReqLimiter != nil {
+		etherscanReqLimiter.Lock()
+		defer etherscanReqLimiter.Free()
+	}
 
 	var data etherscanResponse[[]*EtherscanInternalTxByAddress]
-	err = client.sendRequest(req, &data, client.etherscanTimer)
-	return data.Result, err
+	statusCode, statusOk, err := apiutils.HttpSend(ctx, req, &data)
+	if err != nil {
+		return nil, err
+	}
+	if !statusOk {
+		return nil, fmt.Errorf("status not ok: %d", statusCode)
+	}
+	return data.Result, nil
+
 }
 
 type EtherscanInternalTxByHash struct {
@@ -274,23 +269,39 @@ type EtherscanInternalTxByHash struct {
 	Input           HexBytes      `json:"input"`
 }
 
-func (client *Client) GetInternalTransactionsByHash(
+func GetInternalTransactionsByHash(
+	ctx context.Context,
 	chainId int,
 	hash string,
 ) ([]*EtherscanInternalTxByHash, error) {
+	assert.True(len(etherscanApiKey) > 0, "missing etherscan api key")
+
 	url := fmt.Sprintf(
 		"%s?chainid=%d&module=account&action=txlistinternal&txhash=%s&apikey=%s",
 		etherscanApiUrl,
 		chainId,
 		hash,
-		client.etherscanApiKey,
+		etherscanApiKey,
 	)
 	req, err := http.NewRequest("GET", url, nil)
-	assert.NoErr(err, "")
+	if err != nil {
+		return nil, fmt.Errorf("unable to create request: %w", err)
+	}
+
+	if etherscanReqLimiter != nil {
+		etherscanReqLimiter.Lock()
+		defer etherscanReqLimiter.Free()
+	}
 
 	var data etherscanResponse[[]*EtherscanInternalTxByHash]
-	err = client.sendRequest(req, &data, client.etherscanTimer)
-	return data.Result, err
+	statusCode, statusOk, err := apiutils.HttpSend(ctx, req, &data)
+	if err != nil {
+		return nil, err
+	}
+	if !statusOk {
+		return nil, fmt.Errorf("status not ok: %d", statusCode)
+	}
+	return data.Result, nil
 }
 
 ///////////////////
