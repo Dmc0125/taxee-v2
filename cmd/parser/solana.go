@@ -1,8 +1,9 @@
 package parser
 
 import (
-	"fmt"
+	"log/slog"
 	"math"
+	"runtime/debug"
 	"slices"
 	"taxee/pkg/db"
 	"time"
@@ -206,7 +207,6 @@ func (ctx *solContext) findOwnedOrError(
 }
 
 func solPreprocessIx(ctx *solContext, ix *db.SolanaInstruction) {
-	fmt.Println(ctx.txId)
 	switch ix.ProgramAddress {
 	case SOL_SYSTEM_PROGRAM_ADDRESS:
 		solPreprocessSystemIx(ctx, ix)
@@ -245,6 +245,18 @@ func solPreprocessTx(
 	ctx *solContext,
 	ixs []*db.SolanaInstruction,
 ) {
+	defer func() {
+		if cause := recover(); cause != nil {
+			slog.Error(
+				"sol preprocess tx panicked",
+				"txId", ctx.txId,
+				"ixIdx", ctx.ixIdx,
+				"cause", cause,
+				"stack", string(debug.Stack()),
+			)
+		}
+	}()
+
 	for ixIdx, ix := range ixs {
 		ctx.ixIdx = uint32(ixIdx)
 		solPreprocessIx(ctx, ix)
@@ -320,7 +332,18 @@ func solProcessIx(
 	ctx *solContext,
 	ix *db.SolanaInstruction,
 ) {
-	fmt.Println(ctx.txId)
+	defer func() {
+		if cause := recover(); cause != nil {
+			slog.Error(
+				"sol process ix panicked",
+				"txId", ctx.txId,
+				"ixIdx", ctx.ixIdx,
+				"cause", cause,
+				"stack", string(debug.Stack()),
+			)
+		}
+	}()
+
 	switch ix.ProgramAddress {
 	case SOL_SYSTEM_PROGRAM_ADDRESS:
 		solProcessSystemIx(ctx, ix)

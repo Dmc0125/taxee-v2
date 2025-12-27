@@ -20,6 +20,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 )
@@ -185,10 +186,12 @@ func ParseTransactions(
 	alchemyApiKey string,
 	userAccountId int32,
 ) error {
+	slog.Info("fetch coingecko tokens")
 	if err := FetchCoingeckoTokens(ctx, pool); err != nil {
 		return err
 	}
 
+	slog.Info("query transactions")
 	var solanaContext solContext
 	evmContexts := make(map[db.Network]*evmContext)
 	for i := db.NetworkEvmStart + 1; i < db.NetworksCount; i += 1 {
@@ -328,6 +331,8 @@ func ParseTransactions(
 		return err
 	}
 
+	slog.Info("preprocess transactions")
+
 	errors := make([]*db.ParserError, 0)
 
 	solanaContext.accounts = make(map[string][]accountLifetime)
@@ -390,6 +395,8 @@ func ParseTransactions(
 			return err
 		}
 	}
+
+	slog.Info("process transactions")
 
 	// process transactions
 	newFeeEvent := func(
@@ -488,6 +495,8 @@ func ParseTransactions(
 		}
 	}
 
+	slog.Info("fetch evm decimals")
+
 	// fetch evm tokens decimals
 	slog.Info("fetching evm tokens decimals")
 	evmTokens := make(map[db.Network]map[string][]*decimal.Decimal)
@@ -562,6 +571,7 @@ func ParseTransactions(
 		}
 	}
 
+	slog.Info("insert results")
 	// insert events
 
 	err = db.ExecuteTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
@@ -682,6 +692,7 @@ func ParseTransactions(
 		return nil
 	})
 
+	slog.Info("parse transactions done")
 	return err
 }
 
@@ -787,6 +798,7 @@ func ParseEvents(
 	pool *pgxpool.Pool,
 	userAccountId int32,
 ) error {
+	slog.Info("query events")
 	rows, err := pool.Query(ctx, selectEventsQuery, userAccountId)
 	if err != nil {
 		return fmt.Errorf("unable to query internal txs: %w", err)
@@ -825,19 +837,18 @@ func ParseEvents(
 		transfer *db.EventTransfer,
 	) error {
 		var coingeckoId string
-		var price string
+		var price pgtype.Text
 		var missing bool
-		if err := row.Scan(&coingeckoId, &price, &missing); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				// NOTE: coingecko does not have this token, need to use backup
-				// like birdeye or something
-				return nil
-			}
+		err := row.Scan(&coingeckoId, &price, &missing)
+		if errors.Is(err, pgx.ErrNoRows) || missing {
+			return nil
+		}
+		if err != nil {
 			return fmt.Errorf("unable to scan pricepoint: %w", err)
 		}
-		if !missing {
-			if transfer.Price, err = decimal.NewFromString(price); err != nil {
-				return fmt.Errorf("can not convert price to decimal: %w", err)
+		if price.Valid {
+			if transfer.Price, err = decimal.NewFromString(price.String); err != nil {
+				return fmt.Errorf("can not convert price to decimal for %s %d: %w", coingeckoId, len(price.String), err)
 			}
 			transfer.Value = transfer.Price.Mul(transfer.Amount)
 			return nil
@@ -920,10 +931,12 @@ func ParseEvents(
 		return fmt.Errorf("unable to read internal txs: %w", err)
 	}
 
+	slog.Info("query prices")
 	if err := pool.SendBatch(ctx, &batch).Close(); err != nil {
 		return err
 	}
 
+	slog.Info("fetch prices")
 	batch = pgx.Batch{}
 	// TODO: this probably should be global
 	coingeckoCache := coingeckoPricesCache{
@@ -983,6 +996,7 @@ func ParseEvents(
 		return fmt.Errorf("unable to insert prices: %w", err)
 	}
 
+	slog.Info("process events")
 	// process events
 	solanaWallets := make([]string, 0)
 	// NOTE: because of this query, wallet must NOT change state when parsing
@@ -1162,6 +1176,7 @@ func ParseEvents(
 		}
 	}
 
+	slog.Info("insert results")
 	if err := pool.SendBatch(ctx, &batch).Close(); err != nil {
 		return fmt.Errorf("unable to update events: %w", err)
 	}

@@ -115,7 +115,10 @@ func driftProcessBorrowLend(
 		return nil
 	}
 
-	decimals := solDecimalsMust(ctx, tokenAccountData.Mint)
+	decimals, ok := solDecimals(ctx, tokenAccountData.Mint)
+	if !ok {
+		return nil
+	}
 	uiAmount := newDecimalFromRawAmount(amount, decimals)
 
 	var fromAccount, toAccount string
@@ -184,28 +187,34 @@ func solProcessDriftIx(
 		}
 
 		transferIx := ix.InnerInstructions[0]
-		amount, from, to := solParseTokenTransfer(transferIx.Accounts, transferIx.Data)
-
-		tokenAccount, ok := ctx.findOwnedOrError(ctx.slot, ctx.ixIdx, from)
-		if !ok {
-			return
-		}
-		tokenAccountData, ok := solAccountDataMust[solTokenAccountData](ctx, tokenAccount, from)
+		t, ok := solParseTokenIxTokenTransfer(transferIx.Accounts, transferIx.Data)
 		if !ok {
 			return
 		}
 
-		decimals := solDecimalsMust(ctx, tokenAccountData.Mint)
+		tokenAccount, ok := ctx.findOwnedOrError(ctx.slot, ctx.ixIdx, t.from)
+		if !ok {
+			return
+		}
+		tokenAccountData, ok := solAccountDataMust[solTokenAccountData](ctx, tokenAccount, t.from)
+		if !ok {
+			return
+		}
+
+		decimals, ok := solDecimals(ctx, tokenAccountData.Mint)
+		if !ok {
+			return
+		}
 
 		method = "fee"
 		transfer = &db.EventTransfer{
 			Direction:   db.EventTransferOutgoing,
 			FromWallet:  owner,
-			ToWallet:    to,
-			FromAccount: from,
-			ToAccount:   to,
+			ToWallet:    t.to,
+			FromAccount: t.from,
+			ToAccount:   t.to,
 			Token:       tokenAccountData.Mint,
-			Amount:      newDecimalFromRawAmount(amount, decimals),
+			Amount:      newDecimalFromRawAmount(t.amount, decimals),
 			TokenSource: uint16(db.NetworkSolana),
 		}
 	// deposit stake

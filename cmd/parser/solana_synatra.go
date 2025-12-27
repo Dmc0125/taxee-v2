@@ -92,34 +92,25 @@ func solProcessSynatraIx(ctx *solContext, ix *db.SolanaInstruction) {
 
 		switch disc {
 		case synatraStakeSolIx:
-			ixType, _, ok := solSystemIxFromData(transferInIx.Data)
+			transfer, ok := solParseSystemIxSolTransfer(transferInIx.Accounts, transferInIx.Data)
 			if !ok {
 				return
 			}
-			from, _, rawAmount, ok := solParseSystemIxSolTransfer(
-				ixType,
-				transferInIx.Accounts,
-				transferInIx.Data,
-			)
-			if !ok {
-				return
-			}
-			fromAccount, mint = from, SOL_MINT_ADDRESS
-			amount = newDecimalFromRawAmount(rawAmount, 9)
+			fromAccount, mint = transfer.from, SOL_MINT_ADDRESS
+			amount = newDecimalFromRawAmount(transfer.amount, 9)
 		case synatraStakeTokenIx:
-			ixType, _, ok := solTokenIxFromByte(transferInIx.Data[0])
-			if !ok || ixType != solTokenIxTransfer {
+			t, ok := solParseTokenIxTokenTransfer(transferInIx.Accounts, transferInIx.Data)
+			if !ok || t.ix != solTokenIxTransfer {
 				return
 			}
-			rawAmount, from, _ := solParseTokenTransfer(
-				transferInIx.Accounts,
-				transferInIx.Data,
-			)
 
-			fromAccount = from
+			fromAccount = t.from
 			mint = ix.Accounts[2]
-			decimals := solDecimalsMust(ctx, mint)
-			amount = newDecimalFromRawAmount(rawAmount, decimals)
+			decimals, ok := solDecimals(ctx, mint)
+			if !ok {
+				return
+			}
+			amount = newDecimalFromRawAmount(t.amount, decimals)
 		}
 
 		transferIn = db.EventTransfer{
@@ -135,19 +126,21 @@ func solProcessSynatraIx(ctx *solContext, ix *db.SolanaInstruction) {
 	}
 
 	if mintIx, ok := innerIxs.nextSafe(); ok {
-		ixType, _, ok := solTokenIxFromByte(mintIx.Data[0])
-		if !ok || ixType != solTokenIxMint {
+		t, ok := solParseTokenIxTokenTransfer(mintIx.Accounts, mintIx.Data)
+		if !ok || t.ix != solTokenIxMint {
 			return
 		}
-		amount, to, mint := solParseTokenMint(mintIx.Accounts, mintIx.Data)
-		decimals := solDecimalsMust(ctx, mint)
+		decimals, ok := solDecimals(ctx, t.mint)
+		if !ok {
+			return
+		}
 
 		ysolTransfer := db.EventTransfer{
 			Direction:   db.EventTransferIncoming,
 			ToWallet:    owner,
-			ToAccount:   to,
-			Token:       mint,
-			Amount:      newDecimalFromRawAmount(amount, decimals),
+			ToAccount:   t.to,
+			Token:       t.mint,
+			Amount:      newDecimalFromRawAmount(t.amount, decimals),
 			TokenSource: uint16(db.NetworkSolana),
 		}
 

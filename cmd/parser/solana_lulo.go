@@ -128,26 +128,19 @@ func solProcessLuloIx(ctx *solContext, ix *db.SolanaInstruction) {
 			feeIx.ProgramAddress == SOL_SYSTEM_PROGRAM_ADDRESS {
 			innerIxs.next()
 
-			ixType, _, ok := solSystemIxFromData(feeIx.Data)
+			transfer, ok := solParseSystemIxSolTransfer(feeIx.Accounts, feeIx.Data)
 			if !ok {
 				return
 			}
-			from, _, amount, ok := solParseSystemIxSolTransfer(
-				ixType,
-				feeIx.Accounts,
-				feeIx.Data,
-			)
-			if !ok {
-				return
-			}
-			if slices.Contains(ctx.wallets, from) {
+
+			if slices.Contains(ctx.wallets, transfer.from) {
 				event := solNewEvent(ctx, app, "fee", db.EventTypeTransfer)
 				event.Transfers = append(event.Transfers, &db.EventTransfer{
 					Direction:   db.EventTransferOutgoing,
-					FromWallet:  from,
-					FromAccount: from,
+					FromWallet:  transfer.from,
+					FromAccount: transfer.from,
 					Token:       SOL_MINT_ADDRESS,
-					Amount:      newDecimalFromRawAmount(amount, 9),
+					Amount:      newDecimalFromRawAmount(transfer.amount, 9),
 					TokenSource: uint16(db.NetworkSolana),
 				})
 			}
@@ -162,8 +155,8 @@ func solProcessLuloIx(ctx *solContext, ix *db.SolanaInstruction) {
 		if mintIx, ok := innerIxs.peekNext(); ok {
 			switch mintIx.ProgramAddress {
 			case SOL_TOKEN_PROGRAM_ADDRESS, SOL_TOKEN2022_PROGRAM_ADDRESS:
-				ixType, _, ok := solTokenIxFromByte(mintIx.Data[0])
-				if ok && ixType == solTokenIxMint {
+				t, ok := solParseTokenIxTokenTransfer(mintIx.Accounts, mintIx.Data)
+				if ok && t.ix == solTokenIxMint {
 					innerIxs.next()
 				}
 			}
@@ -172,42 +165,39 @@ func solProcessLuloIx(ctx *solContext, ix *db.SolanaInstruction) {
 		}
 
 		if transferIx, ok := innerIxs.nextSafe(); ok {
-			ixType, _, ok := solTokenIxFromByte(transferIx.Data[0])
+			t, ok := solParseTokenIxTokenTransfer(transferIx.Accounts, transferIx.Data)
 			if !ok {
 				return
 			}
 
-			var from string
-			var amount uint64
-
-			switch ixType {
-			case solTokenIxTransfer:
-				amount, from, _ = solParseTokenTransfer(transferIx.Accounts, transferIx.Data)
-			case solTokenIxTransferChecked:
-				amount, from, _ = solParseTokenTransferChecked(transferIx.Accounts, transferIx.Data)
+			switch t.ix {
+			case solTokenIxTransfer, solTokenIxTransferChecked:
 			default:
 				return
 			}
 
-			_, fromAccountData, ok := solAccountExactOrError[solTokenAccountData](ctx, from)
+			_, fromAccountData, ok := solAccountExactOrError[solTokenAccountData](ctx, t.from)
 			if !ok {
 				return
 			}
 
-			decimals := solDecimalsMust(ctx, fromAccountData.Mint)
+			decimals, ok := solDecimals(ctx, fromAccountData.Mint)
+			if !ok {
+				return
+			}
 			// luloAccount := ix.Accounts[8]
 
 			event := solNewEvent(ctx, app, method, db.EventTypeTransfer)
 			event.Transfers = append(event.Transfers, &db.EventTransfer{
 				Direction:   db.EventTransferInternal,
 				FromWallet:  owner,
-				FromAccount: from,
+				FromAccount: t.from,
 				// TODO: decide what the to account is in this case ?
 				// think the created token account could be it
 				ToWallet:    owner,
 				ToAccount:   fmt.Sprintf("%s:lulo:%s", owner, luloAccountType),
 				Token:       fromAccountData.Mint,
-				Amount:      newDecimalFromRawAmount(amount, decimals),
+				Amount:      newDecimalFromRawAmount(t.amount, decimals),
 				TokenSource: uint16(db.NetworkSolana),
 			})
 		}
@@ -218,24 +208,22 @@ func solProcessLuloIx(ctx *solContext, ix *db.SolanaInstruction) {
 	newWithdrawEvent := func(owner, method, luloAccountType string, innerIxs *solInnerIxIterator) {
 		if transferIx, ok := innerIxs.nextSafe(); ok &&
 			transferIx.ProgramAddress == SOL_TOKEN_PROGRAM_ADDRESS {
-			ixType, _, ok := solTokenIxFromByte(transferIx.Data[0])
-			if !ok || ixType != solTokenIxTransferChecked {
+			t, ok := solParseTokenIxTokenTransfer(transferIx.Accounts, transferIx.Data)
+			if !ok || t.ix != solTokenIxTransferChecked {
 				return
 			}
 
-			amount, _, to := solParseTokenTransferChecked(
-				transferIx.Accounts,
-				transferIx.Data,
-			)
-
 			_, tokenAccountData, ok := solAccountExactOrError[solTokenAccountData](
-				ctx, to,
+				ctx, t.to,
 			)
 			if !ok {
 				return
 			}
 
-			decimals := solDecimalsMust(ctx, tokenAccountData.Mint)
+			decimals, ok := solDecimals(ctx, tokenAccountData.Mint)
+			if !ok {
+				return
+			}
 
 			event := solNewEvent(ctx, app, method, db.EventTypeTransfer)
 			event.Transfers = append(event.Transfers, &db.EventTransfer{
@@ -243,9 +231,9 @@ func solProcessLuloIx(ctx *solContext, ix *db.SolanaInstruction) {
 				FromWallet:  owner,
 				FromAccount: fmt.Sprintf("%s:lulo:%s", owner, luloAccountType),
 				ToWallet:    owner,
-				ToAccount:   to,
+				ToAccount:   t.to,
 				Token:       tokenAccountData.Mint,
-				Amount:      newDecimalFromRawAmount(amount, decimals),
+				Amount:      newDecimalFromRawAmount(t.amount, decimals),
 				TokenSource: uint16(db.NetworkSolana),
 			})
 		}

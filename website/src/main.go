@@ -387,7 +387,9 @@ func main() {
 	htmlPath := os.Getenv("HTML")
 	assert.True(len(htmlPath) > 0, "missing html path")
 
-	coingecko.Init()
+	coingeckoApiKey := os.Getenv("COINGECKO_API_KEY")
+	coingeckoApiType := os.Getenv("COINGECKO_API_TYPE")
+	coingecko.Init(coingeckoApiKey, coingeckoApiType)
 
 	templateFuncs := template.FuncMap{
 		"struct": func(keyvals ...any) map[string]any {

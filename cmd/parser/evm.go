@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"taxee/cmd/fetcher/evm"
@@ -435,6 +437,17 @@ func evmProcessTx(
 	events *[]*db.Event,
 	txData *db.EvmTransactionData,
 ) {
+	defer func() {
+		if cause := recover(); cause != nil {
+			slog.Error(
+				"evm process ix panicked",
+				"txId", ctx.txId,
+				"cause", cause,
+				"stack", string(debug.Stack()),
+			)
+		}
+	}()
+
 	contract, ok := evmFindContract(ctx, txData.To, txData.Block)
 
 	if !ok && txData.Value.GreaterThan(decimal.Zero) {

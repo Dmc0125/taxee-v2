@@ -23,10 +23,12 @@ func solPreprocessAltIx(ctx *solContext, ix *db.SolanaInstruction) {
 		}
 
 		transferIx := ix.InnerInstructions[0]
-		ixType, _, ok := solSystemIxFromData(transferIx.Data)
+		transfer, ok := solParseSystemIxSolTransfer(
+			transferIx.Accounts,
+			transferIx.Data,
+		)
 		if ok {
-			_, to, amount, _ := solParseSystemIxSolTransfer(ixType, transferIx.Accounts, transferIx.Data)
-			ctx.receiveSol(to, amount)
+			ctx.receiveSol(transfer.to, transfer.amount)
 		}
 
 		if disc == 0 {
@@ -64,14 +66,16 @@ func solProcessAltIx(
 	}
 
 	transferIx := ix.InnerInstructions[0]
-	ixType, _, ok := solSystemIxFromData(transferIx.Data)
+	transfer, ok := solParseSystemIxSolTransfer(
+		transferIx.Accounts,
+		transferIx.Data,
+	)
 	if !ok {
 		return
 	}
-	from, to, amount, _ := solParseSystemIxSolTransfer(ixType, transferIx.Accounts, transferIx.Data)
 
-	fromInternal := slices.Contains(ctx.wallets, from)
-	toInternal := ctx.findOwned(ctx.slot, ctx.ixIdx, to) != nil
+	fromInternal := slices.Contains(ctx.wallets, transfer.from)
+	toInternal := ctx.findOwned(ctx.slot, ctx.ixIdx, transfer.to) != nil
 
 	if !fromInternal && !toInternal {
 		return
@@ -85,14 +89,8 @@ func solProcessAltIx(
 	}
 
 	event := solNewEvent(ctx, app, method, db.EventTypeTransfer)
-	event.Transfers = append(event.Transfers, &db.EventTransfer{
-		Direction:   direction,
-		FromWallet:  from,
-		FromAccount: from,
-		ToWallet:    toWallet,
-		ToAccount:   to,
-		Token:       SOL_MINT_ADDRESS,
-		Amount:      newDecimalFromRawAmount(amount, 9),
-		TokenSource: uint16(db.NetworkSolana),
-	})
+	event.Transfers = append(event.Transfers, transfer.intoEventTransfer(
+		transfer.from, toWallet,
+		direction,
+	))
 }

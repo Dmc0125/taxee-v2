@@ -25,31 +25,30 @@ func solProcessDflowIx(ctx *solContext, ix *db.SolanaInstruction) {
 
 		innerIxs := solInnerIxIterator{innerIxs: ix.InnerInstructions}
 		if transferIx, ok := innerIxs.nextSafe(); ok {
-			ixType, _, ok := solTokenIxFromByte(transferIx.Data[0])
-			if !ok || ixType != solTokenIxTransfer {
+			transfer, ok := solParseTokenIxTokenTransfer(transferIx.Accounts, transferIx.Data)
+			if !ok || transfer.ix != solTokenIxTransfer {
 				return
 			}
-			amount, from, _ := solParseTokenTransfer(
-				transferIx.Accounts,
-				transferIx.Data,
-			)
 
 			_, fromAccountData, ok := solAccountExactOrError[solTokenAccountData](
-				ctx, from,
+				ctx, transfer.from,
 			)
 			if !ok {
 				return
 			}
 
-			decimals := solDecimalsMust(ctx, fromAccountData.Mint)
+			decimals, ok := solDecimals(ctx, fromAccountData.Mint)
+			if !ok {
+				return
+			}
 
 			event := solNewEvent(ctx, app, "fee", db.EventTypeTransfer)
 			event.Transfers = append(event.Transfers, &db.EventTransfer{
 				Direction:   db.EventTransferOutgoing,
 				FromWallet:  owner,
-				FromAccount: from,
+				FromAccount: transfer.from,
 				Token:       fromAccountData.Mint,
-				Amount:      newDecimalFromRawAmount(amount, decimals),
+				Amount:      newDecimalFromRawAmount(transfer.amount, decimals),
 				TokenSource: uint16(db.NetworkSolana),
 			})
 		}

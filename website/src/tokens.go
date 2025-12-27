@@ -51,7 +51,7 @@ func tokensHandler(
 			}
 			fetched = append(fetched, coingeckoId)
 
-			metadata, err := coingecko.GetCoinMetadata(coingeckoId)
+			metadata, err := coingecko.GetCoinMetadata(r.Context(), coingeckoId)
 			if err != nil {
 				sendSSEError(w, flusher, coingeckoId)
 				return

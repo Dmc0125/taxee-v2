@@ -147,7 +147,10 @@ func solProcessJupDcaIx(
 			amount := binary.LittleEndian.Uint64(transferIx.Data[1:])
 			from, to, mint := ix.Accounts[5], ix.Accounts[6], ix.Accounts[3]
 
-			decimals := solDecimalsMust(ctx, mint)
+			decimals, ok := solDecimals(ctx, mint)
+			if !ok {
+				return
+			}
 
 			event := solNewEvent(ctx, app, method, db.EventTypeTransfer)
 			event.Transfers = append(event.Transfers, &db.EventTransfer{
@@ -170,23 +173,27 @@ func solProcessJupDcaIx(
 		}
 
 		transferIx := ix.InnerInstructions[0]
-		amount, from, _ := solParseTokenTransfer(
-			transferIx.Accounts,
-			transferIx.Data,
-		)
+		t, ok := solParseTokenIxTokenTransfer(transferIx.Accounts, transferIx.Data)
+		if !ok || t.ix != solTokenIxTransfer {
+			return
+		}
 
 		_, fromAccountData, ok := solAccountExactOrError[solTokenAccountData](
-			ctx, from,
+			ctx, t.from,
 		)
 		if !ok {
 			return
 		}
 
-		decimals := solDecimalsMust(ctx, fromAccountData.Mint)
+		decimals, ok := ctx.tokensDecimals[fromAccountData.Mint]
+		if !ok {
+			return
+		}
+
 		dcaAccount.Data = &jupDcaAccountData{
 			InputMint:    fromAccountData.Mint,
-			InputAccount: from,
-			Amount:       newDecimalFromRawAmount(amount, decimals),
+			InputAccount: t.from,
+			Amount:       newDecimalFromRawAmount(t.amount, decimals),
 		}
 	// Transfer
 	case [8]uint8{163, 52, 200, 231, 140, 3, 69, 186}:
@@ -205,19 +212,22 @@ func solProcessJupDcaIx(
 		}
 
 		transferIx := ix.InnerInstructions[0]
-		amount, _, to := solParseTokenTransfer(
-			transferIx.Accounts,
-			transferIx.Data,
-		)
+		t, ok := solParseTokenIxTokenTransfer(transferIx.Accounts, transferIx.Data)
+		if !ok || t.ix != solTokenIxTransfer {
+			return
+		}
 
 		_, toAccountData, ok := solAccountExactOrError[solTokenAccountData](
-			ctx, to,
+			ctx, t.to,
 		)
 		if !ok {
 			return
 		}
 
-		decimals := solDecimalsMust(ctx, toAccountData.Mint)
+		decimals, ok := solDecimals(ctx, toAccountData.Mint)
+		if !ok {
+			return
+		}
 		transfers := [2]*db.EventTransfer{
 			{
 				Direction:   db.EventTransferOutgoing,
@@ -230,9 +240,9 @@ func solProcessJupDcaIx(
 			{
 				Direction:   db.EventTransferIncoming,
 				ToWallet:    toAccountData.Owner,
-				ToAccount:   to,
+				ToAccount:   t.to,
 				Token:       toAccountData.Mint,
-				Amount:      newDecimalFromRawAmount(amount, decimals),
+				Amount:      newDecimalFromRawAmount(t.amount, decimals),
 				TokenSource: uint16(db.NetworkSolana),
 			},
 		}

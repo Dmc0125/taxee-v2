@@ -3,6 +3,7 @@ package parser
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"taxee/pkg/assert"
@@ -47,12 +48,14 @@ func solAccountExactOrError[T solAccountData](
 	return account, data, ok
 }
 
-func solDecimalsMust(ctx *solContext, mint string) uint8 {
+func solDecimals(ctx *solContext, mint string) (uint8, bool) {
 	// NOTE: this should **always** be ok, if it is not, RPC api changed and
 	// we want to know that
 	decimals, ok := ctx.tokensDecimals[mint]
-	assert.True(ok, "missing decimals for: %s", mint)
-	return decimals
+	if !ok {
+		slog.Error("missing decimals", "mint", mint, "txId", ctx.txId)
+	}
+	return decimals, ok
 }
 
 func solAnchorDisc(data []byte) (disc [8]byte, ok bool) {
@@ -131,13 +134,13 @@ func solParseCreateAssociatedTokenAccount(
 
 	switch transferIx.ProgramAddress {
 	case SOL_SYSTEM_PROGRAM_ADDRESS:
-		ixType, _, ok := solSystemIxFromData(transferIx.Data)
+		transfer, ok := solParseSystemIxSolTransfer(transferIx.Accounts, transferIx.Data)
 		if !ok {
-			// err
 			return
 		}
+		payer, tokenAccount, amount = transfer.from, transfer.to, transfer.amount
 
-		switch ixType {
+		switch transfer.ix {
 		case solSystemIxCreate:
 		case solSystemIxTransfer:
 			// skip allocate and assign
@@ -152,15 +155,6 @@ func solParseCreateAssociatedTokenAccount(
 			return
 		}
 
-		payer, tokenAccount, amount, ok = solParseSystemIxSolTransfer(
-			ixType,
-			transferIx.Accounts,
-			transferIx.Data,
-		)
-		if !ok {
-			// error
-			return
-		}
 	default:
 		// skip allocate and assign
 		_, ok1 := innerIxs.nextSafe()
@@ -204,13 +198,14 @@ func solAnchorInitAccountValidate(
 		return
 	}
 
-	ixType, _, ok := solSystemIxFromData(firstIx.Data)
+	transfer, ok := solParseSystemIxSolTransfer(firstIx.Accounts, firstIx.Data)
 	if !ok {
 		err = fmt.Errorf("invalid anchor init ix: %#v", *firstIx)
 		return
 	}
+	from, to, amount = transfer.from, transfer.to, transfer.amount
 
-	switch ixType {
+	switch transfer.ix {
 	case solSystemIxCreate:
 	case solSystemIxTransfer:
 		// NOTE: skip over allocate and assign
@@ -221,15 +216,8 @@ func solAnchorInitAccountValidate(
 			return
 		}
 	default:
-		assert.True(false, "invalid anchor init ix: %d", ixType)
+		assert.True(false, "invalid anchor init ix: %d", transfer.ix)
 	}
-
-	from, to, amount, ok = solParseSystemIxSolTransfer(
-		ixType,
-		firstIx.Accounts,
-		firstIx.Data,
-	)
-	assert.True(ok, "invalid anchor init ix")
 
 	return
 }
@@ -333,45 +321,37 @@ func solParseTransfers(
 	for _, innerIx := range innerIxs {
 		switch innerIx.ProgramAddress {
 		case SOL_TOKEN_PROGRAM_ADDRESS, SOL_TOKEN2022_PROGRAM_ADDRESS:
-			ixType, _, ok := solTokenIxFromByte(innerIx.Data[0])
-			if !ok {
+			t, ok := solParseTokenIxTokenTransfer(innerIx.Accounts, innerIx.Data)
+			if !ok || !t.ix.economic() {
 				continue
 			}
 
-			var amount uint64
-			var from, to, mint string
-
-			switch ixType {
-			case solTokenIxMint, solTokenIxMintChecked:
-				amount, to, mint = solParseTokenMint(innerIx.Accounts, innerIx.Data)
-			case solTokenIxBurn, solTokenIxBurnChecked:
-				amount, from, mint = solParseTokenBurn(innerIx.Accounts, innerIx.Data)
-			case solTokenIxTransfer:
-				amount, from, to = solParseTokenTransfer(innerIx.Accounts, innerIx.Data)
-			case solTokenIxTransferChecked:
-				amount, from, to = solParseTokenTransferChecked(innerIx.Accounts, innerIx.Data)
-			default:
-				continue
-			}
-
-			if from != "" {
-				if validMint, w, ok := getTokenAccount(from, mint); ok {
+			if t.from != "" {
+				if validMint, w, ok := getTokenAccount(t.from, t.mint); ok {
 					wallet = w
-					decimals := solDecimalsMust(ctx, validMint)
+					decimals, ok := solDecimals(ctx, validMint)
+					if !ok {
+						// TODO: return ?
+						continue
+					}
 					amounts[validMint] = amounts[validMint].Sub(
-						newDecimalFromRawAmount(amount, decimals),
+						newDecimalFromRawAmount(t.amount, decimals),
 					)
-					tokenAccounts[validMint] = from
+					tokenAccounts[validMint] = t.from
 				}
 			}
-			if to != "" {
-				if validMint, w, ok := getTokenAccount(to, mint); ok {
+			if t.to != "" {
+				if validMint, w, ok := getTokenAccount(t.to, t.mint); ok {
 					wallet = w
-					decimals := solDecimalsMust(ctx, validMint)
+					decimals, ok := solDecimals(ctx, validMint)
+					if !ok {
+						// TODO: return ?
+						continue
+					}
 					amounts[validMint] = amounts[validMint].Add(
-						newDecimalFromRawAmount(amount, decimals),
+						newDecimalFromRawAmount(t.amount, decimals),
 					)
-					tokenAccounts[validMint] = to
+					tokenAccounts[validMint] = t.to
 				}
 			}
 		}
@@ -454,29 +434,19 @@ func solNewLendingStakeEvent(
 		return
 	}
 
-	var amount uint64
-	var tokenAccountAddress, fromAccount, toAccount string
+	t, ok := solParseTokenIxTokenTransfer(transferIx.Accounts, transferIx.Data)
+	if !ok || (t.ix != solTokenIxTransfer && t.ix != solTokenIxTransferChecked) {
+		return
+	}
+
+	fromAccount, toAccount := t.from, t.to
+	var tokenAccountAddress string
 	// NOTE: needs to be done because lending/staking is adding to the balance
 	// which we can not really track, if it were not stored on a separate account
 	// when withdrawal with interest happens, the "real" SOL balance needed for
 	// creating the account would be subtracted too, leaving and empty program
 	// account, even though it's not really empty
 	userAddress = fmt.Sprintf("%s:program_account", userAddress)
-
-	ixType, _, _ := solTokenIxFromByte(transferIx.Data[0])
-	switch ixType {
-	case solTokenIxTransfer:
-		amount, fromAccount, toAccount = solParseTokenTransfer(
-			transferIx.Accounts, transferIx.Data,
-		)
-	case solTokenIxTransferChecked:
-		amount, fromAccount, toAccount = solParseTokenTransferChecked(
-			transferIx.Accounts, transferIx.Data,
-		)
-	default:
-		// TODO: error ??
-		return
-	}
 
 	switch direction {
 	// deposit
@@ -496,7 +466,10 @@ func solNewLendingStakeEvent(
 		return
 	}
 
-	decimals := solDecimalsMust(ctx, tokenAccount.Mint)
+	decimals, ok := solDecimals(ctx, tokenAccount.Mint)
+	if !ok {
+		return
+	}
 
 	event := solNewEvent(ctx, app, method, db.EventTypeTransfer)
 	event.Transfers = append(event.Transfers, &db.EventTransfer{
@@ -506,7 +479,7 @@ func solNewLendingStakeEvent(
 		ToWallet:    owner,
 		ToAccount:   toAccount,
 		Token:       tokenAccount.Mint,
-		Amount:      newDecimalFromRawAmount(amount, decimals),
+		Amount:      newDecimalFromRawAmount(t.amount, decimals),
 		TokenSource: uint16(db.NetworkSolana),
 	})
 }
@@ -522,33 +495,22 @@ func solNewLendingBorrowRepayEvent(
 		return
 	}
 
-	var amount uint64
-	var fromWallet, toWallet, fromAccount, toAccount, userAccountAdress string
-
-	ixType, _, _ := solTokenIxFromByte(transferIx.Data[0])
-	switch ixType {
-	case solTokenIxTransfer:
-		amount, fromAccount, toAccount = solParseTokenTransfer(
-			transferIx.Accounts, transferIx.Data,
-		)
-	case solTokenIxTransferChecked:
-		amount, fromAccount, toAccount = solParseTokenTransferChecked(
-			transferIx.Accounts, transferIx.Data,
-		)
-	default:
-		// TODO: error ??
+	t, ok := solParseTokenIxTokenTransfer(transferIx.Accounts, transferIx.Data)
+	if !ok || (t.ix != solTokenIxTransfer && t.ix != solTokenIxTransferChecked) {
 		return
 	}
+
+	var toWallet, fromWallet, userAccountAdress string
 
 	switch direction {
 	// incoming
 	case db.EventTransferIncoming:
 		toWallet = owner
-		userAccountAdress = toAccount
+		userAccountAdress = t.to
 	// outgoing
 	case db.EventTransferOutgoing:
 		fromWallet = owner
-		userAccountAdress = fromAccount
+		userAccountAdress = t.from
 	}
 
 	_, account, ok := solAccountExactOrError[solTokenAccountData](
@@ -558,17 +520,20 @@ func solNewLendingBorrowRepayEvent(
 		return
 	}
 
-	decimals := solDecimalsMust(ctx, account.Mint)
+	decimals, ok := solDecimals(ctx, account.Mint)
+	if !ok {
+		return
+	}
 
 	event := solNewEvent(ctx, app, method, db.EventTypeBorrowRepay)
 	event.Transfers = append(event.Transfers, &db.EventTransfer{
 		Direction:   direction,
 		FromWallet:  fromWallet,
-		FromAccount: fromAccount,
+		FromAccount: t.from,
 		ToWallet:    toWallet,
-		ToAccount:   toAccount,
+		ToAccount:   t.to,
 		Token:       account.Mint,
-		Amount:      newDecimalFromRawAmount(amount, decimals),
+		Amount:      newDecimalFromRawAmount(t.amount, decimals),
 		TokenSource: uint16(db.NetworkSolana),
 	})
 }

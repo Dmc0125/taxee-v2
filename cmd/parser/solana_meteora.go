@@ -96,7 +96,10 @@ func solMeteoraFarmsNewStakingEvent(
 
 	transferIx := ix.InnerInstructions[0]
 	amount := binary.LittleEndian.Uint64(transferIx.Data[1:])
-	decimals := solDecimalsMust(ctx, tokenAccountData.Mint)
+	decimals, ok := solDecimals(ctx, tokenAccountData.Mint)
+	if !ok {
+		return
+	}
 
 	var method, fromAccount, toAccount string
 	if stake {
@@ -165,31 +168,34 @@ func solProcessMeteoraFarmsIx(
 			return
 		}
 		transferIx := ix.InnerInstructions[0]
-		amount, _, to := solParseTokenTransfer(
-			transferIx.Accounts,
-			transferIx.Data,
-		)
+		t, ok := solParseTokenIxTokenTransfer(transferIx.Accounts, transferIx.Data)
+		if !ok || t.ix != solTokenIxTransfer {
+			return
+		}
 
-		toAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, to)
+		toAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, t.to)
 		if toAccount == nil {
 			return
 		}
 		toAccountData, ok := solAccountDataMust[solTokenAccountData](
-			ctx, toAccount, to,
+			ctx, toAccount, t.to,
 		)
 		if !ok {
 			return
 		}
 
-		decimals := solDecimalsMust(ctx, toAccountData.Mint)
+		decimals, ok := solDecimals(ctx, toAccountData.Mint)
+		if !ok {
+			return
+		}
 
 		event := solNewEvent(ctx, app, "claim", db.EventTypeTransfer)
 		event.Transfers = append(event.Transfers, &db.EventTransfer{
 			Direction:   db.EventTransferIncoming,
 			ToWallet:    toAccountData.Owner,
-			ToAccount:   to,
+			ToAccount:   t.to,
 			Token:       toAccountData.Mint,
-			Amount:      newDecimalFromRawAmount(amount, decimals),
+			Amount:      newDecimalFromRawAmount(t.amount, decimals),
 			TokenSource: uint16(db.NetworkSolana),
 		})
 	}

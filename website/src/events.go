@@ -226,6 +226,8 @@ func (c *cmpEvent) appendTransfers(
 			transferComponent.MissingAmount = t.MissingAmount
 		}
 	}
+
+	fmt.Println(*transferComponent)
 }
 
 type cmpEventsPage struct {
@@ -309,14 +311,28 @@ func eventsGetHandler(
 	default:
 		// transactions are parsed, events exist, but are not parsed
 		const selectInternalTxs = `
+			with page_itx as (
+				select 
+					*,
+					itx.position = max (itx.position) over () as is_last
+				from
+					internal_tx itx
+				where
+					itx.user_account_id = $1 and
+					itx.position > $2
+				order by
+					position asc
+				limit 
+					$3	
+			)
 			select
 				itx.tx_id,
 				itx.network,
 				itx.timestamp,
-				itx.position = max (itx.position) over (),
+				itx.is_last,
 				coalesce(events.events, '[]'::json)
 			from
-				internal_tx itx
+				page_itx itx
 			left join lateral (
 				select json_agg(json_build_object(
 					'App', e.app,
@@ -358,13 +374,8 @@ func eventsGetHandler(
 				where 
 					e.internal_tx_id = itx.id
 			) events on true
-			where
-				itx.user_account_id = $1 and
-				itx.position > $2
 			order by
-				position asc
-			limit 
-				$3
+				itx.position asc
 		`
 		const limit = 20
 		startPosition := limit * page
@@ -424,6 +435,7 @@ func eventsGetHandler(
 				eventsComponents = append(eventsComponents, cmp)
 			}
 
+			fmt.Println(txId)
 			for i, e := range events {
 				eventComponent := &cmpEvent{
 					ShowGroupHeader: i == 0,
@@ -437,11 +449,13 @@ func eventsGetHandler(
 
 				switch {
 				case e.Type < db.EventTypeSwap:
-					transfer := e.Transfers[0]
-					eventComponent.appendTransfers(transfer, walletsLabels, network, tokensBatch)
-					eventComponent.Profit = &cmpEventProfit{
-						Value:    transfer.Profit,
-						Currency: "eur",
+					if len(e.Transfers) > 0 {
+						transfer := e.Transfers[0]
+						eventComponent.appendTransfers(transfer, walletsLabels, network, tokensBatch)
+						eventComponent.Profit = &cmpEventProfit{
+							Value:    transfer.Profit,
+							Currency: "eur",
+						}
 					}
 				default:
 					profitSum := decimal.Zero
@@ -468,10 +482,10 @@ func eventsGetHandler(
 			Events: eventsComponents,
 			UiPage: page,
 		}
-		if page > 0 {
+		if page > 0 && len(eventsComponents) > 0 {
 			eventsPage.PrevUrl = fmt.Sprintf("/events?page=%d", page-1)
 		}
-		if !isLast {
+		if !isLast && len(eventsComponents) > 0 {
 			eventsPage.NextUrl = fmt.Sprintf("/events?page=%d", page+1)
 		}
 

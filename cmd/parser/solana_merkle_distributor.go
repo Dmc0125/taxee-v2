@@ -40,22 +40,28 @@ func solProcessMerkleDistributorIx(
 
 		// ix 2 -> claim
 		claimIx := innerIxsIter.next()
-		amount, _, to := solParseTokenTransfer(claimIx.Accounts, claimIx.Data)
+		t, ok := solParseTokenIxTokenTransfer(claimIx.Accounts, claimIx.Data)
+		if !ok || t.ix != solTokenIxTransfer {
+			return
+		}
 
-		_, toAccountData, ok := solAccountExactOrError[solTokenAccountData](ctx, to)
+		_, toAccountData, ok := solAccountExactOrError[solTokenAccountData](ctx, t.to)
 		if !ok {
 			return
 		}
 
-		decimals := solDecimalsMust(ctx, toAccountData.Mint)
+		decimals, ok := solDecimals(ctx, toAccountData.Mint)
+		if !ok {
+			return
+		}
 
 		claimEvent := solNewEvent(ctx, app, "claim", db.EventTypeTransfer)
 		claimEvent.Transfers = append(claimEvent.Transfers, &db.EventTransfer{
 			Direction:   0,
 			ToWallet:    claimant,
-			ToAccount:   to,
+			ToAccount:   t.to,
 			Token:       toAccountData.Mint,
-			Amount:      newDecimalFromRawAmount(amount, decimals),
+			Amount:      newDecimalFromRawAmount(t.amount, decimals),
 			TokenSource: uint16(db.NetworkSolana),
 		})
 	}

@@ -261,7 +261,7 @@ func CallBatch(ctx context.Context, batch *Batch) error {
 	}
 
 	slices.SortFunc(responses, func(r1, r2 *response) int {
-		return int(r1.Id - r2.Id)
+		return int(r1.Id) - int(r2.Id)
 	})
 
 	for _, response := range responses {

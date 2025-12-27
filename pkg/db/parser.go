@@ -41,12 +41,7 @@ import (
 const GetPricepointByNetworkAndTokenAddress string = `
 	select
 		ct.coingecko_id,
-		(
-			case
-				when pp.coingecko_id is not null then pp.price
-				else ''
-			end
-		) as price,
+		pp.price,
 		(
 			case
 				when mp.coingecko_id is not null then true
@@ -98,12 +93,7 @@ const GetPricepointByNetworkAndTokenAddress string = `
 const GetPricepointByCoingeckoId string = `
 	select 
 		ct.coingecko_id,
-		(
-			case
-				when pp.coingecko_id is not null then pp.price
-				else ''
-			end
-		) as price,
+		pp.price,
 		(
 			case
 				when mp.coingecko_id is not null then true

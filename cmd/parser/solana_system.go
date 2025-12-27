@@ -19,91 +19,93 @@ const (
 	solSystemIxTransferWithSeed solSystemIx = 11
 )
 
-func solSystemIxFromData(data []byte) (ix solSystemIx, method string, ok bool) {
+type solSystemTransfer struct {
+	ix     solSystemIx
+	method string
+	from   string
+	to     string
+	amount uint64
+}
+
+func (t *solSystemTransfer) intoEventTransfer(
+	fromWallet, toWallet string,
+	direction db.EventTransferDirection,
+) *db.EventTransfer {
+	return &db.EventTransfer{
+		Direction:   direction,
+		FromWallet:  fromWallet,
+		FromAccount: t.from,
+		ToWallet:    toWallet,
+		ToAccount:   t.to,
+		Token:       SOL_MINT_ADDRESS,
+		Amount:      newDecimalFromRawAmount(t.amount, 9),
+		TokenSource: uint16(db.NetworkSolana),
+	}
+}
+
+func solParseSystemIxSolTransfer(
+	accounts []string,
+	data []byte,
+) (t *solSystemTransfer, ok bool) {
 	if len(data) < 4 {
 		return
 	}
 
-	disc := binary.LittleEndian.Uint32(data)
+	t = new(solSystemTransfer)
+
+	t.ix = solSystemIx(binary.LittleEndian.Uint32(data))
 	ok = true
 
-	switch solSystemIx(disc) {
+	switch t.ix {
 	case solSystemIxCreate:
-		ix, method = solSystemIxCreate, "create_account"
+		t.method = "create_account"
+		t.from, t.to = accounts[0], accounts[1]
+		t.amount = binary.LittleEndian.Uint64(data[4:])
 	case solSystemIxTransfer:
-		ix, method = solSystemIxTransfer, "transfer"
-	case solSystemIxCreateWithSeed:
-		ix, method = solSystemIxCreateWithSeed, "create_account"
+		t.method = "transfer"
+		t.from, t.to = accounts[0], accounts[1]
+		t.amount = binary.LittleEndian.Uint64(data[4:])
 	case solSystemIxTransferWithSeed:
-		ix, method = solSystemIxTransferWithSeed, "transfer"
-	default:
-		ok = false
-		return
-	}
-
-	return
-}
-
-func solParseSystemIxSolTransfer(
-	ixType solSystemIx,
-	accounts []string,
-	data []byte,
-) (from, to string, amount uint64, ok bool) {
-	ok = true
-	switch ixType {
-	case solSystemIxCreate, solSystemIxTransfer:
-		from, to = accounts[0], accounts[1]
-		amount = binary.LittleEndian.Uint64(data[4:])
-	case solSystemIxTransferWithSeed:
-		from, to = accounts[0], accounts[2]
-		amount = binary.LittleEndian.Uint64(data[4:])
+		t.method = "transfer"
+		t.from, t.to = accounts[0], accounts[2]
+		t.amount = binary.LittleEndian.Uint64(data[4:])
 	case solSystemIxCreateWithSeed:
-		from, to = accounts[0], accounts[1]
+		t.method = "create_account"
+		t.from, t.to = accounts[0], accounts[1]
 
 		// amount offset -> 4 (disc) + 32 (base address) + 4 (seed len) +  seed len * u8
 		seedLen := binary.LittleEndian.Uint64(data[36:])
 		offset := 44 + seedLen
-		amount = binary.LittleEndian.Uint64(data[offset:])
+		t.amount = binary.LittleEndian.Uint64(data[offset:])
 	default:
-		// TODO: swap to assert
 		ok = false
 	}
 	return
 }
 
 func solPreprocessSystemIx(ctx *solContext, ix *db.SolanaInstruction) {
-	ixType, _, ok := solSystemIxFromData(ix.Data)
+	transfer, ok := solParseSystemIxSolTransfer(ix.Accounts, ix.Data)
 	if !ok {
 		return
 	}
 
-	_, to, amount, ok := solParseSystemIxSolTransfer(ixType, ix.Accounts, ix.Data)
-	if !ok {
-		return
-	}
-
-	ctx.receiveSol(to, amount)
+	ctx.receiveSol(transfer.to, transfer.amount)
 }
 
 func solProcessSystemIx(
 	ctx *solContext,
 	ix *db.SolanaInstruction,
 ) {
-	ixType, method, ok := solSystemIxFromData(ix.Data)
-	if !ok {
+	t, ok := solParseSystemIxSolTransfer(ix.Accounts, ix.Data)
+	if !ok || t.amount == 0 {
 		return
 	}
 
-	from, to, amount, ok := solParseSystemIxSolTransfer(ixType, ix.Accounts, ix.Data)
-	if !ok || amount == 0 {
-		return
-	}
+	fromInternal := ctx.walletOwned(t.from)
+	toInternalWallet := ctx.walletOwned(t.to)
+	toAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, t.to)
 
-	fromInternal := ctx.walletOwned(from)
-	toInternalWallet := ctx.walletOwned(to)
-	toAccount := ctx.findOwned(ctx.slot, ctx.ixIdx, to)
-
-	toWallet, toInternal := to, toInternalWallet
+	toWallet, toInternal := t.to, toInternalWallet
 	if toAccount != nil {
 		toInternal = true
 		switch data := toAccount.Data.(type) {
@@ -116,15 +118,9 @@ func solProcessSystemIx(
 		return
 	}
 
-	event := solNewEvent(ctx, "system", method, db.EventTypeTransfer)
-	event.Transfers = append(event.Transfers, &db.EventTransfer{
-		Direction:   getTransferEventDirection(fromInternal, toInternal),
-		FromWallet:  from,
-		ToWallet:    toWallet,
-		FromAccount: from,
-		ToAccount:   to,
-		Token:       SOL_MINT_ADDRESS,
-		Amount:      newDecimalFromRawAmount(amount, 9),
-		TokenSource: uint16(db.NetworkSolana),
-	})
+	event := solNewEvent(ctx, "system", t.method, db.EventTypeTransfer)
+	event.Transfers = append(event.Transfers, t.intoEventTransfer(
+		t.from, toWallet,
+		getTransferEventDirection(fromInternal, toInternal),
+	))
 }
